@@ -85,6 +85,20 @@ UI is intentionally **minimal** (light / white) for the PoC; refine typography a
 
 Add a **short screen recording** (phone + display in frame): connect BLE, start playback, show art updating. Link the video in this README or your portfolio when ready.
 
+## GitHub (push and clone)
+
+1. Create a **new empty repository** on GitHub (no README/license there if you already have them here—or merge on first pull).
+2. On this machine, in the project folder:
+
+```bash
+git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
+git push -u origin main
+```
+
+3. On **MacinCloud** (or any Mac): `git clone https://github.com/YOUR_USER/YOUR_REPO.git` then open `SpotifyDisplay.swiftpm` in Xcode.
+
+After local changes: `git add -A`, `git commit -m "…"`, `git push`. Elsewhere: `git pull`.
+
 ## License
 
 [MIT](LICENSE) — Spotify and other trademarks belong to their owners; this project is not affiliated with Spotify.
