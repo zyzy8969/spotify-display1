@@ -18,9 +18,14 @@ ENV/
 dist/
 build/
 
-# Environment variables - DO NOT COMMIT
-python/.env
+# Environment variables & API keys — NEVER commit (GitHub-safe)
 .env
+**/.env
+.env.local
+.env.*.local
+python/.env
+*.pem
+secrets.json
 
 # IDE
 .vscode/settings.json

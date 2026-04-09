@@ -87,6 +87,8 @@ Add a **short screen recording** (phone + display in frame): connect BLE, start 
 
 ## GitHub (push and clone)
 
+**Do not commit Spotify credentials.** Use only [`python/env.example`](python/env.example) in git; keep real values in `python/.env` on your machine (gitignored). The iOS app stores **Client ID** and tokens on-device, not in the repo. If any secret was ever committed, remove it from git history and **rotate** the key in the [Spotify Dashboard](https://developer.spotify.com/dashboard).
+
 1. Create a **new empty repository** on GitHub (no README/license there if you already have them here—or merge on first pull).
 2. On this machine, in the project folder:
 
