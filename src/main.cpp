@@ -122,6 +122,7 @@ bool saveToCache(uint8_t* cacheKey);
 void printRainbowText(String text, int x, int y, int textSize);
 void applyFloydSteinbergDithering(uint16_t* buffer, int width, int height);
 void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor);
+void drawZoomBlocks(uint16_t* buffer, int width, int height);
 
 // BLE work flags (set by callbacks, processed in loop())
 // CRITICAL: Callbacks must be lightweight to prevent BTC_TASK stack overflow
@@ -708,19 +709,17 @@ void drawVerticalSplit(uint16_t* buffer, int width, int height) {
 }
 
 void drawBarnDoors(uint16_t* buffer, int width, int height) {
-  int centerY = height / 2;
-
-  for (int offset = 0; offset <= centerY; offset += 3) {
-    int topY = centerY - offset;
-    if (topY >= 0) {
-      gfx->draw16bitRGBBitmap(0, topY, buffer + (topY * width), width, min(3, centerY - topY + 1));
+  // Barn doors: reveal from top and bottom edges inward, meeting at center
+  int halfH = height / 2;
+  for (int offset = 0; offset < halfH; offset += 3) {
+    // Top: draw rows advancing downward from the top edge
+    for (int row = offset; row < min(offset + 3, halfH); row++) {
+      gfx->draw16bitRGBBitmap(0, row, buffer + (row * width), width, 1);
     }
-
-    int bottomY = centerY + offset;
-    if (bottomY < height) {
-      gfx->draw16bitRGBBitmap(0, bottomY, buffer + (bottomY * width), width, min(3, height - bottomY));
+    // Bottom: draw rows advancing upward from the bottom edge
+    for (int row = height - 1 - offset; row >= max(height - offset - 3, halfH); row--) {
+      gfx->draw16bitRGBBitmap(0, row, buffer + (row * width), width, 1);
     }
-
     delayMicroseconds(12500);  // ~1 second total animation
   }
 }
@@ -765,6 +764,31 @@ void drawRandomBlocks(uint16_t* buffer, int width, int height) {
   }
 
   free(blockOrder);
+}
+
+void drawZoomBlocks(uint16_t* buffer, int width, int height) {
+  // Expand 16x16 blocks outward from center using Chebyshev distance
+  const int blockSize = 16;
+  int centerX = width / 2;
+  int centerY = height / 2;
+  int maxDist = max(centerX, centerY) + blockSize;
+
+  for (int dist = 0; dist <= maxDist; dist += blockSize) {
+    for (int by = 0; by < height; by += blockSize) {
+      for (int bx = 0; bx < width; bx += blockSize) {
+        int dx = abs((bx + blockSize / 2) - centerX);
+        int dy = abs((by + blockSize / 2) - centerY);
+        int blockDist = max(dx, dy);  // Chebyshev: square expansion from center
+        if (blockDist >= dist && blockDist < dist + blockSize) {
+          for (int row = by; row < by + blockSize && row < height; row++) {
+            gfx->draw16bitRGBBitmap(bx, row, buffer + (row * width + bx),
+                                     min(blockSize, width - bx), 1);
+          }
+        }
+      }
+    }
+    delay(20);
+  }
 }
 
 void drawZigzagSnake(uint16_t* buffer, int width, int height) {
@@ -876,8 +900,7 @@ String drawImageWithRandomTransition(uint16_t* buffer, int width, int height) {
       drawCurtainOpen(buffer, width, height);
       break;
     case TRANSITION_ZOOM_BLOCKS:
-      // Zoom blocks removed - fallback to wipe up
-      drawWipeBottomToTop(buffer, width, height);
+      drawZoomBlocks(buffer, width, height);
       break;
     case TRANSITION_HORIZONTAL_SPLIT:
       drawHorizontalSplit(buffer, width, height);
@@ -1135,8 +1158,8 @@ void setup() {
   gfx->setCursor(75, 100);  // Centered vertically
 
   // Fade in from light gray to black
-  for(int brightness = 255; brightness >= 0; brightness -= 15) {
-    uint16_t color = RGB565(brightness, brightness, brightness);
+  for(int fadeVal = 255; fadeVal >= 0; fadeVal -= 15) {
+    uint16_t color = RGB565(fadeVal, fadeVal, fadeVal);
     gfx->setTextColor(color, WHITE);  // Text color with background to overwrite previous
     gfx->setCursor(75, 100);
     gfx->print("Hiii");
