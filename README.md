@@ -1,107 +1,77 @@
 # Spotify Display
 
-Monorepo **`spotify-display1`**: phone and desktop tools send **Spotify album art** to a custom **ESP32** device over **BLE**; firmware dithers to RGB565 and drives a **240×240** LCD. **Proof-of-concept** stack: **Swift / Python**, **Spotify Web API**, **embedded C++**, and a versioned **BLE** contract in [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md).
+An **ESP32-S3** pulls **Spotify album art** from an **iOS app** over **BLE** and renders it on a **240×240 ST7789 LCD**. Images are color-graded, dithered to RGB565, cached to SD card, and revealed with one of 16 animated transitions.
 
-```mermaid
-flowchart LR
-  subgraph phone [Phone or PC]
-    App[iOS app or Python]
-  end
-  subgraph cloud [Spotify]
-    API[Web API]
-  end
-  subgraph device [Hardware]
-    ESP[ESP32 firmware]
-    LCD[240x240 LCD]
-  end
-  API -->|metadata and art URL| App
-  App -->|BLE GATT| ESP
-  ESP --> LCD
-```
+---
 
-## Stack
+## What works right now
 
-| Part | Tech |
+- iOS app polls Spotify every ~1 s, detects track changes, downloads album art
+- Art is processed on-device (color grade + Floyd-Steinberg dither — move to iOS is on the roadmap)
+- BLE transfer uses Write Without Response (fast path) — ~0.5–1 s per image
+- ESP32 checks SD cache first (MD5 of image URL); cached songs show a random transition, new songs draw top-to-bottom progressively so you can tell a new track is arriving
+- SD card holds up to ~32 GB of cached images
+- 16 transition effects implemented on ESP32
+
+## Recent changes (Apr 2026)
+
+- Added `PROPERTY_WRITE_NR` to image BLE characteristic → unlocks iOS fast path (confirmed faster on device)
+- Extracted `decodeLE32()` helper (3 call sites)
+- Extracted `drawBlockRows()` helper (removes duplication)
+- Fixed `drawBarnDoors` (was identical to `drawHorizontalSplit` — now edges-to-center reveal)
+- Implemented `drawZoomBlocks` with Chebyshev distance block expansion
+- Fixed `brightness` loop variable shadowing global
+- Rewrote `TODO_SWIFT.md` — clean 17-item roadmap, ordered by impact
+
+## Active codebase
+
+| Path | Role |
 |------|------|
-| Firmware | PlatformIO, Arduino, ESP32-S3, ST7789-class display |
-| Desktop | Python 3, Bleak, Spotipy, ImageMagick (Wand) |
-| Mobile | SwiftPM executable, SwiftUI, CoreBluetooth, Spotify OAuth (PKCE-style flow in app) |
+| [`src/main.cpp`](src/main.cpp) | ESP32-S3 firmware — BLE GATT server, SD cache, dithering, 16 transitions |
+| [`platformio.ini`](platformio.ini) | PlatformIO build config (ESP32-S3 devkit) |
+| [`ios/SpotifyDisplay.xcodeproj`](ios/) | **Open in Xcode to build and run the iOS app** |
+| [`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/`](SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/) | Swift source files (BLEManager, ContentView, SpotifyManager, ImageProcessor, etc.) — compiled by the xcodeproj above |
+| [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md) | GATT UUIDs, packet formats, image layout — contract between firmware and app |
+| [`TODO_SWIFT.md`](TODO_SWIFT.md) | **Polishing roadmap — start here for what's next** |
+| [`resources/`](resources/) | ST7789 gamma reference notes |
 
-## Repository layout (`spotify-display1`)
+## Roadmap
 
-| Path | Purpose |
-|------|---------|
-| [`src/main.cpp`](src/main.cpp) | ESP32 firmware (display, SD cache, BLE server) |
-| [`platformio.ini`](platformio.ini) | PlatformIO board env, flash/monitor ports |
-| [`python/spotify_album_sender.py`](python/spotify_album_sender.py) | Desktop BLE + Spotify sender |
-| [`python/`](python/) | Other helpers (`color_test.py`, `web_color_tuner.py`, `live_color_editor.py`, `list_ports.py`, …) — experimental / tuning |
-| [`python/requirements.txt`](python/requirements.txt) | Python dependencies |
-| [`python/env.example`](python/env.example) | Template for `python/.env` (copy locally; gitignored) |
-| [`SpotifyDisplay.swiftpm/`](SpotifyDisplay.swiftpm/) | iOS app sources (SwiftPM); see [`SpotifyDisplay.swiftpm/README.md`](SpotifyDisplay.swiftpm/README.md) |
-| [`ios/`](ios/) | **Xcode `.xcodeproj`** for the same app (recommended for Xcode users); see [`ios/README.md`](ios/README.md) |
-| [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md) | GATT UUIDs, packet formats, image layout — **single contract** for firmware / Python / iOS |
-| [`resources/`](resources/) | Hardware / gamma notes (Waveshare ST7789, etc.) |
-| [`LICENSE`](LICENSE) | MIT |
-| [`.gitignore`](.gitignore) | Ignores `.pio/`, `venv/`, `.env`, Xcode user data |
-| [`.cursor/plans/`](.cursor/plans/) | Local planning notes (optional to publish) |
+See **[`TODO_SWIFT.md`](TODO_SWIFT.md)** — 17 items ordered by impact across Priority 1 (core), Priority 2 (polish/reliability), Priority 3 (nice-to-have), and Future.
 
-## Current limitations
+## Archived dev tools
 
-- **No backend** — tokens and pairing are on-device; not multi-tenant production auth.
-- **BLE UUID** is a common Nordic-style template; peripheral name `Spotify Display` disambiguates in most cases.
-- **Cache key** is MD5 of **image URL**, not Spotify track ID (fine for PoC; awkward for future P2P cache comparison).
-- **Dithering** runs on the ESP32 after the full frame arrives (visible transition); moving dithering to the phone is a planned UX improvement.
-- **Display battery %** over BLE is not implemented (needs ADC / fuel-gauge hardware).
-- **Spotify** [Developer Policy](https://developer.spotify.com/policy) and **App Store** review (Bluetooth, background modes) apply if you ship commercially.
-- **iOS** requires a **physical iPhone** for BLE to the ESP32; Simulator is not enough.
+| Path | What it was |
+|------|-------------|
+| [`python/`](python/) | Original desktop BLE sender + color tuning scripts — used to prototype the system before the iOS app existed. Not the current client. See [`python/README.md`](python/README.md). |
 
 ## Hardware
 
-- ESP32-S3 board configured in [`platformio.ini`](platformio.ini) (adjust `upload_port` / `monitor_port` for your machine).
-- Display wiring and pin definitions live in [`src/main.cpp`](src/main.cpp) (project-specific).
+- Waveshare ESP32-S3 1.69" LCD dev board (ST7789VW, 240×240 IPS)
+- MicroSD card for image cache (~32 GB)
+- Physical iPhone required (BLE does not work on iOS Simulator)
 
-## Firmware
+Pin definitions and wiring in [`src/main.cpp`](src/main.cpp).
+
+## Firmware setup
 
 1. Install [PlatformIO](https://platformio.org/).
-2. Open this project and build/upload: default env `esp32-s3-devkitc-1`.
-3. After changing GATT behavior, bump a note in [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md).
+2. Open this folder; build and upload (`esp32-s3-devkitc-1` env).
+3. Serial monitor at 115200 baud for debug output.
+4. If you change the BLE GATT layout, update [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md).
 
-## Python sender
+## iOS app setup
 
-1. `cd python`
-2. `python -m venv venv` then activate it.
-3. Install deps: `pip install -r requirements.txt` from the `python` folder.
-4. Copy [`python/env.example`](python/env.example) to `python/.env` and fill **SPOTIFY_CLIENT_ID** and **SPOTIFY_CLIENT_SECRET** (never commit `.env`).
+1. Open [`ios/SpotifyDisplay.xcodeproj`](ios/SpotifyDisplay.xcodeproj) in Xcode on a Mac.
+2. Set your **Personal Team** and a unique bundle identifier for signing.
+3. In the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), register redirect URI **`spotifydisplay://callback`**.
+4. Add your **Client ID** to [`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist`](SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist) (key `SpotifyClientID`), or use the in-app override in Settings.
+5. Run on a **physical iPhone** with Bluetooth enabled.
 
-## iOS app
+## Security
 
-1. On a Mac with **Xcode**, open [`ios/SpotifyDisplay.xcodeproj`](ios/SpotifyDisplay.xcodeproj) (recommended), or open [`SpotifyDisplay.swiftpm`](SpotifyDisplay.swiftpm) as a Swift package. Details: [`ios/README.md`](ios/README.md).
-2. Set your **Team** (Personal Team is fine for device installs) and a unique **bundle identifier** for signing.
-3. In [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), add redirect URI **`spotifydisplay://callback`** for your iOS client (PKCE; no client secret in the app). Set **`SpotifyClientID`** in [`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist`](SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist) (or use the optional in-app override in Settings); see [`ios/README.md`](ios/README.md).
-4. Run on a **physical iPhone** with Bluetooth on; power the ESP32 with firmware flashed.
-
-UI is intentionally **minimal** (light / white) for the PoC; refine typography and chrome later.
-
-## Recruiter demo
-
-Add a **short screen recording** (phone + display in frame): connect BLE, start playback, show art updating. Link the video in this README or your portfolio when ready.
-
-## GitHub (push and clone)
-
-**Do not commit Spotify credentials.** Use only [`python/env.example`](python/env.example) in git; keep real values in `python/.env` on your machine (gitignored). The iOS app stores **Client ID** and tokens on-device, not in the repo. If any secret was ever committed, remove it from git history and **rotate** the key in the [Spotify Dashboard](https://developer.spotify.com/dashboard).
-
-1. Create a **new empty repository** on GitHub (no README/license there if you already have them here—or merge on first pull).
-2. On this machine, in the project folder:
-
-```bash
-git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
-git push -u origin main
-```
-
-3. On **MacinCloud** (or any Mac): `git clone https://github.com/YOUR_USER/YOUR_REPO.git` then open `SpotifyDisplay.swiftpm` in Xcode.
-
-After local changes: `git add -A`, `git commit -m "…"`, `git push`. Elsewhere: `git pull`.
+`python/.env` is gitignored — use `python/env.example` as the template. Never commit Spotify credentials. The iOS app stores tokens on-device only.
 
 ## License
 
-[MIT](LICENSE) — Spotify and other trademarks belong to their owners; this project is not affiliated with Spotify.
+[MIT](LICENSE) — not affiliated with Spotify AB.
