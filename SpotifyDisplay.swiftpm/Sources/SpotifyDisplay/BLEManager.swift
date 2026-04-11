@@ -28,6 +28,10 @@ final class BLEManager: NSObject, ObservableObject {
     private var sawReady = false
     private var awaitingImageComplete = false
 
+    /// Incremented on `cancelOngoingTransfer()` and `failPending` so in-flight `processTrack` / `sendRGB565` abort cooperatively.
+    private var transferEpoch: UInt64 = 0
+    private var activeDownloadTask: Task<(Data, URLResponse), Error>?
+
     private let serviceUUID = CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB")
     private let statusUUID = CBUUID(string: "0000FFE1-0000-1000-8000-00805F9B34FB")
     private let cacheUUID = CBUUID(string: "0000FFE2-0000-1000-8000-00805F9B34FB")
@@ -70,39 +74,79 @@ final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// Aborts in-flight album download and BLE chunk loop. Next `processTrack` uses a fresh epoch; send a new image header on the next transfer so the ESP32 can resync if the previous send was partial.
+    func cancelOngoingTransfer() {
+        transferEpoch += 1
+        activeDownloadTask?.cancel()
+        activeDownloadTask = nil
+        transferContinuation?.resume(throwing: CancellationError())
+        transferContinuation = nil
+        if isTransferring {
+            isTransferring = false
+            transferProgress = 0
+        }
+    }
+
+    private func ensureTransferEpoch(_ epochAtStart: UInt64) throws {
+        if epochAtStart != transferEpoch {
+            throw CancellationError()
+        }
+    }
+
     /// Parallel download + cache check (like desktop script), then send on miss.
-    func processTrack(imageURL: String) async throws {
+    func processTrack(imageURL: String, trackId _: String) async throws {
+        let epochAtStart = transferEpoch
+        try ensureTransferEpoch(epochAtStart)
+
         guard let u = URL(string: imageURL) else { throw SpotifyDisplayError.conversionFailed }
 
         let download = Task { try await URLSession.shared.data(from: u) }
+        activeDownloadTask = download
 
         let cacheHit: Bool
         do {
             cacheHit = try await checkCacheHit(imageURL: imageURL)
         } catch {
             download.cancel()
+            activeDownloadTask = nil
             throw error
         }
 
+        try ensureTransferEpoch(epochAtStart)
+
         if cacheHit {
             download.cancel()
+            activeDownloadTask = nil
             statusMessage = "Loaded from SD cache"
             return
         }
 
-        let (data, _) = try await download.value
+        let (data, _): (Data, URLResponse)
+        do {
+            (data, _) = try await download.value
+        } catch {
+            activeDownloadTask = nil
+            throw error
+        }
+        activeDownloadTask = nil
+
+        try ensureTransferEpoch(epochAtStart)
+
         currentAlbumArt = data
 
         statusMessage = "Processing image…"
         let rgb565 = try ImageProcessor.convertToRGB565(imageData: data)
+        try ensureTransferEpoch(epochAtStart)
+
         guard rgb565.count == imagePayloadBytes else {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        try await sendRGB565(rgb565)
+        try await sendRGB565(rgb565, epochAtStart: epochAtStart)
     }
 
-    func sendRGB565(_ rgb565: Data) async throws {
+    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64) async throws {
+        try ensureTransferEpoch(epochAtStart)
         try ensureGattReady()
         guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
 
@@ -112,10 +156,14 @@ final class BLEManager: NSObject, ObservableObject {
         transferContinuation?.resume(throwing: CancellationError())
         transferContinuation = nil
 
+        try ensureTransferEpoch(epochAtStart)
+
         var header = Data()
         withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         p.writeValue(header, for: img, type: .withResponse)
         try await Task.sleep(nanoseconds: 5_000_000)
+
+        try ensureTransferEpoch(epochAtStart)
 
         isTransferring = true
         transferProgress = 0
@@ -129,9 +177,11 @@ final class BLEManager: NSObject, ObservableObject {
             : chunkSize
 
         while offset < total {
+            try ensureTransferEpoch(epochAtStart)
             if useWithoutResponse {
                 await awaitWriteWindow(peripheral: p)
             }
+            try ensureTransferEpoch(epochAtStart)
             let end = min(offset + writeChunkSize, total)
             let chunk = rgb565.subdata(in: offset..<end)
             let wtype: CBCharacteristicWriteType = useWithoutResponse ? .withoutResponse : .withResponse
@@ -143,6 +193,8 @@ final class BLEManager: NSObject, ObservableObject {
             }
         }
 
+        try ensureTransferEpoch(epochAtStart)
+
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.transferContinuation = cont
             Task { @MainActor in
@@ -153,6 +205,8 @@ final class BLEManager: NSObject, ObservableObject {
                 }
             }
         }
+
+        try ensureTransferEpoch(epochAtStart)
 
         isTransferring = false
         transferProgress = 0
@@ -201,6 +255,9 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func failPending(error: Error) {
+        transferEpoch += 1
+        activeDownloadTask?.cancel()
+        activeDownloadTask = nil
         readyContinuation?.resume(throwing: error)
         readyContinuation = nil
         cacheContinuation?.resume(throwing: error)
@@ -211,6 +268,10 @@ final class BLEManager: NSObject, ObservableObject {
         statsContinuation = nil
         writeDrainContinuation?.resume()
         writeDrainContinuation = nil
+        if isTransferring {
+            isTransferring = false
+            transferProgress = 0
+        }
     }
 
     private func awaitWriteWindow(peripheral: CBPeripheral) async {
@@ -394,7 +455,7 @@ extension BLEManager: CBPeripheralDelegate {
         }
     }
 
-    nonisolated func peripheralIsReadyToSendWriteWithoutResponse(_ peripheral: CBPeripheral) {
+    nonisolated func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
         Task { @MainActor in
             self.writeDrainContinuation?.resume()
             self.writeDrainContinuation = nil

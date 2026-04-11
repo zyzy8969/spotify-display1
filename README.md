@@ -37,7 +37,8 @@ flowchart LR
 | [`python/`](python/) | Other helpers (`color_test.py`, `web_color_tuner.py`, `live_color_editor.py`, `list_ports.py`, …) — experimental / tuning |
 | [`python/requirements.txt`](python/requirements.txt) | Python dependencies |
 | [`python/env.example`](python/env.example) | Template for `python/.env` (copy locally; gitignored) |
-| [`SpotifyDisplay.swiftpm/`](SpotifyDisplay.swiftpm/) | iOS app (SwiftPM); see [`SpotifyDisplay.swiftpm/README.md`](SpotifyDisplay.swiftpm/README.md) |
+| [`SpotifyDisplay.swiftpm/`](SpotifyDisplay.swiftpm/) | iOS app sources (SwiftPM); see [`SpotifyDisplay.swiftpm/README.md`](SpotifyDisplay.swiftpm/README.md) |
+| [`ios/`](ios/) | **Xcode `.xcodeproj`** for the same app (recommended for Xcode users); see [`ios/README.md`](ios/README.md) |
 | [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md) | GATT UUIDs, packet formats, image layout — **single contract** for firmware / Python / iOS |
 | [`resources/`](resources/) | Hardware / gamma notes (Waveshare ST7789, etc.) |
 | [`LICENSE`](LICENSE) | MIT |
@@ -74,9 +75,9 @@ flowchart LR
 
 ## iOS app
 
-1. On a Mac, open [`SpotifyDisplay.swiftpm`](SpotifyDisplay.swiftpm) in Xcode.
-2. Set your **Team** and a unique **bundle identifier** for signing.
-3. In [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), add redirect URI **`spotifydisplay://callback`** for your iOS client (PKCE; no client secret in the app).
+1. On a Mac with **Xcode**, open [`ios/SpotifyDisplay.xcodeproj`](ios/SpotifyDisplay.xcodeproj) (recommended), or open [`SpotifyDisplay.swiftpm`](SpotifyDisplay.swiftpm) as a Swift package. Details: [`ios/README.md`](ios/README.md).
+2. Set your **Team** (Personal Team is fine for device installs) and a unique **bundle identifier** for signing.
+3. In [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), add redirect URI **`spotifydisplay://callback`** for your iOS client (PKCE; no client secret in the app). Set **`SpotifyClientID`** in [`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist`](SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist) (or use the optional in-app override in Settings); see [`ios/README.md`](ios/README.md).
 4. Run on a **physical iPhone** with Bluetooth on; power the ESP32 with firmware flashed.
 
 UI is intentionally **minimal** (light / white) for the PoC; refine typography and chrome later.

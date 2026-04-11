@@ -277,6 +277,20 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             imageState = RECEIVING_DATA;
 
         } else if (imageState == RECEIVING_DATA) {
+            // New image header mid-stream: client cancelled and started a fresh transfer
+            if (value.length() == 4) {
+                uint32_t maybeSize = 0;
+                maybeSize |= (uint8_t)value[0];
+                maybeSize |= (uint8_t)value[1] << 8;
+                maybeSize |= (uint8_t)value[2] << 16;
+                maybeSize |= (uint8_t)value[3] << 24;
+                if (maybeSize == IMAGE_SIZE) {
+                    Serial.println("BLE: Image header (resync) — discarding partial frame");
+                    receivedBytes = 0;
+                    return;
+                }
+            }
+
             // Subsequent writes are image data chunks
             size_t chunkSize = value.length();
 

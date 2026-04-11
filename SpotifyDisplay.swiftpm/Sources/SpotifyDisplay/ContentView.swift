@@ -5,66 +5,95 @@ struct ContentView: View {
     @StateObject private var bleManager = BLEManager()
     @StateObject private var spotifyManager = SpotifyManager()
     @State private var showSettings = false
+    @State private var showDetails = false
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                ConnectionStatusView(
-                    isConnected: bleManager.isConnected,
-                    cacheCount: bleManager.sdCacheEntryCount
-                )
+            ZStack {
+                Color.white
+                    .ignoresSafeArea(edges: .all)
+                VStack(spacing: 20) {
+                    ConnectionStatusView(
+                        isConnected: bleManager.isConnected,
+                        cacheCount: bleManager.sdCacheEntryCount,
+                        isAuthenticated: spotifyManager.isAuthenticated
+                    )
 
-                AlbumArtView(imageData: bleManager.currentAlbumArt)
+                    AlbumArtView(imageData: bleManager.currentAlbumArt)
 
-                if let track = spotifyManager.currentTrack {
-                    NowPlayingView(track: track)
-                }
-
-                if bleManager.isTransferring {
-                    ProgressView(value: bleManager.transferProgress)
-                        .tint(.black.opacity(0.45))
-                        .padding(.horizontal, 32)
-                }
-
-                if let err = spotifyManager.lastError {
-                    Text(err)
-                        .font(.caption)
-                        .foregroundStyle(.black.opacity(0.55))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                }
-
-                Text(bleManager.statusMessage)
-                    .font(.caption2)
-                    .foregroundStyle(.black.opacity(0.4))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 20) {
-                    Button("Cache count") {
-                        Task { try? await bleManager.refreshSDCacheCount() }
+                    if let track = spotifyManager.currentTrack {
+                        NowPlayingView(track: track)
                     }
-                    .disabled(!bleManager.isConnected)
 
-                    Button {
-                        Task { await spotifyManager.restoreSession() }
+                    if bleManager.isTransferring {
+                        ProgressView(value: bleManager.transferProgress)
+                            .tint(.black.opacity(0.45))
+                            .padding(.horizontal, 32)
+                    }
+
+                    if let err = spotifyManager.lastError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.black.opacity(0.55))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+
+                    if spotifyManager.pollStatus == "Nothing playing" {
+                        Text("If music plays on another device, open Spotify on this phone or transfer playback with Spotify Connect.")
+                            .font(.caption2)
+                            .foregroundStyle(.black.opacity(0.42))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 8)
+                    }
+
+                    DisclosureGroup(isExpanded: $showDetails) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(bleManager.statusMessage)
+                                .font(.caption2)
+                                .foregroundStyle(.black.opacity(0.45))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if let poll = spotifyManager.pollStatus {
+                                Text(poll)
+                                    .font(.caption2)
+                                    .foregroundStyle(.black.opacity(0.38))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.vertical, 4)
                     } label: {
-                        Image(systemName: "arrow.clockwise")
+                        Text("Details")
+                            .font(.footnote)
+                            .foregroundStyle(.black.opacity(0.5))
                     }
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 24) {
+                        Button("Cache count") {
+                            Task { try? await bleManager.refreshSDCacheCount() }
+                        }
+                        .disabled(!bleManager.isConnected)
+
+                        Button {
+                            Task { await spotifyManager.restoreSession() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.black.opacity(0.55))
+                    .buttonStyle(.plain)
+                    .frame(minHeight: 44)
                 }
-                .font(.footnote)
-                .foregroundStyle(.black.opacity(0.55))
-                .buttonStyle(.plain)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.white)
             .navigationTitle("Spotify Display")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.white, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbarColorScheme(.light, for: .navigationBar)
             .toolbar {
                 Button { showSettings = true } label: {
@@ -77,6 +106,7 @@ struct ContentView: View {
                 SettingsView(spotifyManager: spotifyManager)
             }
             .onAppear {
+                AppDelegate.paintWindowsWhite()
                 bleManager.startScanning()
                 spotifyManager.startMonitoring(bleManager: bleManager)
             }
@@ -84,12 +114,14 @@ struct ContentView: View {
                 spotifyManager.stopMonitoring()
             }
         }
+        .background(Color.white.ignoresSafeArea(edges: .all))
     }
 }
 
 struct ConnectionStatusView: View {
     let isConnected: Bool
     var cacheCount: Int?
+    var isAuthenticated: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -98,6 +130,14 @@ struct ConnectionStatusView: View {
                     .fill(isConnected ? Color.black : Color.black.opacity(0.2))
                     .frame(width: 6, height: 6)
                 Text(isConnected ? "Display connected" : "Looking for display…")
+                    .font(.footnote)
+                    .foregroundStyle(.black.opacity(0.65))
+            }
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(isAuthenticated ? Color.black : Color.black.opacity(0.2))
+                    .frame(width: 6, height: 6)
+                Text(isAuthenticated ? "Spotify signed in" : "Spotify not signed in")
                     .font(.footnote)
                     .foregroundStyle(.black.opacity(0.65))
             }
@@ -113,30 +153,25 @@ struct ConnectionStatusView: View {
 
 struct AlbumArtView: View {
     let imageData: Data?
+    /// Max edge length; matches firmware 240×240 send while using available width on larger phones.
+    private let maxSide: CGFloat = 280
 
     var body: some View {
-        Group {
-            if let data = imageData, let uiImage = UIImage(data: data) {
-                Image(uiImage: uiImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 240, height: 240)
-                    .overlay {
-                        Rectangle()
-                            .strokeBorder(Color.black.opacity(0.06), lineWidth: 1)
-                    }
-            } else {
-                ZStack {
-                    Rectangle()
-                        .fill(Color.white)
-                        .frame(width: 240, height: 240)
-                        .overlay {
-                            Rectangle()
-                                .strokeBorder(Color.black.opacity(0.1), lineWidth: 1)
-                        }
+        GeometryReader { geo in
+            let side = min(geo.size.width, maxSide)
+            ZStack {
+                if let data = imageData, let uiImage = UIImage(data: data) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: side, height: side)
+                        .clipped()
+                } else {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.black.opacity(0.04))
                     VStack(spacing: 10) {
                         Image(systemName: "music.note")
-                            .font(.system(size: 40, weight: .ultraLight))
+                            .font(.system(size: min(40, side * 0.16), weight: .ultraLight))
                             .foregroundStyle(.black.opacity(0.22))
                         Text("No art")
                             .font(.caption2)
@@ -144,7 +179,14 @@ struct AlbumArtView: View {
                     }
                 }
             }
+            .frame(width: side, height: side)
+            .overlay {
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.black.opacity(0.08), lineWidth: 1)
+            }
+            .frame(maxWidth: .infinity)
         }
+        .aspectRatio(1, contentMode: .fit)
     }
 }
 
@@ -172,23 +214,16 @@ struct NowPlayingView: View {
 
 struct SettingsView: View {
     @ObservedObject var spotifyManager: SpotifyManager
-    @State private var clientID = ""
+    @State private var clientIDOverride = ""
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Client ID", text: $clientID)
-                        .textContentType(.username)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .foregroundStyle(.black.opacity(0.85))
-
-                    Button("Save Client ID") {
-                        spotifyManager.saveClientId(clientID)
-                    }
-                    .foregroundStyle(.black)
+                    Text("Active Client ID: \(spotifyManager.clientIdSourceDescription)")
+                        .font(.subheadline)
+                        .foregroundStyle(.black.opacity(0.75))
 
                     Button("Sign in with Spotify") {
                         Task { await spotifyManager.signInWithSpotify() }
@@ -200,6 +235,31 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("Spotify")
+                        .foregroundStyle(.black.opacity(0.45))
+                }
+
+                Section {
+                    Text("Default: set SpotifyClientID in the app Info.plist to your Spotify app’s Client ID (one-time per build). Optional override below without rebuilding.")
+                        .font(.caption)
+                        .foregroundStyle(.black.opacity(0.45))
+
+                    TextField("Client ID override (optional)", text: $clientIDOverride)
+                        .textContentType(.username)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .foregroundStyle(.black.opacity(0.85))
+
+                    Button("Save override") {
+                        spotifyManager.saveClientId(clientIDOverride)
+                    }
+                    .foregroundStyle(.black)
+
+                    Button("Clear override", role: .destructive) {
+                        clientIDOverride = ""
+                        spotifyManager.saveClientId("")
+                    }
+                } header: {
+                    Text("Client ID")
                         .foregroundStyle(.black.opacity(0.45))
                 }
 
@@ -219,15 +279,18 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.white, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbarColorScheme(.light, for: .navigationBar)
             .toolbar {
                 Button("Done") { dismiss() }
                     .foregroundStyle(.black.opacity(0.65))
             }
             .onAppear {
-                clientID = spotifyManager.clientIdStored
+                clientIDOverride = spotifyManager.storedClientIdOverride
+                AppDelegate.paintWindowsWhite()
             }
         }
+        .background(Color.white.ignoresSafeArea(edges: .all))
         .preferredColorScheme(.light)
     }
 }

@@ -37,6 +37,8 @@ Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications aft
 1. **Size header**: 4 bytes, little-endian `uint32` — total payload bytes (expected **115200** = 240×240×2 RGB565).
 2. **Body**: consecutive chunks of RGB565 LE; firmware may draw partial lines as data arrives, then applies Floyd–Steinberg dither and redraws full frame.
 
+**Client cancel / new transfer:** If a client stops mid-image and later sends a **new** transfer, the first write must again be the **4-byte size header** (`115200` LE). While the peripheral is still in its receiving state with a **partial** frame, firmware treats a **4-byte** write that decodes to `115200` as a **resync** (discard partial data) so the following chunks belong to the new image. There is no separate cancel opcode.
+
 **Notify**: `0x01` on Image characteristic and/or UTF-8 `SUCCESS` on Message when processing completes.
 
 ## Image format

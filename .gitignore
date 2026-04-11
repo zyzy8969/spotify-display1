@@ -40,6 +40,8 @@ Thumbs.db
 .cache-*
 
 # Xcode / SwiftPM (local)
+SpotifyDisplay.swiftpm/.build/
+**/.build/
 **/xcuserdata/
 **/*.xcuserstate
 **/DerivedData/

@@ -34,7 +34,7 @@ enum ImageProcessor {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        return packRGB565LittleEndian(cgImage: output, width: 240, height: 240)
+        return try packRGB565LittleEndian(cgImage: output, width: 240, height: 240)
     }
 
     /// Aspect-fill into exact 240×240 (album art style).
@@ -77,7 +77,7 @@ enum ImageProcessor {
         return img
     }
 
-    private static func packRGB565LittleEndian(cgImage: CGImage, width: Int, height: Int) -> Data {
+    private static func packRGB565LittleEndian(cgImage: CGImage, width: Int, height: Int) throws -> Data {
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
         var raw = [UInt8](repeating: 0, count: height * bytesPerRow)

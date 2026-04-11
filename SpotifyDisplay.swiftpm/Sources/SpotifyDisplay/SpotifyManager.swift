@@ -4,12 +4,14 @@ import CryptoKit
 
 private let kRefresh = "spotify_refresh_token"
 private let kClientIdDefaults = "spotify_client_id"
+private let kSpotifyClientIDPlistKey = "SpotifyClientID"
 
 @MainActor
 final class SpotifyManager: ObservableObject {
     @Published var currentTrack: Track?
     @Published var isAuthenticated = false
     @Published var lastError: String?
+    @Published var pollStatus: String?
 
     private var accessToken: String?
     private var accessExpiry: Date?
@@ -20,15 +22,54 @@ final class SpotifyManager: ObservableObject {
     private let debounceSeconds: TimeInterval = 0.5
     private var lastSentToDisplayTrackId: String?
 
+    private weak var monitoredBle: BLEManager?
+    private var artSendTask: Task<Void, Never>?
+    private var artInFlightTrackId: String?
+
+    /// ~1 Hz so skips are noticed quickly; rate limits handled via `rateLimitedUntil` + 429 handling.
+    private let pollIntervalSeconds: TimeInterval = 1.0
+    /// After HTTP 429, skip player API calls until this time (honors Retry-After, capped).
+    private var rateLimitedUntil: Date?
+
     private let redirectURI = "spotifydisplay://callback"
     private let presenter = SpotifyAuthPresenter()
+    private var authSession: ASWebAuthenticationSession?
 
+    /// UserDefaults override (non-empty) wins; otherwise `SpotifyClientID` from Info.plist.
     var clientIdStored: String {
+        let ud = UserDefaults.standard.string(forKey: kClientIdDefaults)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !ud.isEmpty { return ud }
+        if let plist = Bundle.main.object(forInfoDictionaryKey: kSpotifyClientIDPlistKey) as? String {
+            return plist.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return ""
+    }
+
+    /// For Settings UI: where the active Client ID comes from.
+    var clientIdSourceDescription: String {
+        let ud = UserDefaults.standard.string(forKey: kClientIdDefaults)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !ud.isEmpty { return "Settings override" }
+        if let plist = Bundle.main.object(forInfoDictionaryKey: kSpotifyClientIDPlistKey) as? String,
+           !plist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return "Info.plist (SpotifyClientID)"
+        }
+        return "Not configured"
+    }
+
+    /// Raw value saved as override (for Settings text field); empty means no override.
+    var storedClientIdOverride: String {
         UserDefaults.standard.string(forKey: kClientIdDefaults) ?? ""
     }
 
+    /// Saves a per-device override; pass empty string to use Info.plist only.
     func saveClientId(_ id: String) {
-        UserDefaults.standard.set(id, forKey: kClientIdDefaults)
+        let t = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty {
+            UserDefaults.standard.removeObject(forKey: kClientIdDefaults)
+        } else {
+            UserDefaults.standard.set(t, forKey: kClientIdDefaults)
+        }
     }
 
     /// PKCE sign-in (no client secret on device).
@@ -36,7 +77,7 @@ final class SpotifyManager: ObservableObject {
         lastError = nil
         let clientId = clientIdStored.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clientId.isEmpty else {
-            lastError = "Enter Client ID in Settings"
+            lastError = "Set SpotifyClientID in Info.plist or add an override in Settings."
             return
         }
 
@@ -60,8 +101,9 @@ final class SpotifyManager: ObservableObject {
 
         do {
             let code = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
-                let session = ASWebAuthenticationSession(url: authURL, callbackURLScheme: "spotifydisplay") { url, error in
+                let session = ASWebAuthenticationSession(url: authURL, callbackURLScheme: "spotifydisplay") { [weak self] url, error in
                     Task { @MainActor in
+                        self?.authSession = nil
                         if let error {
                             cont.resume(throwing: error)
                             return
@@ -77,9 +119,11 @@ final class SpotifyManager: ObservableObject {
                         cont.resume(returning: c)
                     }
                 }
+                self.authSession = session
                 session.presentationContextProvider = self.presenter
                 session.prefersEphemeralWebBrowserSession = false
                 if !session.start() {
+                    self.authSession = nil
                     Task { @MainActor in
                         cont.resume(throwing: SpotifyDisplayError.authFailed)
                     }
@@ -102,6 +146,12 @@ final class SpotifyManager: ObservableObject {
         pendingTrack = nil
         pendingSince = nil
         lastSentToDisplayTrackId = nil
+        rateLimitedUntil = nil
+        monitoredBle?.cancelOngoingTransfer()
+        artSendTask?.cancel()
+        artSendTask = nil
+        artInFlightTrackId = nil
+        pollStatus = "Not authenticated"
     }
 
     /// Use saved refresh token if present.
@@ -118,36 +168,71 @@ final class SpotifyManager: ObservableObject {
     }
 
     func startMonitoring(bleManager: BLEManager) {
+        monitoredBle = bleManager
         monitorTask?.cancel()
         monitorTask = Task {
             await restoreSession()
             while !Task.isCancelled {
                 await pollOnce(bleManager: bleManager)
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let ns = UInt64(pollIntervalSeconds * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: ns)
             }
         }
     }
 
     func stopMonitoring() {
+        monitoredBle?.cancelOngoingTransfer()
+        artSendTask?.cancel()
+        artSendTask = nil
+        artInFlightTrackId = nil
         monitorTask?.cancel()
         monitorTask = nil
     }
 
     private func pollOnce(bleManager: BLEManager) async {
-        guard isAuthenticated else { return }
+        guard isAuthenticated else {
+            pollStatus = "Not authenticated"
+            return
+        }
+
+        if let until = rateLimitedUntil {
+            if Date() < until {
+                pollStatus = "Rate limited — retry soon"
+                return
+            }
+            rateLimitedUntil = nil
+        }
 
         do {
+            pollStatus = "Polling Spotify…"
             let state = try await fetchCurrentlyPlayingWithRefresh()
 
             guard let item = state.item, state.isPlaying else {
+                pollStatus = "Nothing playing"
                 if currentTrack != nil {
                     currentTrack = nil
                 }
                 pendingTrack = nil
                 pendingSince = nil
+                bleManager.cancelOngoingTransfer()
+                artSendTask?.cancel()
+                artSendTask = nil
+                artInFlightTrackId = nil
                 return
             }
 
+            pollStatus = "Playing: \(item.name)"
+            // Always update UI with the current track
+            currentTrack = item
+
+            if let inflight = artInFlightTrackId, inflight != item.id {
+                bleManager.cancelOngoingTransfer()
+                artSendTask?.cancel()
+                artSendTask = nil
+                artInFlightTrackId = nil
+            }
+
+            // Only deduplicate BLE sends, not UI updates
             if item.id == lastSentToDisplayTrackId { return }
 
             if pendingTrack?.id != item.id {
@@ -158,19 +243,65 @@ final class SpotifyManager: ObservableObject {
 
             guard let since = pendingSince, Date().timeIntervalSince(since) >= debounceSeconds else { return }
 
-            currentTrack = item
-
             let artURL = bestArtURL(from: item)
-            guard let artURL else { return }
-
-            do {
-                try await bleManager.processTrack(imageURL: artURL)
+            guard let artURL else {
+                lastError = "No album art for this track"
                 lastSentToDisplayTrackId = item.id
-            } catch {
-                lastError = error.localizedDescription
+                pendingTrack = nil
+                pendingSince = nil
+                return
+            }
+
+            bleManager.cancelOngoingTransfer()
+            artSendTask?.cancel()
+            artSendTask = nil
+
+            let capturedId = item.id
+            let capturedURL = artURL
+            let capturedName = item.name
+            let ble = bleManager
+            artInFlightTrackId = capturedId
+            artSendTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    try await ble.processTrack(imageURL: capturedURL, trackId: capturedId)
+                    guard !Task.isCancelled else {
+                        self.artInFlightTrackId = nil
+                        self.artSendTask = nil
+                        return
+                    }
+                    guard self.currentTrack?.id == capturedId else {
+                        self.artInFlightTrackId = nil
+                        self.artSendTask = nil
+                        return
+                    }
+                    self.lastSentToDisplayTrackId = capturedId
+                    self.pendingTrack = nil
+                    self.pendingSince = nil
+                    self.artInFlightTrackId = nil
+                    self.artSendTask = nil
+                    self.pollStatus = "Playing: \(self.currentTrack?.name ?? capturedName)"
+                } catch let error as URLError where error.code == .cancelled {
+                    self.artInFlightTrackId = nil
+                    self.artSendTask = nil
+                } catch is CancellationError {
+                    self.artInFlightTrackId = nil
+                    self.artSendTask = nil
+                } catch {
+                    self.lastError = error.localizedDescription
+                    self.pollStatus = "Display transfer failed"
+                    self.artInFlightTrackId = nil
+                    self.artSendTask = nil
+                }
             }
         } catch {
-            lastError = error.localizedDescription
+            if let e = error as? SpotifyAPIError, case .http(429) = e {
+                lastError = "Spotify rate limited — pausing requests"
+                pollStatus = "Rate limited — retry soon"
+            } else {
+                lastError = error.localizedDescription
+                pollStatus = "Spotify request failed"
+            }
         }
     }
 
@@ -213,18 +344,27 @@ final class SpotifyManager: ObservableObject {
 
         if http.statusCode == 401 { throw SpotifyAPIError.unauthorized }
         if http.statusCode == 429 {
-            let retry = http.value(forHTTPHeaderField: "Retry-After").flatMap { Int($0) } ?? 60
-            try await Task.sleep(nanoseconds: UInt64(retry) * 1_000_000_000)
-            return try await requestCurrentlyPlaying()
+            let wait = Self.cappedRetryAfterSeconds(from: http)
+            rateLimitedUntil = Date().addingTimeInterval(wait)
+            throw SpotifyAPIError.http(429)
         }
         if http.statusCode == 204 {
-            return CurrentlyPlayingResponse(item: nil, is_playing: false)
+            rateLimitedUntil = nil
+            return CurrentlyPlayingResponse(item: nil, isPlaying: false)
         }
         guard (200 ... 299).contains(http.statusCode) else {
             throw SpotifyAPIError.http(http.statusCode)
         }
 
+        rateLimitedUntil = nil
         return try JSONDecoder().decode(CurrentlyPlayingResponse.self, from: data)
+    }
+
+    /// Parses Retry-After (seconds), clamped so a bad header cannot stall the app for hours.
+    private static func cappedRetryAfterSeconds(from http: HTTPURLResponse) -> TimeInterval {
+        let header = http.value(forHTTPHeaderField: "Retry-After").flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        let raw = header ?? 60
+        return min(max(raw, 1), 120)
     }
 
     private func exchangeCode(_ code: String, clientId: String, verifier: String) async throws {
