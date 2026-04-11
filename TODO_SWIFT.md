@@ -143,14 +143,6 @@ Redesign the main screen on MacBook before porting to UIKit.
 **Tools to consider:** Sketch (Mac-only, great for iOS), Figma (free, browser-based),
 or iterate directly in Xcode's SwiftUI live preview. Research and pick your style.
 
-**Design direction:**
-- Full-bleed album art as background (blurred + darkened)
-- Album art large and centered
-- Track name + artist in a frosted glass card at the bottom
-- BLE status as a small dot only
-- Transfer progress as a thin bar at the very bottom edge
-- Minimal chrome — the art dominates
-
 ---
 
 ### 14. Clear SD cache from app *(ESP32 + Swift)*
@@ -184,7 +176,15 @@ Do this before implementing items 2 and 3.
 
 ## FUTURE — once app is fully polished
 
-### 17. Upload custom images and GIFs through the app *(ESP32 + Swift)*
+
+### 17. get apple dev and implent tool kit
+utilize now playing feature and apple music and spotify integration. more embeeded into ecosystem and professional. real app/product not just a college project
+
+### 18. peer 2 peer compare cached songs
+someone else has same device, thsoe devices can speak to eachother comparing cache ids (make sure all songs have same cache id)
+displays a similiartiy score on both devcies with number and a heart depciting how similar
+
+###  19 Upload custom images and GIFs through the app *(ESP32 + Swift)*
 Allow picking any photo or GIF from camera roll and sending it to the display.
 
 **Static images** — add `PHPickerViewController`, pipe through existing
@@ -201,3 +201,5 @@ SD card stores frames as `/anim/00.bin`, `01.bin`, etc., `loop()` cycles with `m
 
 **Constraints:** 10-frame GIF = ~1.1 MB over BLE (~10 s). Warn before sending.
 ESP32 PSRAM (8 MB) fits ~70 frames. Display max ~20–30 fps at 80 MHz SPI.
+(downlaod gif first then send over whole thing once complet)
+
