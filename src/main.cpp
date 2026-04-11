@@ -146,6 +146,14 @@ bool pulseIsWhite = false; // Toggle between red and white
 // BLUETOOTH LE CALLBACK CLASSES
 // ==================================================
 
+// Decode 4 bytes from a BLE value string as a little-endian uint32
+inline uint32_t decodeLE32(const std::string& value) {
+    return (uint8_t)value[0]
+         | ((uint8_t)value[1] << 8)
+         | ((uint8_t)value[2] << 16)
+         | ((uint8_t)value[3] << 24);
+}
+
 // Server callbacks - handle connection/disconnection events
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -215,12 +223,7 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
             return;
         }
 
-        // Extract magic number (first 4 bytes, little-endian)
-        uint32_t magic = 0;
-        magic |= (uint8_t)value[0];
-        magic |= (uint8_t)value[1] << 8;
-        magic |= (uint8_t)value[2] << 16;
-        magic |= (uint8_t)value[3] << 24;
+        uint32_t magic = decodeLE32(value);
 
         // Stats request (iOS app): same 20-byte write, magic + padding — no cache key
         if (magic == 0xC0FFEEE1) {
@@ -257,12 +260,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 return;
             }
 
-            // Extract size (little-endian)
-            expectedSize = 0;
-            expectedSize |= (uint8_t)value[0];
-            expectedSize |= (uint8_t)value[1] << 8;
-            expectedSize |= (uint8_t)value[2] << 16;
-            expectedSize |= (uint8_t)value[3] << 24;
+            expectedSize = decodeLE32(value);
 
             if (expectedSize != IMAGE_SIZE) {
                 Serial.printf("ERROR: Size mismatch, got %d, expected %d\n",
@@ -279,17 +277,10 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 
         } else if (imageState == RECEIVING_DATA) {
             // New image header mid-stream: client cancelled and started a fresh transfer
-            if (value.length() == 4) {
-                uint32_t maybeSize = 0;
-                maybeSize |= (uint8_t)value[0];
-                maybeSize |= (uint8_t)value[1] << 8;
-                maybeSize |= (uint8_t)value[2] << 16;
-                maybeSize |= (uint8_t)value[3] << 24;
-                if (maybeSize == IMAGE_SIZE) {
-                    Serial.println("BLE: Image header (resync) — discarding partial frame");
-                    receivedBytes = 0;
-                    return;
-                }
+            if (value.length() == 4 && decodeLE32(value) == IMAGE_SIZE) {
+                Serial.println("BLE: Image header (resync) — discarding partial frame");
+                receivedBytes = 0;
+                return;
             }
 
             // Subsequent writes are image data chunks
@@ -712,15 +703,21 @@ void drawBarnDoors(uint16_t* buffer, int width, int height) {
   // Barn doors: reveal from top and bottom edges inward, meeting at center
   int halfH = height / 2;
   for (int offset = 0; offset < halfH; offset += 3) {
-    // Top: draw rows advancing downward from the top edge
     for (int row = offset; row < min(offset + 3, halfH); row++) {
       gfx->draw16bitRGBBitmap(0, row, buffer + (row * width), width, 1);
     }
-    // Bottom: draw rows advancing upward from the bottom edge
     for (int row = height - 1 - offset; row >= max(height - offset - 3, halfH); row--) {
       gfx->draw16bitRGBBitmap(0, row, buffer + (row * width), width, 1);
     }
     delayMicroseconds(12500);  // ~1 second total animation
+  }
+}
+
+// Draw one 16x16 block (or smaller at image edge) row-by-row via SPI
+static void drawBlockRows(uint16_t* buffer, int bx, int by, int blockSize, int width, int height) {
+  for (int row = by; row < by + blockSize && row < height; row++) {
+    gfx->draw16bitRGBBitmap(bx, row, buffer + (row * width + bx),
+                             min(blockSize, width - bx), 1);
   }
 }
 
@@ -755,10 +752,7 @@ void drawRandomBlocks(uint16_t* buffer, int width, int height) {
       int bx = (blockIdx % blocksX) * blockSize;
       int by = (blockIdx / blocksX) * blockSize;
 
-      for (int row = 0; row < blockSize && (by + row) < height; row++) {
-        gfx->draw16bitRGBBitmap(bx, by + row, buffer + ((by + row) * width + bx),
-                                 min(blockSize, width - bx), 1);
-      }
+      drawBlockRows(buffer, bx, by, blockSize, width, height);
     }
     delayMicroseconds(800);
   }
@@ -769,6 +763,7 @@ void drawRandomBlocks(uint16_t* buffer, int width, int height) {
 void drawZoomBlocks(uint16_t* buffer, int width, int height) {
   // Expand 16x16 blocks outward from center using Chebyshev distance
   const int blockSize = 16;
+  const int halfBlock = blockSize / 2;
   int centerX = width / 2;
   int centerY = height / 2;
   int maxDist = max(centerX, centerY) + blockSize;
@@ -776,18 +771,14 @@ void drawZoomBlocks(uint16_t* buffer, int width, int height) {
   for (int dist = 0; dist <= maxDist; dist += blockSize) {
     for (int by = 0; by < height; by += blockSize) {
       for (int bx = 0; bx < width; bx += blockSize) {
-        int dx = abs((bx + blockSize / 2) - centerX);
-        int dy = abs((by + blockSize / 2) - centerY);
-        int blockDist = max(dx, dy);  // Chebyshev: square expansion from center
+        int blockDist = max(abs((bx + halfBlock) - centerX),
+                            abs((by + halfBlock) - centerY));
         if (blockDist >= dist && blockDist < dist + blockSize) {
-          for (int row = by; row < by + blockSize && row < height; row++) {
-            gfx->draw16bitRGBBitmap(bx, row, buffer + (row * width + bx),
-                                     min(blockSize, width - bx), 1);
-          }
+          drawBlockRows(buffer, bx, by, blockSize, width, height);
         }
       }
     }
-    delay(20);
+    delayMicroseconds(20000);
   }
 }
 
@@ -990,10 +981,13 @@ void setupBLE() {
     pCacheChar->addDescriptor(new BLE2902());
     Serial.println("  + Cache check characteristic (ffe2)");
 
-    // Image transfer characteristic (Write, Notify) - Image data
+    // Image transfer characteristic (Write + Write Without Response, Notify)
+    // PROPERTY_WRITE_NO_RESPONSE lets iOS use the fast write path (no per-chunk ACK)
     pImageChar = pService->createCharacteristic(
         IMAGE_CHAR_UUID,
-        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
+        BLECharacteristic::PROPERTY_WRITE |
+        BLECharacteristic::PROPERTY_WRITE_NO_RESPONSE |
+        BLECharacteristic::PROPERTY_NOTIFY
     );
     pImageChar->setCallbacks(new ImageTransferCallbacks());
     pImageChar->addDescriptor(new BLE2902());

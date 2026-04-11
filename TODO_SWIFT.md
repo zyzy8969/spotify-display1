@@ -217,7 +217,19 @@ better options for this specific display and album art content (photographic ima
 vibrant saturated colors).
 
 **Questions to answer before coding:**
-1. **Dithering algorithm** — Floyd-Steinberg is the current choice. Alternatives:
+1. **ST7789 panel gamma registers** — the firmware currently leaves the ST7789VW
+   gamma registers (0xE0 PVGAMCTRL, 0xE1 NVGAMCTRL) at power-on defaults after
+   calling `gfx->begin()`. Writing tuned values here can improve color accuracy and
+   richness before any software dithering is applied. Research and implement the
+   correct 14-byte positive and negative gamma curves for the Waveshare ESP32-S3
+   1.3" IPS panel (ST7789VW chip). The gamma write uses the same `bus->beginWrite()` /
+   `bus->writeCommand()` / `bus->write()` / `bus->endWrite()` pattern already present
+   for the MADCTL register in `setup()`. Good starting point: Adafruit_ST7789 IPS values
+   (PVGAMCTRL: 0xD0,0x04,0x0D,0x11,0x13,0x2B,0x3F,0x54,0x4C,0x18,0x0D,0x0B,0x1F,0x23;
+   NVGAMCTRL: 0xD0,0x04,0x0C,0x11,0x13,0x2C,0x3F,0x44,0x51,0x2F,0x1F,0x1F,0x20,0x23).
+   Tune on real hardware by displaying a test image with skin tones and gradients.
+
+2. **Dithering algorithm** — Floyd-Steinberg is the current choice. Alternatives:
    - Atkinson (less aggressive error diffusion, often looks crisper on small screens)
    - Jarvis-Judice-Ninke (wider diffusion kernel, smoother gradients)
    - Blue-noise / ordered dithering (no direction artifacts, good for photos)
