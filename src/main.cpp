@@ -986,7 +986,7 @@ void setupBLE() {
     pImageChar = pService->createCharacteristic(
         IMAGE_CHAR_UUID,
         BLECharacteristic::PROPERTY_WRITE |
-        BLECharacteristic::PROPERTY_WRITE_NO_RESPONSE |
+        BLECharacteristic::PROPERTY_WRITE_NR |
         BLECharacteristic::PROPERTY_NOTIFY
     );
     pImageChar->setCallbacks(new ImageTransferCallbacks());

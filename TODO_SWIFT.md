@@ -175,19 +175,21 @@ self.lastError = nil  // add at start of successful poll path
 
 ---
 
-### 11. iOS background mode — keep polling when app is minimised *(Swift)*
-**Status:** Not done — most impactful daily-use improvement  
+### 6b. iOS background mode — keep polling when app is minimised *(Swift)*
+**Status:** Confirmed needed — do alongside other Priority 2 items  
 Currently polling stops the moment you lock your phone or switch apps.
+The display goes stale as soon as the app is backgrounded.
 
 **Swift fix:**
-1. Add `bluetooth-central` to `UIBackgroundModes` in app entitlements/Info.plist
+1. Add `bluetooth-central` to `UIBackgroundModes` in `Package.swift` or Info.plist
 2. In `CBCentralManager` init, pass `CBCentralManagerOptionRestoreIdentifierKey`
-   for state restoration
-3. Request `background` processing time in `SpotifyManager.startMonitoring()` using
-   `BGAppRefreshTask` or `ProcessInfo.performExpiringActivity`
+   so iOS can wake the app when a BLE event arrives
+3. `SpotifyManager.startMonitoring()` — wrap the poll loop with
+   `ProcessInfo.processInfo.performExpiringActivity(withReason:)` so iOS
+   keeps the process alive while actively transferring
 
-This requires a real device (simulator doesn't support background BLE) and the
-entitlement must be declared before App Store submission.
+Note: must test on a real device (simulator doesn't support background BLE).
+No App Store entitlement needed for development; must declare before submission.
 
 ---
 
