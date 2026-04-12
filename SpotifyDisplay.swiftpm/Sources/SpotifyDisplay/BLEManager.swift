@@ -200,7 +200,8 @@ final class BLEManager: NSObject, ObservableObject {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.transferContinuation = cont
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                // Firmware may ACK only after dither + redraw + SD save (see main.cpp imageTransferComplete).
+                try? await Task.sleep(nanoseconds: 22_000_000_000)
                 if let c = self.transferContinuation {
                     self.transferContinuation = nil
                     c.resume(throwing: SpotifyDisplayError.bleTimeout)

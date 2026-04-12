@@ -2,7 +2,7 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.0** (matches current `src/main.cpp`, Python sender, iOS `BLEManager`).
+Version: **1.1** (SUCCESS/notify timing after post-process ACK; matches current `src/main.cpp` and iOS `BLEManager`).
 
 ## Peripheral
 
@@ -39,7 +39,7 @@ Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications aft
 
 **Client cancel / new transfer:** If a client stops mid-image and later sends a **new** transfer, the first write must again be the **4-byte size header** (`115200` LE). While the peripheral is still in its receiving state with a **partial** frame, firmware treats a **4-byte** write that decodes to `115200` as a **resync** (discard partial data) so the following chunks belong to the new image. There is no separate cancel opcode.
 
-**Notify**: `0x01` on Image characteristic and/or UTF-8 `SUCCESS` on Message when processing completes.
+**Notify**: `0x01` on Image characteristic and/or UTF-8 `SUCCESS` on Message **after** the firmware finishes dither, full redraw, and SD cache save for that frame. Until then, the phone must not start another image transfer (same `imageBuffer` on device). Typical latency is still well under common client ACK timeouts.
 
 ## Image format
 

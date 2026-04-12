@@ -1431,15 +1431,8 @@ void loop() {
 
     Serial.println("Processing image transfer completion...");
 
-    // Notify SUCCESS IMMEDIATELY to prevent Python timeout
-    uint8_t success = 0x01;
-    pImageChar->setValue(&success, 1);
-    pImageChar->notify();
-
-    pMsgChar->setValue("SUCCESS");
-    pMsgChar->notify();
-
-    Serial.println("Transfer acknowledged, now processing...");
+    // Do NOT notify the client until dither/display/save finish — otherwise the phone
+    // can start the next BLE image while we still mutate imageBuffer (race → half frames / retries).
 
     // Apply Floyd-Steinberg dithering for better image quality
     unsigned long ditherStart = millis();
@@ -1461,6 +1454,15 @@ void loop() {
     Serial.printf("⚡ Processing: dither %lums, display %lums, save %lums\n",
                    ditherTime, displayTime, saveTime);
     Serial.println("Image processing complete!");
+
+    // Client may send the next image only after this point (imageBuffer exclusive use ends here).
+    Serial.println("BLE: Signaling SUCCESS (post-processing — safe for next transfer)");
+    uint8_t success = 0x01;
+    pImageChar->setValue(&success, 1);
+    pImageChar->notify();
+
+    pMsgChar->setValue("SUCCESS");
+    pMsgChar->notify();
   }
 
   // Handle BLE connection state changes
