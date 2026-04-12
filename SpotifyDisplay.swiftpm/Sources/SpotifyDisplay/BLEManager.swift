@@ -9,7 +9,10 @@ final class BLEManager: NSObject, ObservableObject {
     @Published var statusMessage = "Bluetooth…"
     @Published var isTransferring = false
     @Published var transferProgress: Double = 0
-    @Published var sdCacheEntryCount: Int?
+    /// Total `.bin` files in `/cache` on the display (from stats / `CACHE_COUNT:`). `nil` until first successful read this connection.
+    @Published private(set) var sdCacheEntryCount: Int?
+    /// True after connect until the first post-`READY` cache stats request finishes (success or failure).
+    @Published private(set) var sdCacheCountLoading = false
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -161,7 +164,6 @@ final class BLEManager: NSObject, ObservableObject {
         var header = Data()
         withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         p.writeValue(header, for: img, type: .withResponse)
-        try await Task.sleep(nanoseconds: 5_000_000)
 
         try ensureTransferEpoch(epochAtStart)
 
@@ -211,6 +213,8 @@ final class BLEManager: NSObject, ObservableObject {
         isTransferring = false
         transferProgress = 0
         statusMessage = "Sent to display"
+
+        try? await refreshSDCacheCount()
     }
 
     /// Ask ESP32 (firmware with stats magic) how many `.bin` files are in `/cache`.
@@ -335,9 +339,11 @@ final class BLEManager: NSObject, ObservableObject {
         do {
             try await waitForReady()
             statusMessage = "Ready"
-            try? await refreshSDCacheCount()
+            defer { sdCacheCountLoading = false }
+            try await refreshSDCacheCount()
         } catch {
             statusMessage = "Connected (READY timed out — check ESP32)"
+            sdCacheCountLoading = false
         }
     }
 }
@@ -366,6 +372,8 @@ extension BLEManager: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Task { @MainActor in
             self.isConnected = true
+            self.sdCacheEntryCount = nil
+            self.sdCacheCountLoading = true
             self.sawReady = false
             self.statusMessage = "Discovering services…"
             peripheral.delegate = self
@@ -383,6 +391,8 @@ extension BLEManager: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         Task { @MainActor in
             self.isConnected = false
+            self.sdCacheEntryCount = nil
+            self.sdCacheCountLoading = false
             self.resetGattState()
             self.statusMessage = "Disconnected — retrying…"
             self.failPending(error: SpotifyDisplayError.notConnected)

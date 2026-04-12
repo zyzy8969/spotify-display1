@@ -4,11 +4,54 @@
 
 ---
 
+## Swift quick wins (no `main.cpp` update required)
+
+**Status:** Implemented in the Swift package (BLEManager, ContentView, SpotifyManager) — no `main.cpp` changes in that commit.
+
+These work with **your current firmware** (already has `PROPERTY_WRITE_NR`, stats magic `0xC0FFEEE1`, `CACHE_COUNT:` on the message characteristic). Pull Swift on any machine; flash ESP32 only when you tackle the **ESP32 / `main.cpp` — laptop backlog** section below.
+
+**Do on laptop / in Xcode (Swift only):**
+
+1. **`BLEManager.swift` — faster BLE** — Delete the 5 ms sleep after the 4-byte image header write (`sendRGB565`, the line `try await Task.sleep(nanoseconds: 5_000_000)`). Header is already `.withResponse`; firmware does not need a change for this.
+
+2. **`ContentView.swift` — light chrome** — On the root `NavigationStack` (same level as `.background(Color.white…)`), add `.preferredColorScheme(.light)` so semantic colors match `SettingsView` on dark-mode phones.
+
+3. **`SpotifyManager.swift` — clear stale errors** — At the start of the successful `pollOnce` path (right after `let state = try await fetchCurrentlyPlayingWithRefresh()`), set `lastError = nil`. Optionally also set `lastError = nil` when a display transfer completes successfully in the `artSendTask` completion path.
+
+4. **`BLEManager.swift` + `ContentView.swift` — cache total always on when connected**  
+   - Add `@Published private(set) var sdCacheCountLoading = false` (or equivalent). On `didConnect`: `sdCacheEntryCount = nil`, `sdCacheCountLoading = true`. On `didDisconnect`: clear count, `sdCacheCountLoading = false`.  
+   - In `onCharacteristicsReady`, after `waitForReady()`, use `defer { sdCacheCountLoading = false }` and `try await refreshSDCacheCount()` (not `try?`) so failures end loading state.  
+   - **`ConnectionStatusView`:** when `isConnected`, always show a third line: loading text (e.g. “Total cached on display: …”) while `sdCacheCountLoading && sdCacheEntryCount == nil`, else `Total cached on display: \(n)` when count is known (including **0**), else “—” if load failed.  
+   - After a **successful** full image send in `sendRGB565` (after `SUCCESS`), call `try? await refreshSDCacheCount()` so the total updates when a new file lands on SD.  
+   - Remove the manual **“Cache count”** button once the above is reliable (or keep it only as a manual retry).
+
+---
+
+## ESP32 / `main.cpp` — laptop backlog (git + flash here)
+
+Do these on the machine where your **known-good** `src/main.cpp` lives; push before/after each logical chunk. Update [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md) whenever GATT or file formats change.
+
+| Roadmap item | File / area | What to change (high level) |
+|--------------|---------------|------------------------------|
+| **2** Move dither to iOS | `loop()` ~transfer complete | Remove `applyFloydSteinbergDithering` and the full-screen `drawImageLineByLine` redraw after receive; save **pre-dithered RGB565** from iOS straight to SD (or save buffer as received once iOS sends dithered data). Coordinate with Swift `ImageProcessor` port of `applyFloydSteinbergDithering`. |
+| **7** BLE brightness | GATT setup + new UUID `0000ffe5-…` | One-byte write → `ledcWrite(TFT_BL, value)` (replace fixed `TFT_BRIGHTNESS_MAX`). Swift: `BLEManager.setBrightness`, Settings slider, `UserDefaults`. |
+| **9** CRC32 on cache | `saveToCache` / cache load path | After `IMAGE_SIZE` bytes, append 4-byte CRC32; on load recompute and delete + miss if mismatch. |
+| **11** More transitions | Transition switch / helpers | Add `drawXxx` + enum + name string (pixel rain, spiral, etc.). |
+| **12** iOS-picked transition | Image header / BLE parser | First byte transition index + existing 4-byte LE size (5-byte header); `0xFF` = random. Parse in firmware image receive state machine. |
+| **14** Clear SD from app | Cache characteristic handler | Magic `0xCAC4E1EA` → delete `/cache/*.bin`, reply on message char. |
+| **15** Album ID cache key | Cache key derivation | Replace or dual MD5(image URL) with stable album id from app; align 16-byte key layout with iOS. |
+| **16** Gamma + tuning | After `gfx->begin()` | ST7789 `0xE0` / `0xE1` gamma register blocks via `bus->writeCommand()`; tune on hardware. Optional: compare dither variants in firmware **or** only on iOS once dither moves off device. |
+| **19** GIF animation | New BLE mode + `loop()` | New packet magic; multi-frame `/anim/*.bin`; cycle with `millis()` and frame delay. |
+
+**Already in your `main.cpp` (no laptop action for Swift-only quick wins):** `PROPERTY_WRITE_NR` on image char, cache check, progressive line draw, FS dither path, stats request handling.
+
+---
+
 ## PRIORITY 1 — Core experience
 
 ### 1. Faster BLE image transfer *(ESP32 + Swift)*
-**Status: DONE** — `PROPERTY_WRITE_NR` added to firmware, confirmed faster on device.
-Remaining Swift half: remove the 5 ms post-header sleep in `BLEManager.swift` line 118:
+**Firmware: DONE** — `PROPERTY_WRITE_NR` on device; no laptop change needed for Swift quick wins above.
+**Swift:** remove the 5 ms post-header sleep in `BLEManager.swift` (`sendRGB565`):
 ```swift
 // DELETE: try await Task.sleep(nanoseconds: 5_000_000)
 ```
@@ -42,23 +85,19 @@ clamp.maxComponents = CIVector(x: 0.90, y: 0.90, z: 0.90, w: 1)
 ---
 
 ### 4. Cancel transfer immediately on track skip *(Swift)*
-When the user skips, the old transfer finishes before the new one starts.
+**Status: largely DONE in repo** — `SpotifyManager` uses `artSendTask` / `artInFlightTrackId` and cancels on track change; `BLEManager` uses `transferEpoch` / `cancelOngoingTransfer()` / `ensureTransferEpoch()` instead of the snippet below. Optional: call `Task.checkCancellation()` in the send loop (epoch checks already enforce abort).
 
-**Swift** — `SpotifyManager.swift`: hold a reference to the active `Task` and cancel on
-new track detection:
+Legacy sketch (superseded):
 ```swift
 private var transferTask: Task<Void, Never>?
 transferTask?.cancel()
 transferTask = Task { try? await bleManager.processTrack(imageURL: newURL) }
 ```
-Also check `Task.isCancelled` between writes in `BLEManager.sendRGB565()`.
 
 ---
 
 ### 5. Fix app background not fully white *(Swift)*
-`ContentView`'s `NavigationStack` is missing `.background(Color.white)` and
-`.preferredColorScheme(.light)` — on dark-mode devices safe-area gaps turn dark.
-`SettingsView` already has both; apply the same to `ContentView`.
+`AppDelegate` already forces light `UIWindow` / white roots. **Remaining:** add `.preferredColorScheme(.light)` on `ContentView`’s `NavigationStack` (see **Swift quick wins** at top). Background white is largely in place.
 
 ---
 
@@ -88,11 +127,7 @@ persisted with `UserDefaults`.
 ---
 
 ### 8. Fix cache count display *(Swift)*
-The count shows but only after tapping "Cache count" manually. It should:
-- Refresh automatically on connect (verify `onCharacteristicsReady()` updates the
-  `@Published var sdCacheEntryCount` and `ContentView` is observing it)
-- Always be visible when connected ("X songs cached")
-- Refresh after each successful transfer in `SpotifyManager`
+See **Swift quick wins** at top (always show total when connected, loading vs `0…N`, refresh after send, drop manual button). `onCharacteristicsReady()` already calls `refreshSDCacheCount()`; no `main.cpp` change required.
 
 ---
 
@@ -108,10 +143,10 @@ file.write((uint8_t*)&crc, 4);
 ---
 
 ### 10. Fix stale error message *(Swift)*
-`lastError` in `SpotifyManager` is set on failure but never cleared on success.
+`lastError` is set on failure but should clear on success — see **Swift quick wins** at top (`lastError = nil` after successful `fetchCurrentlyPlayingWithRefresh()` in `pollOnce`, and optionally after successful BLE send).
 
 ```swift
-self.lastError = nil  // add at top of successful poll path in pollOnce()
+self.lastError = nil  // after successful fetch in pollOnce()
 ```
 
 ---

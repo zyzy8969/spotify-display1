@@ -16,6 +16,7 @@ struct ContentView: View {
                     ConnectionStatusView(
                         isConnected: bleManager.isConnected,
                         cacheCount: bleManager.sdCacheEntryCount,
+                        cacheCountLoading: bleManager.sdCacheCountLoading,
                         isAuthenticated: spotifyManager.isAuthenticated
                     )
 
@@ -70,11 +71,6 @@ struct ContentView: View {
                     Spacer(minLength: 0)
 
                     HStack(spacing: 24) {
-                        Button("Cache count") {
-                            Task { try? await bleManager.refreshSDCacheCount() }
-                        }
-                        .disabled(!bleManager.isConnected)
-
                         Button {
                             Task { await spotifyManager.restoreSession() }
                         } label: {
@@ -115,12 +111,14 @@ struct ContentView: View {
             }
         }
         .background(Color.white.ignoresSafeArea(edges: .all))
+        .preferredColorScheme(.light)
     }
 }
 
 struct ConnectionStatusView: View {
     let isConnected: Bool
     var cacheCount: Int?
+    var cacheCountLoading: Bool = false
     var isAuthenticated: Bool = false
 
     var body: some View {
@@ -141,10 +139,18 @@ struct ConnectionStatusView: View {
                     .font(.footnote)
                     .foregroundStyle(.black.opacity(0.65))
             }
-            if let n = cacheCount {
-                Text("Cached on device: \(n)")
-                    .font(.caption2)
-                    .foregroundStyle(.black.opacity(0.38))
+            if isConnected {
+                Group {
+                    if cacheCountLoading, cacheCount == nil {
+                        Text("Total cached on display: …")
+                    } else if let n = cacheCount {
+                        Text("Total cached on display: \(n)")
+                    } else {
+                        Text("Total cached on display: —")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.black.opacity(0.38))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

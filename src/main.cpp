@@ -268,11 +268,13 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 pMsgChar->setValue("ERROR: Size mismatch");
                 pMsgChar->notify();
                 imageState = WAITING_FOR_SIZE;  // Reset
+                lastDrawnBytes = 0;
                 return;
             }
 
             Serial.printf("BLE: Expecting %d bytes\n", expectedSize);
             receivedBytes = 0;
+            lastDrawnBytes = 0;  // keep progressive draw in sync with new frame (top-first)
             imageState = RECEIVING_DATA;
 
         } else if (imageState == RECEIVING_DATA) {
@@ -280,6 +282,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             if (value.length() == 4 && decodeLE32(value) == IMAGE_SIZE) {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
                 receivedBytes = 0;
+                lastDrawnBytes = 0;
                 return;
             }
 
@@ -292,6 +295,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 pMsgChar->notify();
                 imageState = WAITING_FOR_SIZE;  // Reset
                 receivedBytes = 0;
+                lastDrawnBytes = 0;
                 return;
             }
 

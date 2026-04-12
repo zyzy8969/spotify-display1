@@ -206,6 +206,7 @@ final class SpotifyManager: ObservableObject {
         do {
             pollStatus = "Polling Spotify…"
             let state = try await fetchCurrentlyPlayingWithRefresh()
+            lastError = nil
 
             guard let item = state.item, state.isPlaying else {
                 pollStatus = "Nothing playing"
@@ -243,6 +244,11 @@ final class SpotifyManager: ObservableObject {
 
             guard let since = pendingSince, Date().timeIntervalSince(since) >= debounceSeconds else { return }
 
+            // Do not re-enter send while the same track is still uploading (~1 Hz poll would cancel mid-BLE).
+            if artSendTask != nil, artInFlightTrackId == item.id {
+                return
+            }
+
             let artURL = bestArtURL(from: item)
             guard let artURL else {
                 lastError = "No album art for this track"
@@ -275,6 +281,7 @@ final class SpotifyManager: ObservableObject {
                         self.artSendTask = nil
                         return
                     }
+                    self.lastError = nil
                     self.lastSentToDisplayTrackId = capturedId
                     self.pendingTrack = nil
                     self.pendingSince = nil
