@@ -33,6 +33,10 @@
 			</array>
 		</dict>
 	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Find and send album art to your Spotify Display over Bluetooth.</string>
 	<key>SpotifyClientID</key>

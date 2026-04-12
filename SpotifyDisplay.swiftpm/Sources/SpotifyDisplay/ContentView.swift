@@ -2,10 +2,15 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var bleManager = BLEManager()
     @StateObject private var spotifyManager = SpotifyManager()
     @State private var showSettings = false
     @State private var showDetails = false
+
+    private var isSceneBackground: Bool {
+        scenePhase == .background
+    }
 
     var body: some View {
         NavigationStack {
@@ -17,7 +22,8 @@ struct ContentView: View {
                         isConnected: bleManager.isConnected,
                         cacheCount: bleManager.sdCacheEntryCount,
                         cacheCountLoading: bleManager.sdCacheCountLoading,
-                        isAuthenticated: spotifyManager.isAuthenticated
+                        isAuthenticated: spotifyManager.isAuthenticated,
+                        emphasizeBackgroundLimit: isSceneBackground
                     )
 
                     AlbumArtView(imageData: bleManager.currentAlbumArt)
@@ -47,6 +53,12 @@ struct ContentView: View {
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 8)
                     }
+
+                    Text("Spotify checks and new art work best with this app open. A transfer in progress can finish briefly in the background.")
+                        .font(.caption2)
+                        .foregroundStyle(.black.opacity(isSceneBackground ? 0.5 : 0.32))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 10)
 
                     DisclosureGroup(isExpanded: $showDetails) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -120,6 +132,8 @@ struct ConnectionStatusView: View {
     var cacheCount: Int?
     var cacheCountLoading: Bool = false
     var isAuthenticated: Bool = false
+    /// When true (e.g. app in background), surface a clearer reminder that polling mostly pauses.
+    var emphasizeBackgroundLimit: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -151,6 +165,12 @@ struct ConnectionStatusView: View {
                 }
                 .font(.caption2)
                 .foregroundStyle(.black.opacity(0.38))
+            }
+            if emphasizeBackgroundLimit, isAuthenticated {
+                Text("Background: Spotify updates are limited — bring the app to the foreground for live art.")
+                    .font(.caption2)
+                    .foregroundStyle(.black.opacity(0.48))
+                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

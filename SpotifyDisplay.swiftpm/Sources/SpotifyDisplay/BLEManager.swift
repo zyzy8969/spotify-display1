@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreBluetooth
+import UIKit
 
 /// ESP32 GATT contract — repo `spotify-display1`: `docs/BLE_PROTOCOL.md`, `src/main.cpp`, `python/spotify_album_sender.py`.
 @MainActor
@@ -31,6 +32,15 @@ final class BLEManager: NSObject, ObservableObject {
     private var sawReady = false
     private var awaitingImageComplete = false
 
+    /// Set in `centralManager(_:willRestoreState:)` and consumed when the central becomes `.poweredOn`.
+    private var pendingRestoredPeripheral: CBPeripheral?
+
+    /// Lets an in-flight album transfer finish after the app moves to background (best-effort, seconds).
+    private var transferBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+
+    /// Cancels the 32s `SUCCESS` wait when the firmware ACKs early (saves idle sleep + CPU).
+    private var imageSuccessTimeoutTask: Task<Void, Never>?
+
     /// Incremented on `cancelOngoingTransfer()` and `failPending` so in-flight `processTrack` / `sendRGB565` abort cooperatively.
     private var transferEpoch: UInt64 = 0
     private var activeDownloadTask: Task<(Data, URLResponse), Error>?
@@ -48,9 +58,48 @@ final class BLEManager: NSObject, ObservableObject {
     /// Must match `main.cpp` stats request magic.
     private let statsMagic = UInt32(0xC0FFEEE1)
 
+    private static var centralRestoreIdentifier: String {
+        (Bundle.main.bundleIdentifier ?? "SpotifyDisplay") + ".bleCentral"
+    }
+
     override init() {
         super.init()
-        central = CBCentralManager(delegate: self, queue: .main)
+        central = CBCentralManager(
+            delegate: self,
+            queue: .main,
+            options: [CBCentralManagerOptionRestoreIdentifierKey: Self.centralRestoreIdentifier]
+        )
+    }
+
+    private func beginTransferBackgroundTaskIfNeeded() {
+        guard transferBackgroundTaskID == .invalid else { return }
+        transferBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "BLESpotifyArtTransfer") { [weak self] in
+            Task { @MainActor in self?.endTransferBackgroundTaskIfNeeded() }
+        }
+    }
+
+    private func endTransferBackgroundTaskIfNeeded() {
+        guard transferBackgroundTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(transferBackgroundTaskID)
+        transferBackgroundTaskID = .invalid
+    }
+
+    private func cancelImageSuccessTimeoutTask() {
+        let t = imageSuccessTimeoutTask
+        imageSuccessTimeoutTask = nil
+        t?.cancel()
+    }
+
+    /// Shared path for a live connection (fresh connect or state restoration while already connected).
+    private func enterConnectedStateAndDiscover(_ peripheral: CBPeripheral) {
+        self.peripheral = peripheral
+        peripheral.delegate = self
+        isConnected = true
+        sdCacheEntryCount = nil
+        sdCacheCountLoading = true
+        sawReady = false
+        statusMessage = "Discovering services…"
+        peripheral.discoverServices([serviceUUID])
     }
 
     func startScanning() {
@@ -80,6 +129,7 @@ final class BLEManager: NSObject, ObservableObject {
     /// Aborts in-flight album download and BLE chunk loop. Next `processTrack` uses a fresh epoch; send a new image header on the next transfer so the ESP32 can resync if the previous send was partial.
     func cancelOngoingTransfer() {
         transferEpoch += 1
+        cancelImageSuccessTimeoutTask()
         activeDownloadTask?.cancel()
         activeDownloadTask = nil
         transferContinuation?.resume(throwing: CancellationError())
@@ -98,6 +148,9 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// Parallel download + cache check (like desktop script), then send on miss.
     func processTrack(imageURL: String, trackId _: String) async throws {
+        beginTransferBackgroundTaskIfNeeded()
+        defer { endTransferBackgroundTaskIfNeeded() }
+
         let epochAtStart = transferEpoch
         try ensureTransferEpoch(epochAtStart)
 
@@ -199,9 +252,16 @@ final class BLEManager: NSObject, ObservableObject {
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.transferContinuation = cont
-            Task { @MainActor in
-                // Firmware may ACK only after dither + redraw + SD save (see main.cpp imageTransferComplete).
-                try? await Task.sleep(nanoseconds: 22_000_000_000)
+            self.cancelImageSuccessTimeoutTask()
+            self.imageSuccessTimeoutTask = Task { @MainActor in
+                defer { self.imageSuccessTimeoutTask = nil }
+                do {
+                    // Firmware ACK after dither + redraw + SD save (main.cpp); allow slow SD paths.
+                    try await Task.sleep(nanoseconds: 32_000_000_000)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
                 if let c = self.transferContinuation {
                     self.transferContinuation = nil
                     c.resume(throwing: SpotifyDisplayError.bleTimeout)
@@ -209,13 +269,17 @@ final class BLEManager: NSObject, ObservableObject {
             }
         }
 
+        cancelImageSuccessTimeoutTask()
+
         try ensureTransferEpoch(epochAtStart)
 
         isTransferring = false
         transferProgress = 0
         statusMessage = "Sent to display"
 
-        try? await refreshSDCacheCount()
+        Task { @MainActor in
+            try? await self.refreshSDCacheCount()
+        }
     }
 
     /// Ask ESP32 (firmware with stats magic) how many `.bin` files are in `/cache`.
@@ -261,6 +325,7 @@ final class BLEManager: NSObject, ObservableObject {
 
     private func failPending(error: Error) {
         transferEpoch += 1
+        cancelImageSuccessTimeoutTask()
         activeDownloadTask?.cancel()
         activeDownloadTask = nil
         readyContinuation?.resume(throwing: error)
@@ -315,6 +380,7 @@ final class BLEManager: NSObject, ObservableObject {
         if text == "SUCCESS", awaitingImageComplete {
             if let c = transferContinuation {
                 transferContinuation = nil
+                cancelImageSuccessTimeoutTask()
                 c.resume()
             }
         }
@@ -350,13 +416,54 @@ final class BLEManager: NSObject, ObservableObject {
 }
 
 extension BLEManager: CBCentralManagerDelegate {
+    nonisolated func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        Task { @MainActor in
+            guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral], !peripherals.isEmpty else {
+                return
+            }
+            let named = peripherals.first { $0.name == "Spotify Display" }
+            self.pendingRestoredPeripheral = named ?? peripherals.first
+        }
+    }
+
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
         Task { @MainActor in
             if central.state == .poweredOn {
-                self.startScanning()
+                if let p = self.pendingRestoredPeripheral {
+                    self.pendingRestoredPeripheral = nil
+                    self.applyRestoredPeripheral(p, central: central)
+                    return
+                }
+                let connecting = self.peripheral?.state == .connecting
+                if !self.isConnected, !connecting {
+                    self.startScanning()
+                }
             } else {
                 self.statusMessage = "Bluetooth unavailable"
             }
+        }
+    }
+
+    /// After state restoration: reconnect if needed, or rediscover services if already connected.
+    private func applyRestoredPeripheral(_ p: CBPeripheral, central: CBCentralManager) {
+        switch p.state {
+        case .connected:
+            statusMessage = "Restoring connection…"
+            enterConnectedStateAndDiscover(p)
+        case .disconnected:
+            peripheral = p
+            p.delegate = self
+            isConnected = false
+            statusMessage = "Reconnecting…"
+            central.connect(p, options: nil)
+        case .connecting:
+            peripheral = p
+            p.delegate = self
+            statusMessage = "Connecting…"
+        @unknown default:
+            peripheral = p
+            p.delegate = self
+            statusMessage = "Connecting…"
         }
     }
 
@@ -372,13 +479,7 @@ extension BLEManager: CBCentralManagerDelegate {
 
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Task { @MainActor in
-            self.isConnected = true
-            self.sdCacheEntryCount = nil
-            self.sdCacheCountLoading = true
-            self.sawReady = false
-            self.statusMessage = "Discovering services…"
-            peripheral.delegate = self
-            peripheral.discoverServices([self.serviceUUID])
+            self.enterConnectedStateAndDiscover(peripheral)
         }
     }
 
@@ -452,6 +553,7 @@ extension BLEManager: CBPeripheralDelegate {
             case self.imageUUID:
                 if data.count == 1, data[0] == 0x01, self.awaitingImageComplete, let c = self.transferContinuation {
                     self.transferContinuation = nil
+                    self.cancelImageSuccessTimeoutTask()
                     c.resume()
                 }
 

@@ -26,6 +26,14 @@ final class SpotifyManager: ObservableObject {
     private var artSendTask: Task<Void, Never>?
     private var artInFlightTrackId: String?
 
+    /// After a display transfer error, do not start another send for the same track every poll (prevents BLE retry storms).
+    private var lastDisplayFailureAt: Date?
+    private var lastDisplayFailureTrackId: String?
+    private let displayFailureCooldownSeconds: TimeInterval = 3.0
+    /// After any display error, brief pause before starting a send for a *different* track (reduces hammering on bad link).
+    private var lastAnyDisplayFailureAt: Date?
+    private let displayFailureGlobalBackoffSeconds: TimeInterval = 1.5
+
     /// ~1 Hz so skips are noticed quickly; rate limits handled via `rateLimitedUntil` + 429 handling.
     private let pollIntervalSeconds: TimeInterval = 1.0
     /// After HTTP 429, skip player API calls until this time (honors Retry-After, capped).
@@ -151,6 +159,9 @@ final class SpotifyManager: ObservableObject {
         artSendTask?.cancel()
         artSendTask = nil
         artInFlightTrackId = nil
+        lastDisplayFailureAt = nil
+        lastDisplayFailureTrackId = nil
+        lastAnyDisplayFailureAt = nil
         pollStatus = "Not authenticated"
     }
 
@@ -185,6 +196,9 @@ final class SpotifyManager: ObservableObject {
         artSendTask?.cancel()
         artSendTask = nil
         artInFlightTrackId = nil
+        lastDisplayFailureAt = nil
+        lastDisplayFailureTrackId = nil
+        lastAnyDisplayFailureAt = nil
         monitorTask?.cancel()
         monitorTask = nil
     }
@@ -219,6 +233,9 @@ final class SpotifyManager: ObservableObject {
                 artSendTask?.cancel()
                 artSendTask = nil
                 artInFlightTrackId = nil
+                lastDisplayFailureAt = nil
+                lastDisplayFailureTrackId = nil
+                lastAnyDisplayFailureAt = nil
                 return
             }
 
@@ -249,12 +266,25 @@ final class SpotifyManager: ObservableObject {
                 return
             }
 
+            if let failId = lastDisplayFailureTrackId, let failAt = lastDisplayFailureAt,
+               failId == item.id,
+               Date().timeIntervalSince(failAt) < displayFailureCooldownSeconds
+            {
+                return
+            }
+
             let artURL = bestArtURL(from: item)
             guard let artURL else {
                 lastError = "No album art for this track"
                 lastSentToDisplayTrackId = item.id
                 pendingTrack = nil
                 pendingSince = nil
+                return
+            }
+
+            if let globalFail = lastAnyDisplayFailureAt,
+               Date().timeIntervalSince(globalFail) < displayFailureGlobalBackoffSeconds
+            {
                 return
             }
 
@@ -276,18 +306,31 @@ final class SpotifyManager: ObservableObject {
                         self.artSendTask = nil
                         return
                     }
-                    guard self.currentTrack?.id == capturedId else {
+                    if self.currentTrack?.id == capturedId {
+                        self.lastError = nil
+                        self.lastSentToDisplayTrackId = capturedId
+                        self.lastDisplayFailureAt = nil
+                        self.lastDisplayFailureTrackId = nil
+                        self.lastAnyDisplayFailureAt = nil
+                        self.pendingTrack = nil
+                        self.pendingSince = nil
                         self.artInFlightTrackId = nil
                         self.artSendTask = nil
-                        return
+                        self.pollStatus = "Playing: \(self.currentTrack?.name ?? capturedName)"
+                    } else {
+                        // Transfer finished for `capturedId` but UI already moved — still dedupe so we do not 1 Hz resend.
+                        self.lastSentToDisplayTrackId = capturedId
+                        self.lastDisplayFailureAt = nil
+                        self.lastDisplayFailureTrackId = nil
+                        self.lastAnyDisplayFailureAt = nil
+                        self.pendingTrack = nil
+                        self.pendingSince = nil
+                        self.artInFlightTrackId = nil
+                        self.artSendTask = nil
+                        if let t = self.currentTrack {
+                            self.pollStatus = "Playing: \(t.name)"
+                        }
                     }
-                    self.lastError = nil
-                    self.lastSentToDisplayTrackId = capturedId
-                    self.pendingTrack = nil
-                    self.pendingSince = nil
-                    self.artInFlightTrackId = nil
-                    self.artSendTask = nil
-                    self.pollStatus = "Playing: \(self.currentTrack?.name ?? capturedName)"
                 } catch let error as URLError where error.code == .cancelled {
                     self.artInFlightTrackId = nil
                     self.artSendTask = nil
@@ -297,6 +340,12 @@ final class SpotifyManager: ObservableObject {
                 } catch {
                     self.lastError = error.localizedDescription
                     self.pollStatus = "Display transfer failed"
+                    let now = Date()
+                    self.lastDisplayFailureAt = now
+                    self.lastDisplayFailureTrackId = capturedId
+                    self.lastAnyDisplayFailureAt = now
+                    self.pendingTrack = nil
+                    self.pendingSince = nil
                     self.artInFlightTrackId = nil
                     self.artSendTask = nil
                 }
