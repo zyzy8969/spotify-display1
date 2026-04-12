@@ -86,17 +86,28 @@ enum ImageProcessor {
             throw SpotifyDisplayError.conversionFailed
         }
 
+        var rasterizeFailed = false
         raw.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else {
+                rasterizeFailed = true
+                return
+            }
             guard let ctx = CGContext(
-                data: ptr.baseAddress,
+                data: base,
                 width: width,
                 height: height,
                 bitsPerComponent: 8,
                 bytesPerRow: bytesPerRow,
                 space: cs,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            ) else { return }
+            ) else {
+                rasterizeFailed = true
+                return
+            }
             ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        if rasterizeFailed {
+            throw SpotifyDisplayError.conversionFailed
         }
 
         var le = Data()

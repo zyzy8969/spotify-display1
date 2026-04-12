@@ -57,7 +57,7 @@ Pin definitions and wiring in [`src/main.cpp`](src/main.cpp).
 
 1. Install [PlatformIO](https://platformio.org/).
 2. Open this folder; build and upload (`esp32-s3-devkitc-1` env).
-3. Serial monitor at 115200 baud for debug output.
+3. Serial monitor at **921600** baud for debug output (matches `Serial.begin` and `platformio.ini` `monitor_speed`).
 4. If you change the BLE GATT layout, update [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md).
 
 ## iOS app setup

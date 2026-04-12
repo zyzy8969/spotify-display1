@@ -387,12 +387,16 @@ final class BLEManager: NSObject, ObservableObject {
 
         if text.hasPrefix("CACHE_COUNT:") {
             let rest = text.dropFirst("CACHE_COUNT:".count)
-            if let n = Int(rest) {
+            let trimmed = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let n = Int(trimmed) {
                 sdCacheEntryCount = n
                 if let c = statsContinuation {
                     statsContinuation = nil
                     c.resume(returning: n)
                 }
+            } else if let c = statsContinuation {
+                statsContinuation = nil
+                c.resume(throwing: SpotifyDisplayError.conversionFailed)
             }
         }
     }

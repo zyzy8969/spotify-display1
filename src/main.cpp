@@ -1358,8 +1358,8 @@ void loop() {
         // Hide startup screen when displaying image
         showingStartupScreen = false;
 
-        // NOTE: No dithering needed - cache already contains dithered image!
-        // Dithering happens before saving (see line ~864), so cached image is pre-dithered
+        // NOTE: No dithering needed — cache files were written after dither in the BLE
+        // `imageTransferComplete` path (`saveToCache`), so SD holds the same pixels we would redraw.
 
         // Draw image with random transition
         unsigned long displayStart = millis();
