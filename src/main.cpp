@@ -120,7 +120,6 @@ bool isCached(uint8_t* cacheKey);
 bool loadFromCache(uint8_t* cacheKey);
 bool saveToCache(uint8_t* cacheKey);
 void printRainbowText(String text, int x, int y, int textSize);
-void applyFloydSteinbergDithering(uint16_t* buffer, int width, int height);
 void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor);
 void drawZoomBlocks(uint16_t* buffer, int width, int height);
 
@@ -378,93 +377,6 @@ void printRainbowText(String text, int x, int y, int textSize) {
     if (colorIndex >= sizeof(rainbowColors) / sizeof(rainbowColors[0])) {
       colorIndex = 0;  // Loop back to the first color
     }
-  }
-}
-
-// ==================================================
-// FLOYD-STEINBERG DITHERING
-// ==================================================
-
-// Apply Floyd-Steinberg dithering to RGB565 image buffer
-// Optimized: Uses only 2 rows of error buffers (2.8KB vs 345KB) + bit shifts instead of division
-void applyFloydSteinbergDithering(uint16_t* buffer, int width, int height) {
-  // Two-row error buffer (current + next row only) - 99.2% memory reduction
-  // 2 rows × 240 pixels × 3 channels × 2 bytes = 2.8KB (was 345KB)
-  int16_t errorBuf[2][DISPLAY_WIDTH * 3];
-  memset(errorBuf, 0, sizeof(errorBuf));
-
-  int currRow = 0;
-  int nextRow = 1;
-
-  // Process each pixel
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      int idx = y * width + x;
-      uint16_t pixel = buffer[idx];
-
-      // Extract RGB565 components to 8-bit
-      int16_t oldR = ((pixel >> 11) & 0x1F) << 3;  // 5 bits -> 8 bits
-      int16_t oldG = ((pixel >> 5) & 0x3F) << 2;   // 6 bits -> 8 bits
-      int16_t oldB = (pixel & 0x1F) << 3;          // 5 bits -> 8 bits
-
-      // Add accumulated error from current row buffer
-      oldR = constrain(oldR + errorBuf[currRow][x * 3 + 0], 0, 255);
-      oldG = constrain(oldG + errorBuf[currRow][x * 3 + 1], 0, 255);
-      oldB = constrain(oldB + errorBuf[currRow][x * 3 + 2], 0, 255);
-
-      // Quantize to RGB565
-      int16_t newR = (oldR >> 3) << 3;  // Round to 5 bits
-      int16_t newG = (oldG >> 2) << 2;  // Round to 6 bits
-      int16_t newB = (oldB >> 3) << 3;  // Round to 5 bits
-
-      // Calculate quantization error
-      int16_t errR = oldR - newR;
-      int16_t errG = oldG - newG;
-      int16_t errB = oldB - newB;
-
-      // Update pixel with quantized value
-      buffer[idx] = ((newR >> 3) << 11) | ((newG >> 2) << 5) | (newB >> 3);
-
-      // Distribute error using bit shifts (faster than division)
-      // Floyd-Steinberg pattern:
-      //        X   7/16
-      //  3/16 5/16 1/16
-
-      // Right pixel (7/16) - use bit shift: (err * 7) >> 4 instead of err * 7 / 16
-      if (x + 1 < width) {
-        errorBuf[currRow][(x + 1) * 3 + 0] += (errR * 7) >> 4;
-        errorBuf[currRow][(x + 1) * 3 + 1] += (errG * 7) >> 4;
-        errorBuf[currRow][(x + 1) * 3 + 2] += (errB * 7) >> 4;
-      }
-
-      // Bottom row pixels (only if not last row)
-      if (y + 1 < height) {
-        // Bottom-left (3/16)
-        if (x > 0) {
-          errorBuf[nextRow][(x - 1) * 3 + 0] += (errR * 3) >> 4;
-          errorBuf[nextRow][(x - 1) * 3 + 1] += (errG * 3) >> 4;
-          errorBuf[nextRow][(x - 1) * 3 + 2] += (errB * 3) >> 4;
-        }
-
-        // Bottom (5/16)
-        errorBuf[nextRow][x * 3 + 0] += (errR * 5) >> 4;
-        errorBuf[nextRow][x * 3 + 1] += (errG * 5) >> 4;
-        errorBuf[nextRow][x * 3 + 2] += (errB * 5) >> 4;
-
-        // Bottom-right (1/16)
-        if (x + 1 < width) {
-          errorBuf[nextRow][(x + 1) * 3 + 0] += errR >> 4;
-          errorBuf[nextRow][(x + 1) * 3 + 1] += errG >> 4;
-          errorBuf[nextRow][(x + 1) * 3 + 2] += errB >> 4;
-        }
-      }
-    }
-
-    // Swap rows and clear next row for upcoming line
-    int temp = currRow;
-    currRow = nextRow;
-    nextRow = temp;
-    memset(errorBuf[nextRow], 0, sizeof(errorBuf[0]));
   }
 }
 
@@ -1358,8 +1270,8 @@ void loop() {
         // Hide startup screen when displaying image
         showingStartupScreen = false;
 
-        // NOTE: No dithering needed — cache files were written after dither in the BLE
-        // `imageTransferComplete` path (`saveToCache`), so SD holds the same pixels we would redraw.
+        // NOTE: No dither on ESP — cache files were written from phone-dithered RGB565 in the BLE
+        // `imageTransferComplete` path (`saveToCache`), so SD matches what the phone sent.
 
         // Draw image with random transition
         unsigned long displayStart = millis();
@@ -1431,28 +1343,20 @@ void loop() {
 
     Serial.println("Processing image transfer completion...");
 
-    // Do NOT notify the client until dither/display/save finish — otherwise the phone
+    // Do NOT notify the client until display/save finish — otherwise the phone
     // can start the next BLE image while we still mutate imageBuffer (race → half frames / retries).
+    // RGB565 is already Floyd–Steinberg dithered on the phone before BLE send.
 
-    // Apply Floyd-Steinberg dithering for better image quality
-    unsigned long ditherStart = millis();
-    Serial.println("Applying dithering...");
-    applyFloydSteinbergDithering(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    unsigned long ditherTime = millis() - ditherStart;
-
-    // Redraw the full image with dithering applied
     unsigned long displayStart = millis();
-    Serial.println("Redrawing with dithering...");
+    Serial.println("Redrawing (phone-dithered RGB565)...");
     drawImageLineByLine(imageBuffer, 0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
     unsigned long displayTime = millis() - displayStart;
 
-    // Save to cache
     unsigned long saveStart = millis();
     saveToCache(currentCacheKey);
     unsigned long saveTime = millis() - saveStart;
 
-    Serial.printf("⚡ Processing: dither %lums, display %lums, save %lums\n",
-                   ditherTime, displayTime, saveTime);
+    Serial.printf("⚡ Processing: display %lums, save %lums\n", displayTime, saveTime);
     Serial.println("Image processing complete!");
 
     // Client may send the next image only after this point (imageBuffer exclusive use ends here).

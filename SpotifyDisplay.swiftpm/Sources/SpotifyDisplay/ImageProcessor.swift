@@ -2,7 +2,7 @@ import UIKit
 import CoreImage
 import CoreGraphics
 
-/// sRGB-oriented resize + grade, then packed little-endian RGB565 for ESP32 (115_200 bytes).
+/// sRGB-oriented resize + grade, packed little-endian RGB565, then Floyd–Steinberg (same algorithm as firmware used) for ESP32 (115_200 bytes).
 enum ImageProcessor {
     private static let targetSize = CGSize(width: 240, height: 240)
     private static let ciContext: CIContext = {
@@ -34,7 +34,9 @@ enum ImageProcessor {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        return try packRGB565LittleEndian(cgImage: output, width: 240, height: 240)
+        var rgb565 = try packRGB565LittleEndian(cgImage: output, width: 240, height: 240)
+        applyFloydSteinbergDitheringRGB565(&rgb565, width: 240, height: 240)
+        return rgb565
     }
 
     /// Aspect-fill into exact 240×240 (album art style).
@@ -125,5 +127,89 @@ enum ImageProcessor {
             }
         }
         return le
+    }
+
+    /// Two-row Floyd–Steinberg matching the former `applyFloydSteinbergDithering` in `src/main.cpp` (RGB565 LE buffer).
+    private static func applyFloydSteinbergDitheringRGB565(_ data: inout Data, width: Int, height: Int) {
+        precondition(data.count == width * height * 2)
+        data.withUnsafeMutableBytes { raw in
+            let buffer = raw.bindMemory(to: UInt16.self).baseAddress!
+            var errorBuf: [[Int16]] = [
+                [Int16](repeating: 0, count: width * 3),
+                [Int16](repeating: 0, count: width * 3),
+            ]
+            var currRow = 0
+            var nextRow = 1
+
+            for y in 0..<height {
+                for x in 0..<width {
+                    let idx = y * width + x
+                    let pixel = buffer[idx]
+
+                    var oldR = Int16(((pixel >> 11) & 0x1F) << 3)
+                    var oldG = Int16(((pixel >> 5) & 0x3F) << 2)
+                    var oldB = Int16((pixel & 0x1F) << 3)
+
+                    oldR = oldR &+ errorBuf[currRow][x * 3]
+                    oldG = oldG &+ errorBuf[currRow][x * 3 + 1]
+                    oldB = oldB &+ errorBuf[currRow][x * 3 + 2]
+
+                    oldR = min(255, max(0, oldR))
+                    oldG = min(255, max(0, oldG))
+                    oldB = min(255, max(0, oldB))
+
+                    let newR = Int16((oldR >> 3) << 3)
+                    let newG = Int16((oldG >> 2) << 2)
+                    let newB = Int16((oldB >> 3) << 3)
+
+                    let errR = oldR - newR
+                    let errG = oldG - newG
+                    let errB = oldB - newB
+
+                    buffer[idx] = (UInt16(truncatingIfNeeded: Int(newR) >> 3) << 11)
+                        | (UInt16(truncatingIfNeeded: Int(newG) >> 2) << 5)
+                        | UInt16(truncatingIfNeeded: Int(newB) >> 3)
+
+                    if x + 1 < width {
+                        let xr = (Int32(errR) * 7) >> 4
+                        let xg = (Int32(errG) * 7) >> 4
+                        let xb = (Int32(errB) * 7) >> 4
+                        errorBuf[currRow][(x + 1) * 3] += Int16(clamping: xr)
+                        errorBuf[currRow][(x + 1) * 3 + 1] += Int16(clamping: xg)
+                        errorBuf[currRow][(x + 1) * 3 + 2] += Int16(clamping: xb)
+                    }
+
+                    if y + 1 < height {
+                        if x > 0 {
+                            let xr = (Int32(errR) * 3) >> 4
+                            let xg = (Int32(errG) * 3) >> 4
+                            let xb = (Int32(errB) * 3) >> 4
+                            errorBuf[nextRow][(x - 1) * 3] += Int16(clamping: xr)
+                            errorBuf[nextRow][(x - 1) * 3 + 1] += Int16(clamping: xg)
+                            errorBuf[nextRow][(x - 1) * 3 + 2] += Int16(clamping: xb)
+                        }
+
+                        let xr5 = (Int32(errR) * 5) >> 4
+                        let xg5 = (Int32(errG) * 5) >> 4
+                        let xb5 = (Int32(errB) * 5) >> 4
+                        errorBuf[nextRow][x * 3] += Int16(clamping: xr5)
+                        errorBuf[nextRow][x * 3 + 1] += Int16(clamping: xg5)
+                        errorBuf[nextRow][x * 3 + 2] += Int16(clamping: xb5)
+
+                        if x + 1 < width {
+                            let xr1 = Int32(errR) >> 4
+                            let xg1 = Int32(errG) >> 4
+                            let xb1 = Int32(errB) >> 4
+                            errorBuf[nextRow][(x + 1) * 3] += Int16(clamping: xr1)
+                            errorBuf[nextRow][(x + 1) * 3 + 1] += Int16(clamping: xg1)
+                            errorBuf[nextRow][(x + 1) * 3 + 2] += Int16(clamping: xb1)
+                        }
+                    }
+                }
+
+                swap(&currRow, &nextRow)
+                errorBuf[nextRow] = [Int16](repeating: 0, count: width * 3)
+            }
+        }
     }
 }

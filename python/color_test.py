@@ -62,7 +62,7 @@ CONTRAST = 12           # Contrast boost (0-50, 0 = none)
 
 # === DISPLAY OPTIONS ===
 SHOW_PROGRESS = True    # Show processing progress
-APPLY_DITHERING = True  # Note: Floyd-Steinberg dithering happens on ESP32
+APPLY_DITHERING = True  # Note: current firmware dithers on iOS for BLE; ESP32 does not re-dither
 
 # ==================================================
 # PRESET CONFIGURATIONS

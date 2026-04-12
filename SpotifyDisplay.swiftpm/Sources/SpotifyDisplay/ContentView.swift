@@ -185,6 +185,7 @@ struct AlbumArtView: View {
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width, maxSide)
+            let placeholderSymbolSize = max(12, min(40, side * 0.16))
             ZStack {
                 if let data = imageData, let uiImage = UIImage(data: data) {
                     Image(uiImage: uiImage)
@@ -196,8 +197,9 @@ struct AlbumArtView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(Color.black.opacity(0.04))
                     VStack(spacing: 10) {
-                        Image(systemName: "music.note")
-                            .font(.system(size: min(40, side * 0.16), weight: .ultraLight))
+                        Image(systemName: "music.note.list")
+                            .font(.system(size: placeholderSymbolSize, weight: .ultraLight))
+                            .symbolRenderingMode(.monochrome)
                             .foregroundStyle(.black.opacity(0.22))
                         Text("No art")
                             .font(.caption2)

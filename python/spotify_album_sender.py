@@ -1,6 +1,6 @@
 """
 Spotify Album Art Sender - Sends RGB565 images to ESP32 via Bluetooth LE
-Optimized Mode: ImageMagick Processing + ESP32 Floyd-Steinberg Dithering
+Optimized Mode: ImageMagick + RGB565 (truncation). Current ESP32 firmware expects phone-side Floyd–Steinberg (see iOS `ImageProcessor`); this script does not dither yet.
 BLE Mode: Wireless transfer using Bluetooth Low Energy
 
 Project: spotify-display1
@@ -150,7 +150,7 @@ CONTRAST = 19           # Higher contrast for deeper blacks and brighter highlig
 def convert_to_rgb565(img):
     """
     Convert PIL image to RGB565 format using NumPy vectorization (10-50x faster).
-    No dithering - ESP32 handles Floyd-Steinberg for better quality.
+    Truncation-only RGB565 (no Floyd–Steinberg). Match iOS/firmware contract in `docs/BLE_PROTOCOL.md`.
     """
     import numpy as np
 
@@ -230,7 +230,7 @@ def download_and_convert_image(url):
 
     # === FAST RGB565 CONVERSION ===
     if VERBOSE_LOGGING:
-        print(f"  Converting to RGB565 (Floyd-Steinberg dithering on ESP32)...")
+        print(f"  Converting to RGB565 (truncation; firmware no longer dithers on BLE receive)...")
 
     rgb565_data = convert_to_rgb565(img)
 
@@ -510,7 +510,7 @@ async def main_async():
     """Main async function - BLE mode"""
     print("=" * 60)
     print("Spotify Album Art Sender (BLE MODE)")
-    print("Optimized: ImageMagick + ESP32 Floyd-Steinberg")
+    print("Optimized: ImageMagick + RGB565 (see BLE_PROTOCOL for dither expectations)")
     print("=" * 60)
 
     if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):

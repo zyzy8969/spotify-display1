@@ -256,7 +256,7 @@ final class BLEManager: NSObject, ObservableObject {
             self.imageSuccessTimeoutTask = Task { @MainActor in
                 defer { self.imageSuccessTimeoutTask = nil }
                 do {
-                    // Firmware ACK after dither + redraw + SD save (main.cpp); allow slow SD paths.
+                    // Firmware ACK after full redraw + SD save (main.cpp); allow slow SD paths.
                     try await Task.sleep(nanoseconds: 32_000_000_000)
                 } catch {
                     return
@@ -464,6 +464,10 @@ extension BLEManager: CBCentralManagerDelegate {
             peripheral = p
             p.delegate = self
             statusMessage = "Connecting…"
+        case .disconnecting:
+            peripheral = p
+            p.delegate = self
+            statusMessage = "Disconnecting…"
         @unknown default:
             peripheral = p
             p.delegate = self

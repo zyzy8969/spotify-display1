@@ -7,7 +7,7 @@ An **ESP32-S3** pulls **Spotify album art** from an **iOS app** over **BLE** and
 ## What works right now
 
 - iOS app polls Spotify every ~1 s, detects track changes, downloads album art
-- Art is processed on-device (color grade + Floyd-Steinberg dither — move to iOS is on the roadmap)
+- Art is processed on-device (color grade + Floyd-Steinberg dither in `ImageProcessor` before BLE)
 - BLE transfer uses Write Without Response (fast path) — ~0.5–1 s per image
 - ESP32 checks SD cache first (MD5 of image URL); cached songs show a random transition, new songs draw top-to-bottom progressively so you can tell a new track is arriving
 - SD card holds up to ~32 GB of cached images
