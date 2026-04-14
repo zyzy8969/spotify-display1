@@ -58,6 +58,7 @@ static uint16_t* imageBuffer = nullptr;
 #define CACHE_CHAR_UUID     "0000ffe2-0000-1000-8000-00805f9b34fb"
 #define IMAGE_CHAR_UUID     "0000ffe3-0000-1000-8000-00805f9b34fb"
 #define MESSAGE_CHAR_UUID   "0000ffe4-0000-1000-8000-00805f9b34fb"
+#define BRIGHTNESS_CHAR_UUID "0000ffe5-0000-1000-8000-00805f9b34fb"
 
 // BLE Server and Characteristics
 BLEServer* pServer = nullptr;
@@ -65,6 +66,7 @@ BLECharacteristic* pStatusChar = nullptr;
 BLECharacteristic* pCacheChar = nullptr;
 BLECharacteristic* pImageChar = nullptr;
 BLECharacteristic* pMsgChar = nullptr;
+BLECharacteristic* pBrightnessChar = nullptr;
 
 // BLE Connection state
 bool deviceConnected = false;
@@ -85,6 +87,7 @@ uint32_t expectedSize = 0;
 uint32_t receivedBytes = 0;
 uint8_t currentCacheKey[16];
 bool cacheHit = false;
+uint8_t pendingTransition = 0xFF;  // 0xFF means random transition
 
 // Transition effects enum
 enum TransitionType {
@@ -119,6 +122,8 @@ void showTroubleshooting();
 bool isCached(uint8_t* cacheKey);
 bool loadFromCache(uint8_t* cacheKey);
 bool saveToCache(uint8_t* cacheKey);
+uint32_t computeCRC32(const uint8_t* data, size_t len);
+void clearCacheDirectory();
 void printRainbowText(String text, int x, int y, int textSize);
 void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor);
 void drawZoomBlocks(uint16_t* buffer, int width, int height);
@@ -127,6 +132,7 @@ void drawZoomBlocks(uint16_t* buffer, int width, int height);
 // CRITICAL: Callbacks must be lightweight to prevent BTC_TASK stack overflow
 volatile bool cacheCheckPending = false;
 volatile bool statsRequestPending = false;
+volatile bool clearCachePending = false;
 volatile bool imageTransferComplete = false;
 volatile uint32_t lastDrawnBytes = 0;  // Track how many bytes we've drawn so far
 
@@ -230,6 +236,12 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
             return;
         }
 
+        // Clear-cache command (iOS app): magic + 16 bytes padding
+        if (magic == 0xCAC4E1EA) {
+            clearCachePending = true;
+            return;
+        }
+
         if (magic != 0xDEADBEEF) {
             Serial.printf("ERROR: Bad magic 0x%08X\n", magic);
             return;
@@ -253,13 +265,21 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
         std::string value = pCharacteristic->getValue();
 
         if (imageState == WAITING_FOR_SIZE) {
-            // First write should be 4-byte size header
-            if (value.length() != 4) {
-                Serial.printf("ERROR: Expected 4-byte size, got %d\n", value.length());
+            // First write should be either:
+            // - 4-byte size header (legacy random transition)
+            // - 5-byte header: 1-byte transition + 4-byte little-endian size
+            if (value.length() != 4 && value.length() != 5) {
+                Serial.printf("ERROR: Expected 4/5-byte header, got %d\n", value.length());
                 return;
             }
-
-            expectedSize = decodeLE32(value);
+            if (value.length() == 5) {
+                pendingTransition = (uint8_t)value[0];
+                std::string sizeBytes = value.substr(1, 4);
+                expectedSize = decodeLE32(sizeBytes);
+            } else {
+                pendingTransition = 0xFF;
+                expectedSize = decodeLE32(value);
+            }
 
             if (expectedSize != IMAGE_SIZE) {
                 Serial.printf("ERROR: Size mismatch, got %d, expected %d\n",
@@ -278,7 +298,19 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 
         } else if (imageState == RECEIVING_DATA) {
             // New image header mid-stream: client cancelled and started a fresh transfer
-            if (value.length() == 4 && decodeLE32(value) == IMAGE_SIZE) {
+            bool isResyncHeader = false;
+            uint32_t resyncSize = 0;
+            if (value.length() == 4) {
+                resyncSize = decodeLE32(value);
+                isResyncHeader = true;
+                pendingTransition = 0xFF;
+            } else if (value.length() == 5) {
+                std::string sizeBytes = value.substr(1, 4);
+                resyncSize = decodeLE32(sizeBytes);
+                pendingTransition = (uint8_t)value[0];
+                isResyncHeader = true;
+            }
+            if (isResyncHeader && resyncSize == IMAGE_SIZE) {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
                 receivedBytes = 0;
                 lastDrawnBytes = 0;
@@ -324,6 +356,19 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 // Return immediately - let loop() do the heavy work
             }
         }
+    }
+};
+
+class BrightnessCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+        std::string value = pCharacteristic->getValue();
+        if (value.length() != 1) {
+            Serial.printf("ERROR: Brightness write got %d bytes, expected 1\n", value.length());
+            return;
+        }
+        brightness = (uint8_t)value[0];
+        ledcWrite(TFT_BL, brightness);
+        Serial.printf("BLE: Brightness set to %d\n", brightness);
     }
 };
 
@@ -830,6 +875,40 @@ String drawImageWithRandomTransition(uint16_t* buffer, int width, int height) {
   return transitionName;
 }
 
+String drawImageWithTransitionChoice(uint16_t* buffer, int width, int height, uint8_t transitionChoice) {
+  if (transitionChoice == 0xFF || transitionChoice >= (uint8_t)TRANSITION_COUNT) {
+    return drawImageWithRandomTransition(buffer, width, height);
+  }
+
+  TransitionType forced = (TransitionType)transitionChoice;
+  String transitionName = getTransitionName(forced);
+  Serial.printf("Using forced transition: %s (%u)\n", transitionName.c_str(), (unsigned)transitionChoice);
+  lastTransition = forced;
+
+  switch(forced) {
+    case TRANSITION_WIPE_BOTTOM: drawWipeBottomToTop(buffer, width, height); break;
+    case TRANSITION_WIPE_LEFT: drawWipeLeftToRight(buffer, width, height); break;
+    case TRANSITION_WIPE_RIGHT: drawWipeRightToLeft(buffer, width, height); break;
+    case TRANSITION_CIRCULAR: drawCircularWipe(buffer, width, height); break;
+    case TRANSITION_CHECKERBOARD: drawCheckerboardDissolve(buffer, width, height); break;
+    case TRANSITION_SLIDE_REVEAL: drawSlideReveal(buffer, width, height); break;
+    case TRANSITION_DIAGONAL: drawDiagonalWipe(buffer, width, height); break;
+    case TRANSITION_DIAGONAL_INVERSE: drawDiagonalWipeInverse(buffer, width, height); break;
+    case TRANSITION_VENETIAN_V: drawVenetianBlindsV(buffer, width, height); break;
+    case TRANSITION_FOUR_CORNER: drawFourCornerWipe(buffer, width, height); break;
+    case TRANSITION_CURTAIN: drawCurtainOpen(buffer, width, height); break;
+    case TRANSITION_ZOOM_BLOCKS: drawZoomBlocks(buffer, width, height); break;
+    case TRANSITION_HORIZONTAL_SPLIT: drawHorizontalSplit(buffer, width, height); break;
+    case TRANSITION_VERTICAL_SPLIT: drawVerticalSplit(buffer, width, height); break;
+    case TRANSITION_BARN_DOORS: drawBarnDoors(buffer, width, height); break;
+    case TRANSITION_RANDOM_BLOCKS: drawRandomBlocks(buffer, width, height); break;
+    case TRANSITION_ZIGZAG_SNAKE: drawZigzagSnake(buffer, width, height); break;
+    default: drawWipeBottomToTop(buffer, width, height); break;
+  }
+  Serial.println("Transition complete!");
+  return transitionName;
+}
+
 // ==================================================
 // BLUETOOTH CONNECTION SCREEN HELPER
 // ==================================================
@@ -917,6 +996,14 @@ void setupBLE() {
     pMsgChar->addDescriptor(new BLE2902());
     Serial.println("  + Messages characteristic (ffe4)");
 
+    // Brightness characteristic (Write) - backlight PWM level 0..255
+    pBrightnessChar = pService->createCharacteristic(
+        BRIGHTNESS_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pBrightnessChar->setCallbacks(new BrightnessCallbacks());
+    Serial.println("  + Brightness characteristic (ffe5)");
+
     // Start the service
     pService->start();
     Serial.println("BLE Service started");
@@ -984,6 +1071,16 @@ void setup() {
   bus->beginWrite();
   bus->writeCommand(0x36); // MADCTL
   bus->write(0x00);        // Binary: 00000000 - RGB mode
+  bus->endWrite();
+
+  // ST7789 gamma tuning baseline (to be fine-tuned on hardware)
+  const uint8_t gammaPos[] = {0xD0,0x04,0x0D,0x11,0x13,0x2B,0x3F,0x54,0x4C,0x18,0x0D,0x0B,0x1F,0x23};
+  const uint8_t gammaNeg[] = {0xD0,0x04,0x0C,0x11,0x13,0x2C,0x3F,0x44,0x51,0x2F,0x1F,0x1F,0x20,0x23};
+  bus->beginWrite();
+  bus->writeCommand(0xE0);
+  for (size_t i = 0; i < sizeof(gammaPos); i++) bus->write(gammaPos[i]);
+  bus->writeCommand(0xE1);
+  for (size_t i = 0; i < sizeof(gammaNeg); i++) bus->write(gammaNeg[i]);
   bus->endWrite();
 
   // Increase backlight to normal brightness after init complete
@@ -1115,11 +1212,16 @@ void flushSerialInput() {
   }
 }
 
-// Generate 8-character filename from 16-byte cache key
+// Generate 32-character filename from full 16-byte cache key
 String getCacheFileName(uint8_t* cacheKey) {
-  char filename[20];
-  sprintf(filename, "/cache/%02X%02X%02X%02X.bin",
-          cacheKey[0], cacheKey[1], cacheKey[2], cacheKey[3]);
+  char filename[44];
+  sprintf(filename, "/cache/"
+          "%02X%02X%02X%02X%02X%02X%02X%02X"
+          "%02X%02X%02X%02X%02X%02X%02X%02X.bin",
+          cacheKey[0], cacheKey[1], cacheKey[2], cacheKey[3],
+          cacheKey[4], cacheKey[5], cacheKey[6], cacheKey[7],
+          cacheKey[8], cacheKey[9], cacheKey[10], cacheKey[11],
+          cacheKey[12], cacheKey[13], cacheKey[14], cacheKey[15]);
   return String(filename);
 }
 
@@ -1127,6 +1229,18 @@ String getCacheFileName(uint8_t* cacheKey) {
 bool isCached(uint8_t* cacheKey) {
   String filename = getCacheFileName(cacheKey);
   return SD.exists(filename);
+}
+
+uint32_t computeCRC32(const uint8_t* data, size_t len) {
+  uint32_t crc = 0xFFFFFFFFu;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int b = 0; b < 8; b++) {
+      uint32_t mask = -(crc & 1u);
+      crc = (crc >> 1) ^ (0xEDB88320u & mask);
+    }
+  }
+  return ~crc;
 }
 
 // Load image from SD card cache
@@ -1142,20 +1256,46 @@ bool loadFromCache(uint8_t* cacheKey) {
   }
 
   size_t fileSize = file.size();
-  if (fileSize != IMAGE_SIZE) {
-    Serial.printf("ERROR: Cache size mismatch %d\n", fileSize);
+  const size_t expectedWithCRC = IMAGE_SIZE + 4;
+  if (fileSize != IMAGE_SIZE && fileSize != expectedWithCRC) {
+    Serial.printf("ERROR: Cache size mismatch %d\n", (int)fileSize);
     file.close();
+    SD.remove(filename);
     return false;
   }
 
   // Read directly into image buffer
   size_t bytesRead = file.read((uint8_t*)imageBuffer, IMAGE_SIZE);
-  file.close();
-
   if (bytesRead != IMAGE_SIZE) {
     Serial.printf("ERROR: Cache read failed %d\n", bytesRead);
+    file.close();
+    SD.remove(filename);
     return false;
   }
+
+  if (fileSize == expectedWithCRC) {
+    uint8_t crcBytes[4];
+    size_t crcRead = file.read(crcBytes, 4);
+    if (crcRead != 4) {
+      Serial.println("ERROR: Cache CRC read failed");
+      file.close();
+      SD.remove(filename);
+      return false;
+    }
+    uint32_t expectedCrc = (uint32_t)crcBytes[0]
+                         | ((uint32_t)crcBytes[1] << 8)
+                         | ((uint32_t)crcBytes[2] << 16)
+                         | ((uint32_t)crcBytes[3] << 24);
+    uint32_t actualCrc = computeCRC32((uint8_t*)imageBuffer, IMAGE_SIZE);
+    if (actualCrc != expectedCrc) {
+      Serial.printf("ERROR: Cache CRC mismatch expected=0x%08lX actual=0x%08lX\n",
+                    (unsigned long)expectedCrc, (unsigned long)actualCrc);
+      file.close();
+      SD.remove(filename);
+      return false;
+    }
+  }
+  file.close();
 
   unsigned long loadTime = millis() - startTime;
   Serial.printf("Cache HIT: %s (load: %lums)\n", filename.c_str(), loadTime);
@@ -1178,10 +1318,18 @@ bool saveToCache(uint8_t* cacheKey) {
   }
 
   size_t bytesWritten = file.write((uint8_t*)imageBuffer, IMAGE_SIZE);
+  uint32_t crc = computeCRC32((uint8_t*)imageBuffer, IMAGE_SIZE);
+  uint8_t crcLE[4] = {
+    (uint8_t)(crc & 0xFF),
+    (uint8_t)((crc >> 8) & 0xFF),
+    (uint8_t)((crc >> 16) & 0xFF),
+    (uint8_t)((crc >> 24) & 0xFF)
+  };
+  size_t crcWritten = file.write(crcLE, 4);
   file.close();
 
-  if (bytesWritten != IMAGE_SIZE) {
-    Serial.printf("ERROR: Cache write failed %d\n", bytesWritten);
+  if (bytesWritten != IMAGE_SIZE || crcWritten != 4) {
+    Serial.printf("ERROR: Cache write failed image=%d crc=%d\n", (int)bytesWritten, (int)crcWritten);
     SD.remove(filename); // Remove incomplete file
     return false;
   }
@@ -1219,6 +1367,27 @@ static uint32_t countCacheBinFiles() {
   return n;
 }
 
+void clearCacheDirectory() {
+  File root = SD.open("/cache");
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    return;
+  }
+  for (;;) {
+    File f = root.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) {
+      String name = String(f.name());
+      name.toLowerCase();
+      if (name.endsWith(".bin")) {
+        SD.remove(String(f.name()));
+      }
+    }
+    f.close();
+  }
+  root.close();
+}
+
 void loop() {
   // Pulse the red "no" while waiting for connection
   if (showingStartupScreen && !deviceConnected) {
@@ -1251,6 +1420,15 @@ void loop() {
     Serial.printf("BLE: %s\n", msg.c_str());
   }
 
+  if (clearCachePending) {
+    clearCachePending = false;
+    clearCacheDirectory();
+    String msg = "CACHE_CLEARED";
+    pMsgChar->setValue(msg.c_str());
+    pMsgChar->notify();
+    Serial.println("BLE: CACHE_CLEARED");
+  }
+
   // Handle cache check (triggered by lightweight callback)
   // This runs in main task with large stack - safe for SD card/display ops
   if (cacheCheckPending) {
@@ -1275,7 +1453,7 @@ void loop() {
 
         // Draw image with random transition
         unsigned long displayStart = millis();
-        String transitionName = drawImageWithRandomTransition(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, pendingTransition);
         unsigned long displayTime = millis() - displayStart;
 
         unsigned long totalTime = millis() - totalStartTime;
@@ -1347,16 +1525,11 @@ void loop() {
     // can start the next BLE image while we still mutate imageBuffer (race → half frames / retries).
     // RGB565 is already Floyd–Steinberg dithered on the phone before BLE send.
 
-    unsigned long displayStart = millis();
-    Serial.println("Redrawing (phone-dithered RGB565)...");
-    drawImageLineByLine(imageBuffer, 0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    unsigned long displayTime = millis() - displayStart;
-
     unsigned long saveStart = millis();
     saveToCache(currentCacheKey);
     unsigned long saveTime = millis() - saveStart;
 
-    Serial.printf("⚡ Processing: display %lums, save %lums\n", displayTime, saveTime);
+    Serial.printf("⚡ Processing: progressive draw complete, save %lums\n", saveTime);
     Serial.println("Image processing complete!");
 
     // Client may send the next image only after this point (imageBuffer exclusive use ends here).

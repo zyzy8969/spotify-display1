@@ -14,6 +14,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var sdCacheEntryCount: Int?
     /// True after connect until the first post-`READY` cache stats request finishes (success or failure).
     @Published private(set) var sdCacheCountLoading = false
+    @Published var brightness: UInt8 = UInt8(UserDefaults.standard.integer(forKey: "ble_brightness").clamped(to: 0...255))
+    @Published var preferredTransition: UInt8 = UInt8(UserDefaults.standard.integer(forKey: "ble_transition").clamped(to: 0...255))
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -21,6 +23,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var cacheChar: CBCharacteristic?
     private var imageChar: CBCharacteristic?
     private var msgChar: CBCharacteristic?
+    private var brightnessChar: CBCharacteristic?
 
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var cacheContinuation: CheckedContinuation<Bool, Error>?
@@ -50,6 +53,7 @@ final class BLEManager: NSObject, ObservableObject {
     private let cacheUUID = CBUUID(string: "0000FFE2-0000-1000-8000-00805F9B34FB")
     private let imageUUID = CBUUID(string: "0000FFE3-0000-1000-8000-00805F9B34FB")
     private let messageUUID = CBUUID(string: "0000FFE4-0000-1000-8000-00805F9B34FB")
+    private let brightnessUUID = CBUUID(string: "0000FFE5-0000-1000-8000-00805F9B34FB")
 
     /// Same as firmware `IMAGE_SIZE` (240×240×2).
     private let imagePayloadBytes = 115_200
@@ -109,7 +113,7 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     /// Cache-only check (same 20-byte packet as Python).
-    func checkCacheHit(imageURL: String) async throws -> Bool {
+    func checkCacheHit(cacheKey: Data) async throws -> Bool {
         try ensureGattReady()
         guard let p = peripheral, let c = cacheChar else { throw SpotifyDisplayError.notConnected }
 
@@ -118,7 +122,7 @@ final class BLEManager: NSObject, ObservableObject {
 
         var packet = Data()
         withUnsafeBytes(of: cacheMagic.littleEndian) { packet.append(contentsOf: $0) }
-        packet.append(imageURL.md5Digest)
+        packet.append(cacheKey)
 
         return try await withCheckedThrowingContinuation { cont in
             self.cacheContinuation = cont
@@ -147,7 +151,7 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     /// Parallel download + cache check (like desktop script), then send on miss.
-    func processTrack(imageURL: String, trackId _: String) async throws {
+    func processTrack(imageURL: String, albumId: String?, trackId _: String) async throws {
         beginTransferBackgroundTaskIfNeeded()
         defer { endTransferBackgroundTaskIfNeeded() }
 
@@ -160,8 +164,9 @@ final class BLEManager: NSObject, ObservableObject {
         activeDownloadTask = download
 
         let cacheHit: Bool
+        let cacheKey = String.cacheKeyDigest(albumId: albumId, imageURL: imageURL)
         do {
-            cacheHit = try await checkCacheHit(imageURL: imageURL)
+            cacheHit = try await checkCacheHit(cacheKey: cacheKey)
         } catch {
             download.cancel()
             activeDownloadTask = nil
@@ -198,10 +203,10 @@ final class BLEManager: NSObject, ObservableObject {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        try await sendRGB565(rgb565, epochAtStart: epochAtStart)
+        try await sendRGB565(rgb565, transition: preferredTransition, epochAtStart: epochAtStart)
     }
 
-    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64) async throws {
+    func sendRGB565(_ rgb565: Data, transition: UInt8, epochAtStart: UInt64) async throws {
         try ensureTransferEpoch(epochAtStart)
         try ensureGattReady()
         guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
@@ -215,6 +220,7 @@ final class BLEManager: NSObject, ObservableObject {
         try ensureTransferEpoch(epochAtStart)
 
         var header = Data()
+        header.append(transition)
         withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         p.writeValue(header, for: img, type: .withResponse)
 
@@ -309,7 +315,7 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func ensureGattReady() throws {
-        guard isConnected, statusChar != nil, cacheChar != nil, imageChar != nil, msgChar != nil else {
+        guard isConnected, statusChar != nil, cacheChar != nil, imageChar != nil, msgChar != nil, brightnessChar != nil else {
             throw SpotifyDisplayError.notConnected
         }
     }
@@ -319,6 +325,7 @@ final class BLEManager: NSObject, ObservableObject {
         cacheChar = nil
         imageChar = nil
         msgChar = nil
+        brightnessChar = nil
         sawReady = false
         failPending(error: SpotifyDisplayError.notConnected)
     }
@@ -519,7 +526,7 @@ extension BLEManager: CBPeripheralDelegate {
             guard let services = peripheral.services else { return }
             for s in services where s.uuid == self.serviceUUID {
                 peripheral.discoverCharacteristics(
-                    [self.statusUUID, self.cacheUUID, self.imageUUID, self.messageUUID],
+                    [self.statusUUID, self.cacheUUID, self.imageUUID, self.messageUUID, self.brightnessUUID],
                     for: s
                 )
             }
@@ -535,10 +542,11 @@ extension BLEManager: CBPeripheralDelegate {
                 case self.cacheUUID: self.cacheChar = ch
                 case self.imageUUID: self.imageChar = ch
                 case self.messageUUID: self.msgChar = ch
+                case self.brightnessUUID: self.brightnessChar = ch
                 default: break
                 }
             }
-            if self.statusChar != nil, self.cacheChar != nil, self.imageChar != nil, self.msgChar != nil {
+            if self.statusChar != nil, self.cacheChar != nil, self.imageChar != nil, self.msgChar != nil, self.brightnessChar != nil {
                 Task { await self.onCharacteristicsReady() }
             }
         }
@@ -581,5 +589,38 @@ extension BLEManager: CBPeripheralDelegate {
             self.writeDrainContinuation?.resume()
             self.writeDrainContinuation = nil
         }
+    }
+}
+
+extension BLEManager {
+    func setBrightness(_ value: UInt8) {
+        brightness = value
+        UserDefaults.standard.set(Int(value), forKey: "ble_brightness")
+        guard let p = peripheral, let c = brightnessChar else { return }
+        var b = value
+        let payload = Data(bytes: &b, count: 1)
+        p.writeValue(payload, for: c, type: .withResponse)
+    }
+
+    func setPreferredTransition(_ value: UInt8) {
+        preferredTransition = value
+        UserDefaults.standard.set(Int(value), forKey: "ble_transition")
+    }
+
+    func clearDisplayCache() async throws {
+        try ensureGattReady()
+        guard let p = peripheral, let c = cacheChar else { throw SpotifyDisplayError.notConnected }
+        var packet = Data()
+        withUnsafeBytes(of: UInt32(0xCAC4E1EA).littleEndian) { packet.append(contentsOf: $0) }
+        packet.append(Data(count: 16))
+        p.writeValue(packet, for: c, type: .withResponse)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        try await refreshSDCacheCount()
+    }
+}
+
+private extension Int {
+    func clamped(to range: ClosedRange<Int>) -> Int {
+        min(range.upperBound, max(range.lowerBound, self))
     }
 }

@@ -12,6 +12,7 @@ struct Artist: Codable {
 }
 
 struct Album: Codable {
+    let id: String?
     let name: String
     let images: [AlbumImage]
 }

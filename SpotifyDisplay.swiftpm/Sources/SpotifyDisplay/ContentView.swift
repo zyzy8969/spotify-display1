@@ -111,7 +111,7 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $showSettings) {
-                SettingsView(spotifyManager: spotifyManager)
+                SettingsView(spotifyManager: spotifyManager, bleManager: bleManager)
             }
             .onAppear {
                 AppDelegate.paintWindowsWhite()
@@ -242,7 +242,11 @@ struct NowPlayingView: View {
 
 struct SettingsView: View {
     @ObservedObject var spotifyManager: SpotifyManager
+    @ObservedObject var bleManager: BLEManager
     @State private var clientIDOverride = ""
+    @State private var brightnessValue: Double = 200
+    @State private var transitionValue: Int = 255
+    @State private var isClearingCache = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -292,6 +296,49 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    HStack {
+                        Text("Brightness")
+                        Spacer()
+                        Text("\(Int(brightnessValue))")
+                            .foregroundStyle(.black.opacity(0.5))
+                    }
+                    Slider(value: $brightnessValue, in: 0...255, step: 1)
+                        .tint(.black.opacity(0.7))
+                        .onChange(of: brightnessValue) { _, newValue in
+                            bleManager.setBrightness(UInt8(newValue))
+                        }
+
+                    Picker("Transition", selection: $transitionValue) {
+                        Text("Random").tag(255)
+                        ForEach(0..<24, id: \.self) { idx in
+                            Text("Transition \(idx)").tag(idx)
+                        }
+                    }
+                    .onChange(of: transitionValue) { _, newValue in
+                        bleManager.setPreferredTransition(UInt8(clamping: newValue))
+                    }
+
+                    Button(role: .destructive) {
+                        isClearingCache = true
+                    } label: {
+                        Text("Clear display cache")
+                    }
+                    .alert("Clear display cache?", isPresented: $isClearingCache) {
+                        Button("Cancel", role: .cancel) {}
+                        Button("Clear", role: .destructive) {
+                            Task {
+                                try? await bleManager.clearDisplayCache()
+                            }
+                        }
+                    } message: {
+                        Text("This removes all cached .bin files on the display SD card.")
+                    }
+                } header: {
+                    Text("Display")
+                        .foregroundStyle(.black.opacity(0.45))
+                }
+
+                Section {
                     Text("Add redirect URI spotifydisplay://callback (exact) in the Spotify Developer Dashboard for this Client ID.")
                         .font(.caption)
                         .foregroundStyle(.black.opacity(0.45))
@@ -315,6 +362,8 @@ struct SettingsView: View {
             }
             .onAppear {
                 clientIDOverride = spotifyManager.storedClientIdOverride
+                brightnessValue = Double(bleManager.brightness)
+                transitionValue = Int(bleManager.preferredTransition)
                 AppDelegate.paintWindowsWhite()
             }
         }

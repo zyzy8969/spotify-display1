@@ -8,4 +8,10 @@ extension String {
         let hash = Insecure.MD5.hash(data: data)
         return Data(hash)
     }
+
+    /// Album-aware cache key: stable source string, then MD5 to keep 16-byte BLE payload.
+    static func cacheKeyDigest(albumId: String?, imageURL: String) -> Data {
+        let source = (albumId?.isEmpty == false) ? "album:\(albumId!)" : "url:\(imageURL)"
+        return source.md5Digest
+    }
 }

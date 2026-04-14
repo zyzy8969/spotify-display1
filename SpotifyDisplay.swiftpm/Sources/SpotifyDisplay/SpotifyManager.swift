@@ -300,7 +300,11 @@ final class SpotifyManager: ObservableObject {
             artSendTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    try await ble.processTrack(imageURL: capturedURL, trackId: capturedId)
+                    try await ble.processTrack(
+                        imageURL: capturedURL,
+                        albumId: self.currentTrack?.album?.id,
+                        trackId: capturedId
+                    )
                     guard !Task.isCancelled else {
                         self.artInFlightTrackId = nil
                         self.artSendTask = nil
