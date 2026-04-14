@@ -135,6 +135,7 @@ volatile bool statsRequestPending = false;
 volatile bool clearCachePending = false;
 volatile bool imageTransferComplete = false;
 volatile uint32_t lastDrawnBytes = 0;  // Track how many bytes we've drawn so far
+volatile uint32_t completedImageBytes = 0;  // Snapshot bytes received at completion
 
 // Rainbow text animation state
 int currentRainbowIndex = 0;
@@ -343,6 +344,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             // Check if complete
             if (receivedBytes == expectedSize) {
                 Serial.println("BLE: Image transfer complete");
+                completedImageBytes = receivedBytes;
 
                 // Set flag for loop() to handle display/save
                 // CRITICAL: Don't do display/SD card work here - BTC_TASK stack is tiny!
@@ -1074,8 +1076,9 @@ void setup() {
   bus->endWrite();
 
   // ST7789 gamma tuning baseline (to be fine-tuned on hardware)
-  const uint8_t gammaPos[] = {0xD0,0x04,0x0D,0x11,0x13,0x2B,0x3F,0x54,0x4C,0x18,0x0D,0x0B,0x1F,0x23};
-  const uint8_t gammaNeg[] = {0xD0,0x04,0x0C,0x11,0x13,0x2C,0x3F,0x44,0x51,0x2F,0x1F,0x1F,0x20,0x23};
+  // Tuned for slightly more punch/saturation while keeping skin tones stable.
+  const uint8_t gammaPos[] = {0xD0,0x06,0x10,0x14,0x16,0x30,0x3F,0x55,0x4A,0x16,0x0C,0x0A,0x1E,0x22};
+  const uint8_t gammaNeg[] = {0xD0,0x05,0x0F,0x13,0x16,0x30,0x3E,0x47,0x53,0x30,0x20,0x20,0x21,0x24};
   bus->beginWrite();
   bus->writeCommand(0xE0);
   for (size_t i = 0; i < sizeof(gammaPos); i++) bus->write(gammaPos[i]);
@@ -1517,13 +1520,26 @@ void loop() {
   // This runs in main task with large stack - safe for SD card/display ops
   if (imageTransferComplete) {
     imageTransferComplete = false;
-    lastDrawnBytes = 0;  // Reset for next transfer
 
     Serial.println("Processing image transfer completion...");
 
     // Do NOT notify the client until display/save finish — otherwise the phone
     // can start the next BLE image while we still mutate imageBuffer (race → half frames / retries).
     // RGB565 is already Floyd–Steinberg dithered on the phone before BLE send.
+
+    // Ensure any remaining final rows are drawn (prevents bottom-line artifacts if callback
+    // flips state before progressive draw consumes the final chunk).
+    uint32_t bytesPerLine = DISPLAY_WIDTH * 2;
+    uint32_t finalBytes = completedImageBytes;
+    if (finalBytes > IMAGE_SIZE) finalBytes = IMAGE_SIZE;
+    uint32_t completedLines = finalBytes / bytesPerLine;
+    uint32_t drawnLines = lastDrawnBytes / bytesPerLine;
+    if (completedLines > drawnLines) {
+      for (uint32_t line = drawnLines; line < completedLines; line++) {
+        gfx->draw16bitRGBBitmap(0, line, imageBuffer + (line * DISPLAY_WIDTH), DISPLAY_WIDTH, 1);
+      }
+      lastDrawnBytes = completedLines * bytesPerLine;
+    }
 
     unsigned long saveStart = millis();
     saveToCache(currentCacheKey);
@@ -1540,6 +1556,9 @@ void loop() {
 
     pMsgChar->setValue("SUCCESS");
     pMsgChar->notify();
+
+    lastDrawnBytes = 0;
+    completedImageBytes = 0;
   }
 
   // Handle BLE connection state changes

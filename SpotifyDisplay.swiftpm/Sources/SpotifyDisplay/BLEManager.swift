@@ -15,7 +15,6 @@ final class BLEManager: NSObject, ObservableObject {
     /// True after connect until the first post-`READY` cache stats request finishes (success or failure).
     @Published private(set) var sdCacheCountLoading = false
     @Published var brightness: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_brightness"))
-    @Published var preferredTransition: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_transition"))
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -203,10 +202,10 @@ final class BLEManager: NSObject, ObservableObject {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        try await sendRGB565(rgb565, transition: preferredTransition, epochAtStart: epochAtStart)
+        try await sendRGB565(rgb565, epochAtStart: epochAtStart)
     }
 
-    func sendRGB565(_ rgb565: Data, transition: UInt8, epochAtStart: UInt64) async throws {
+    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64) async throws {
         try ensureTransferEpoch(epochAtStart)
         try ensureGattReady()
         guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
@@ -220,7 +219,7 @@ final class BLEManager: NSObject, ObservableObject {
         try ensureTransferEpoch(epochAtStart)
 
         var header = Data()
-        header.append(transition)
+        header.append(0xFF) // Always random transition on firmware
         withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         p.writeValue(header, for: img, type: .withResponse)
 
@@ -417,6 +416,8 @@ final class BLEManager: NSObject, ObservableObject {
         do {
             try await waitForReady()
             statusMessage = "Ready"
+            // Re-apply persisted brightness value on every reconnect.
+            setBrightness(brightness)
             defer { sdCacheCountLoading = false }
             try await refreshSDCacheCount()
         } catch {
@@ -600,11 +601,6 @@ extension BLEManager {
         var b = value
         let payload = Data(bytes: &b, count: 1)
         p.writeValue(payload, for: c, type: .withResponse)
-    }
-
-    func setPreferredTransition(_ value: UInt8) {
-        preferredTransition = value
-        UserDefaults.standard.set(Int(value), forKey: "ble_transition")
     }
 
     func clearDisplayCache() async throws {

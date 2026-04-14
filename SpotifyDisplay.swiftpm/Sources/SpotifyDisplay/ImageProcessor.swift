@@ -62,22 +62,22 @@ enum ImageProcessor {
 
         if let clamp = CIFilter(name: "CIColorClamp") {
             clamp.setValue(img, forKey: kCIInputImageKey)
-            clamp.setValue(CIVector(x: 0.03, y: 0.03, z: 0.03, w: 0.0), forKey: "inputMinComponents")
-            clamp.setValue(CIVector(x: 0.92, y: 0.92, z: 0.92, w: 1.0), forKey: "inputMaxComponents")
+            clamp.setValue(CIVector(x: 0.02, y: 0.02, z: 0.02, w: 0.0), forKey: "inputMinComponents")
+            clamp.setValue(CIVector(x: 0.97, y: 0.97, z: 0.97, w: 1.0), forKey: "inputMaxComponents")
             if let out = clamp.outputImage { img = out }
         }
 
         if let gamma = CIFilter(name: "CIGammaAdjust") {
             gamma.setValue(img, forKey: kCIInputImageKey)
-            gamma.setValue(0.92, forKey: "inputPower")
+            gamma.setValue(0.88, forKey: "inputPower")
             if let out = gamma.outputImage { img = out }
         }
 
         if let color = CIFilter(name: "CIColorControls") {
             color.setValue(img, forKey: kCIInputImageKey)
-            color.setValue(1.08, forKey: kCIInputSaturationKey)
-            color.setValue(0.01, forKey: kCIInputBrightnessKey)
-            color.setValue(1.14, forKey: kCIInputContrastKey)
+            color.setValue(1.18, forKey: kCIInputSaturationKey)
+            color.setValue(0.015, forKey: kCIInputBrightnessKey)
+            color.setValue(1.18, forKey: kCIInputContrastKey)
             if let out = color.outputImage { img = out }
         }
 

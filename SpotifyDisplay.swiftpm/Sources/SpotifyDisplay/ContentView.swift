@@ -245,7 +245,6 @@ struct SettingsView: View {
     @ObservedObject var bleManager: BLEManager
     @State private var clientIDOverride = ""
     @State private var brightnessValue: Double = 200
-    @State private var transitionValue: Int = 255
     @State private var isClearingCache = false
     @Environment(\.dismiss) private var dismiss
 
@@ -304,19 +303,10 @@ struct SettingsView: View {
                     }
                     Slider(value: $brightnessValue, in: 0...255, step: 1)
                         .tint(.black.opacity(0.7))
-                        .onChange(of: brightnessValue) { _, newValue in
-                            bleManager.setBrightness(UInt8(newValue))
+                        .onChange(of: brightnessValue) { newValue in
+                            let clamped = min(255.0, max(0.0, newValue))
+                            bleManager.setBrightness(UInt8(clamped))
                         }
-
-                    Picker("Transition", selection: $transitionValue) {
-                        Text("Random").tag(255)
-                        ForEach(0..<24, id: \.self) { idx in
-                            Text("Transition \(idx)").tag(idx)
-                        }
-                    }
-                    .onChange(of: transitionValue) { _, newValue in
-                        bleManager.setPreferredTransition(UInt8(clamping: newValue))
-                    }
 
                     Button(role: .destructive) {
                         isClearingCache = true
@@ -363,7 +353,6 @@ struct SettingsView: View {
             .onAppear {
                 clientIDOverride = spotifyManager.storedClientIdOverride
                 brightnessValue = Double(bleManager.brightness)
-                transitionValue = Int(bleManager.preferredTransition)
                 AppDelegate.paintWindowsWhite()
             }
         }

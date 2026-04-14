@@ -1,6 +1,7 @@
 import SwiftUI
 import AuthenticationServices
 import CryptoKit
+import Network
 
 private let kRefresh = "spotify_refresh_token"
 private let kClientIdDefaults = "spotify_client_id"
@@ -42,6 +43,10 @@ final class SpotifyManager: ObservableObject {
     private let redirectURI = "spotifydisplay://callback"
     private let presenter = SpotifyAuthPresenter()
     private var authSession: ASWebAuthenticationSession?
+    private var networkMonitor: NWPathMonitor?
+    private let networkQueue = DispatchQueue(label: "SpotifyDisplay.NetworkMonitor")
+    private var networkIsReachable = true
+    private var networkMonitorStarted = false
 
     /// UserDefaults override (non-empty) wins; otherwise `SpotifyClientID` from Info.plist.
     var clientIdStored: String {
@@ -180,11 +185,23 @@ final class SpotifyManager: ObservableObject {
 
     func startMonitoring(bleManager: BLEManager) {
         monitoredBle = bleManager
+        startNetworkMonitor()
         monitorTask?.cancel()
         monitorTask = Task {
             await restoreSession()
             while !Task.isCancelled {
-                await pollOnce(bleManager: bleManager)
+                if networkIsReachable {
+                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                        ProcessInfo.processInfo.performExpiringActivity(withReason: "SpotifyPollRecovery") { _ in
+                            Task { @MainActor in
+                                await self.pollOnce(bleManager: bleManager)
+                                cont.resume()
+                            }
+                        }
+                    }
+                } else {
+                    pollStatus = "Offline — waiting for network"
+                }
                 let ns = UInt64(pollIntervalSeconds * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: ns)
             }
@@ -201,6 +218,38 @@ final class SpotifyManager: ObservableObject {
         lastAnyDisplayFailureAt = nil
         monitorTask?.cancel()
         monitorTask = nil
+        stopNetworkMonitor()
+    }
+
+    private func startNetworkMonitor() {
+        guard !networkMonitorStarted else { return }
+        let monitor = NWPathMonitor()
+        networkMonitor = monitor
+        networkMonitorStarted = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self else { return }
+                let reachable = path.status == .satisfied
+                let wasReachable = self.networkIsReachable
+                self.networkIsReachable = reachable
+                if reachable && !wasReachable {
+                    self.pollStatus = "Network restored — resuming"
+                    if let ble = self.monitoredBle {
+                        await self.pollOnce(bleManager: ble)
+                    }
+                } else if !reachable {
+                    self.pollStatus = "Offline — waiting for network"
+                }
+            }
+        }
+        monitor.start(queue: networkQueue)
+    }
+
+    private func stopNetworkMonitor() {
+        guard networkMonitorStarted else { return }
+        networkMonitor?.cancel()
+        networkMonitor = nil
+        networkMonitorStarted = false
     }
 
     private func pollOnce(bleManager: BLEManager) async {
@@ -358,6 +407,10 @@ final class SpotifyManager: ObservableObject {
             if let e = error as? SpotifyAPIError, case .http(429) = e {
                 lastError = "Spotify rate limited — pausing requests"
                 pollStatus = "Rate limited — retry soon"
+            } else if let urlError = error as? URLError,
+                      [.notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost].contains(urlError.code) {
+                lastError = "Network unavailable — auto-retrying"
+                pollStatus = "Offline — waiting for network"
             } else {
                 lastError = error.localizedDescription
                 pollStatus = "Spotify request failed"
