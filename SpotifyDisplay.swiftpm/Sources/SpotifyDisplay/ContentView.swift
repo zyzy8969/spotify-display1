@@ -249,6 +249,7 @@ struct SettingsView: View {
     @State private var clientIDOverride = ""
     @State private var brightnessValue: Double = 200
     @State private var isClearingCache = false
+    @State private var isSigningIn = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -259,10 +260,29 @@ struct SettingsView: View {
                         .font(.subheadline)
                         .foregroundStyle(.black.opacity(0.75))
 
-                    Button("Sign in with Spotify") {
-                        Task { await spotifyManager.signInWithSpotify() }
+                    Button {
+                        isSigningIn = true
+                        Task {
+                            await spotifyManager.signInWithSpotify()
+                            isSigningIn = false
+                        }
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if isSigningIn {
+                                ProgressView()
+                                    .tint(.white)
+                            } else {
+                                Text("Sign in with Spotify")
+                                    .fontWeight(.semibold)
+                            }
+                            Spacer()
+                        }
                     }
-                    .foregroundStyle(.black)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.11, green: 0.73, blue: 0.33))
+                    .foregroundStyle(.white)
+                    .disabled(isSigningIn)
 
                     Button("Sign out", role: .destructive) {
                         spotifyManager.signOut()

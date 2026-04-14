@@ -34,6 +34,8 @@ final class BLEManager: NSObject, ObservableObject {
     private var writeDrainContinuation: CheckedContinuation<Void, Never>?
 
     private var sawReady = false
+    /// Ensures `readyEpoch` increments at most once per BLE connection even if characteristics discovery runs more than once.
+    private var readyEpochCommittedForConnection = false
     private var awaitingImageComplete = false
 
     /// Set in `centralManager(_:willRestoreState:)` and consumed when the central becomes `.poweredOn`.
@@ -103,6 +105,7 @@ final class BLEManager: NSObject, ObservableObject {
         sdCacheEntryCount = nil
         sdCacheCountLoading = true
         sawReady = false
+        readyEpochCommittedForConnection = false
         statusMessage = "Discovering services…"
         peripheral.discoverServices([serviceUUID])
     }
@@ -417,7 +420,10 @@ final class BLEManager: NSObject, ObservableObject {
         try? await Task.sleep(nanoseconds: 50_000_000)
         do {
             try await waitForReady()
-            readyEpoch &+= 1
+            if !readyEpochCommittedForConnection {
+                readyEpoch &+= 1
+                readyEpochCommittedForConnection = true
+            }
             statusMessage = "Ready"
             // Re-apply persisted brightness value on every reconnect.
             setBrightness(brightness)
@@ -512,6 +518,7 @@ extension BLEManager: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         Task { @MainActor in
             self.isConnected = false
+            self.readyEpochCommittedForConnection = false
             self.sdCacheEntryCount = nil
             self.sdCacheCountLoading = false
             self.resetGattState()
