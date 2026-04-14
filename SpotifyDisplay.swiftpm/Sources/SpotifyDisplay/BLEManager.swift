@@ -14,8 +14,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var sdCacheEntryCount: Int?
     /// True after connect until the first post-`READY` cache stats request finishes (success or failure).
     @Published private(set) var sdCacheCountLoading = false
-    @Published var brightness: UInt8 = UInt8(UserDefaults.standard.integer(forKey: "ble_brightness").clamped(to: 0...255))
-    @Published var preferredTransition: UInt8 = UInt8(UserDefaults.standard.integer(forKey: "ble_transition").clamped(to: 0...255))
+    @Published var brightness: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_brightness"))
+    @Published var preferredTransition: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_transition"))
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -619,8 +619,3 @@ extension BLEManager {
     }
 }
 
-private extension Int {
-    func clamped(to range: ClosedRange<Int>) -> Int {
-        min(range.upperBound, max(range.lowerBound, self))
-    }
-}

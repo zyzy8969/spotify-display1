@@ -1545,6 +1545,9 @@ void loop() {
   // Handle BLE connection state changes
   if (!deviceConnected && oldDeviceConnected) {
     // Client just disconnected
+    showingStartupScreen = true;
+    pulseIsWhite = false;
+    showBluetoothConnectionScreen(BLACK, RED);
     pServer->startAdvertising();  // Restart advertising
     Serial.println("BLE: Restarted advertising after disconnect");
     oldDeviceConnected = deviceConnected;
