@@ -1,17 +1,17 @@
 # Spotify Display
 
-An **ESP32-S3** pulls **Spotify album art** from an **iOS app** over **BLE** and renders it on a **240×240 ST7789 LCD**. Images are color-graded, dithered to RGB565, cached to SD card, and revealed with one of 16 animated transitions.
+An **ESP32-S3** pulls **Spotify album art** from an **iOS app** over **BLE** and renders it on a **240×240 ST7789 LCD**. Images are color-graded, Atkinson-dithered to RGB565 on iOS, cached to SD card, and revealed with one of 17 animated transitions.
 
 ---
 
 ## What works right now
 
 - iOS app polls Spotify every ~1 s, detects track changes, downloads album art
-- Art is processed on-device (color grade + Floyd-Steinberg dither in `ImageProcessor` before BLE)
+- Art is processed on-device (color grade + Atkinson dither in `ImageProcessor` before BLE)
 - BLE transfer uses Write Without Response (fast path) — ~0.5–1 s per image
-- ESP32 checks SD cache first (MD5 of image URL); cached songs show a random transition, new songs draw top-to-bottom progressively so you can tell a new track is arriving
+- ESP32 checks SD cache first using a 16-byte MD5 digest over an app-side key source (`album:<spotifyAlbumId>` preferred, fallback `url:<imageURL>`); cached songs show a transition, new songs draw top-to-bottom progressively so you can tell a new track is arriving
 - SD card holds up to ~32 GB of cached images
-- 16 transition effects implemented on ESP32
+- 17 transition effects implemented on ESP32
 
 ## Recent changes (Apr 2026)
 
@@ -27,7 +27,7 @@ An **ESP32-S3** pulls **Spotify album art** from an **iOS app** over **BLE** and
 
 | Path | Role |
 |------|------|
-| [`src/main.cpp`](src/main.cpp) | ESP32-S3 firmware — BLE GATT server, SD cache, dithering, 16 transitions |
+| [`src/main.cpp`](src/main.cpp) | ESP32-S3 firmware — BLE GATT server, SD cache, progressive draw, 17 transitions |
 | [`platformio.ini`](platformio.ini) | PlatformIO build config (ESP32-S3 devkit) |
 | [`ios/SpotifyDisplay.xcodeproj`](ios/) | **Open in Xcode to build and run the iOS app** |
 | [`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/`](SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/) | Swift source files (BLEManager, ContentView, SpotifyManager, ImageProcessor, etc.) — compiled by the xcodeproj above |

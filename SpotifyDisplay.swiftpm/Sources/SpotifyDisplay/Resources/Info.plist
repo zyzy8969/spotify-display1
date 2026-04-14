@@ -37,6 +37,11 @@
 	<array>
 		<string>bluetooth-central</string>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Find and send album art to your Spotify Display over Bluetooth.</string>
 	<key>SpotifyClientID</key>

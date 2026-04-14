@@ -68,6 +68,19 @@ BLECharacteristic* pImageChar = nullptr;
 BLECharacteristic* pMsgChar = nullptr;
 BLECharacteristic* pBrightnessChar = nullptr;
 
+/// NOTIFY: Message `ERROR:*` plus Image byte 0x02 so the phone can fail the SUCCESS wait without a 32s timeout.
+static void notifyImageTransferRejected(const char* utf8message) {
+  if (pMsgChar) {
+    pMsgChar->setValue(utf8message);
+    pMsgChar->notify();
+  }
+  if (pImageChar) {
+    uint8_t b = 0x02;
+    pImageChar->setValue(&b, 1);
+    pImageChar->notify();
+  }
+}
+
 // BLE Connection state
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
@@ -271,6 +284,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             // - 5-byte header: 1-byte transition + 4-byte little-endian size
             if (value.length() != 4 && value.length() != 5) {
                 Serial.printf("ERROR: Expected 4/5-byte header, got %d\n", value.length());
+                notifyImageTransferRejected("ERROR: Invalid image header");
                 return;
             }
             if (value.length() == 5) {
@@ -285,8 +299,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             if (expectedSize != IMAGE_SIZE) {
                 Serial.printf("ERROR: Size mismatch, got %d, expected %d\n",
                               expectedSize, IMAGE_SIZE);
-                pMsgChar->setValue("ERROR: Size mismatch");
-                pMsgChar->notify();
+                notifyImageTransferRejected("ERROR: Size mismatch");
                 imageState = WAITING_FOR_SIZE;  // Reset
                 lastDrawnBytes = 0;
                 return;
@@ -315,6 +328,9 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
                 receivedBytes = 0;
                 lastDrawnBytes = 0;
+                // Prevent a stale completion from a prior partial frame from firing in loop().
+                imageTransferComplete = false;
+                completedImageBytes = 0;
                 return;
             }
 
@@ -323,8 +339,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 
             if (receivedBytes + chunkSize > expectedSize) {
                 Serial.println("ERROR: Buffer overflow");
-                pMsgChar->setValue("ERROR: Buffer overflow");
-                pMsgChar->notify();
+                notifyImageTransferRejected("ERROR: Buffer overflow");
                 imageState = WAITING_FOR_SIZE;  // Reset
                 receivedBytes = 0;
                 lastDrawnBytes = 0;
@@ -1439,6 +1454,18 @@ void loop() {
 
     Serial.println("Processing cache check request...");
 
+    // If a previous BLE image was abandoned mid-chunk (e.g. app skipped tracks), clear receive
+    // state before cache hit/miss so SD/cache logic is not racing progressive draw.
+    if (imageState == RECEIVING_DATA) {
+      Serial.println("BLE: Cache check — clearing partial image receive state");
+      imageState = WAITING_FOR_SIZE;
+      receivedBytes = 0;
+      expectedSize = 0;
+      lastDrawnBytes = 0;
+      imageTransferComplete = false;
+      completedImageBytes = 0;
+    }
+
     // Check if image is cached
     cacheHit = isCached(currentCacheKey);
 
@@ -1480,8 +1507,7 @@ void loop() {
         pMsgChar->notify();
       } else {
         Serial.println("ERROR: Cache load failed");
-        pMsgChar->setValue("ERROR: Cache load failed");
-        pMsgChar->notify();
+        notifyImageTransferRejected("ERROR: Cache load failed");
       }
     } else {
       Serial.println("BLE: Cache MISS");

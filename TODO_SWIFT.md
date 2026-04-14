@@ -4,6 +4,32 @@
 some bugs i forgot to put in this idk if they r solved  (4-byte cache key truncation, awaitWriteWindow lost-wakeup race, the two timeout-task continuation races, the drawHorizontalSplit/drawBarnDoors comment-vs-code mismatch, the per-pixel SPI in the diagonal/circular transitions)
 ---
 
+## GitHub Current Focus (April 2026)
+
+### Done recently
+- Live debug line is single-line + persistent (shows current phase, then last state).
+- Live phase text is color-coded by phase type.
+- Top `Sent new` / board ACK / transition badges now clear on song skip and on nothing playing, then repopulate only when new transfer/cache-hit completes.
+- Playback controls remain visible while paused.
+- "Paused" state is shown when track metadata exists but playback is not active.
+- Transfer/debug timings are shown in seconds.
+
+### Next priority (high)
+- **Cache-check speed must be faster** for real-world usage where many songs are already on device.
+- Use **firmware-side optimization first**:
+  - Speed up SD cache lookup/index in `main.cpp`.
+  - Treat album-id-aware cache key behavior as part of this optimization path.
+- Add before/after timing notes in this file once implemented.
+
+### Active now
+- **More transitions** (ESP32) is active and should be worked before lower-priority nice-to-have items.
+- Buy a new battery for the device/hardware setup.
+- Fix brightness control reliability (it sometimes does not change on hardware).
+- Fix clear-cache reliability (sometimes cache delete does not apply/reflect in app).
+- Check code in Claude inside Xcode and compare findings with this roadmap.
+- Continue bug hunt to reduce occasional transfer timeouts / unsuccessful sends.
+- Fix pause/unpause behavior so same track is not miscounted as a new cache/download event; keep debug output accurate and show explicit write-confirmed state.
+
 ## ESP32 / `main.cpp` — laptop backlog (git + flash here)
 
 Do these on the machine where your **known-good** `src/main.cpp` lives; push before/after each logical chunk. Update [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md) whenever GATT or file formats change.
@@ -83,6 +109,8 @@ file.write((uint8_t*)&crc, 4);
 ## PRIORITY 3 — Nice to have
 
 ### 11. More ESP32 transition effects *(ESP32)*
+**Status:** ACTIVE (next feature focus)
+
 Current set has 16. Ideas to add (each follows the same `drawXxx(buffer, width, height)`
 signature — add enum value, switch case, and name string):
 - **Pixel rain** — columns fall from top
@@ -95,9 +123,11 @@ signature — add enum value, switch case, and name string):
 ---
 
 ### 12. Let iOS choose the transition *(ESP32 + Swift)*
+**Status:** DEPRIORITIZED / DO NOT IMPLEMENT NOW
+
 Prepend a 1-byte transition index to the 4-byte size header (5 bytes total).
 ESP32 uses that index instead of random. `0xFF` = keep random (backwards-compatible).
-iOS adds a picker in Settings.
+iOS picker is intentionally not in current scope.
 
 ---
 

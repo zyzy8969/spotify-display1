@@ -2,7 +2,7 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.3** (Atkinson dither during iOS quantization; ESP32 progressive draw + CRC32 cache + transition header + brightness char.)
+Version: **1.4** (Transfer ERROR notify + Image `0x02`; ESP32 clears partial receive on cache check.)
 
 ## Peripheral
 
@@ -44,6 +44,15 @@ Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications aft
 **Client cancel / new transfer:** If a client stops mid-image and later sends a new transfer, the first write must be a valid 4-byte or 5-byte header. While still receiving a partial frame, firmware treats a valid header (`115200` payload) as resync and discards the partial frame.
 
 **Notify**: `0x01` on Image characteristic and/or UTF-8 `SUCCESS` on Message **after** firmware finishes SD cache save for that frame. Progressive line draw happens during transfer.
+
+**Transfer error (optional, but recommended for the iOS app):** If the frame cannot complete or must abort while the client is in “waiting for SUCCESS”, firmware should NOTIFY:
+
+- **Message (UTF-8)**: `ERROR:` prefix (e.g. `ERROR: Buffer overflow`, `ERROR: Size mismatch`, `ERROR: Invalid image header`, `ERROR: Cache load failed`).
+- **Image (1 byte)**: `0x02` (failure), sent together with or shortly after the Message so clients can **`resume(throwing:)`** instead of waiting for the ~32s app-side timeout.
+
+The iOS app treats both Message `ERROR:*` and Image `0x02` as an immediate failure of the in-flight transfer (same stage as SUCCESS negotiation).
+
+**Partial receive vs cache check:** If a previous transfer was abandoned mid-chunk (`RECEIVING_DATA` with partial bytes), the next **Cache** write (lookup) is processed in `loop()` **before** hit/miss: firmware resets image receive state so cache hit/miss and SD load are not racing progressive draw.
 
 ## Image format
 

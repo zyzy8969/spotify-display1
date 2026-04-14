@@ -17,6 +17,18 @@ final class BLEManager: NSObject, ObservableObject {
     /// Increments whenever GATT is fully ready after (re)connect; consumers can use this as a sync session token.
     @Published private(set) var readyEpoch: UInt64 = 0
     @Published var brightness: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_brightness"))
+    @Published private(set) var transferLog: [TransferLogEntry] = []
+    @Published private(set) var currentLivePhase: String? = "idle"
+    /// Shows "Cache hit" / "Sent to display" / nil on main screen.
+    @Published private(set) var lastTransferResult: String?
+    /// Human-readable board confirmation for latest transfer stage.
+    @Published private(set) var boardAckStatus: String?
+    /// Track id most recently confirmed on-board (cache hit draw or BLE SUCCESS).
+    @Published private(set) var lastConfirmedTrackId: String?
+    private let maxLogEntries = 30
+
+    /// Called on MainActor when GATT is fully ready after (re)connect. SpotifyManager registers this for instant resync.
+    var onReadyCallback: (() -> Void)?
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -37,6 +49,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// Ensures `readyEpoch` increments at most once per BLE connection even if characteristics discovery runs more than once.
     private var readyEpochCommittedForConnection = false
     private var awaitingImageComplete = false
+    /// Last transition announced by firmware via `MESSAGE` notify (`TRANSITION:<name>`).
+    @Published private(set) var lastTransitionName: String?
 
     /// Set in `centralManager(_:willRestoreState:)` and consumed when the central becomes `.poweredOn`.
     private var pendingRestoredPeripheral: CBPeripheral?
@@ -146,6 +160,14 @@ final class BLEManager: NSObject, ObservableObject {
             isTransferring = false
             transferProgress = 0
         }
+        // #region agent log
+        AgentDebugLog.ingest(
+            hypothesisId: "H2",
+            location: "BLEManager.cancelOngoingTransfer",
+            message: "cancel_incremented_epoch",
+            data: ["transferEpoch": Int(transferEpoch)]
+        )
+        // #endregion agent log
     }
 
     private func ensureTransferEpoch(_ epochAtStart: UInt64) throws {
@@ -154,19 +176,52 @@ final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    private func appendLog(_ entry: TransferLogEntry) {
+        transferLog.append(entry)
+        if transferLog.count > maxLogEntries {
+            transferLog.removeFirst(transferLog.count - maxLogEntries)
+        }
+    }
+
+    private func setLivePhase(_ text: String?) {
+        currentLivePhase = text
+    }
+
+    /// Clears top status badges so stale transfer state is hidden while the next track prepares.
+    func clearTopTransferStatus() {
+        lastTransferResult = nil
+        boardAckStatus = nil
+        lastTransitionName = nil
+    }
+
+    private func ms(since start: CFAbsoluteTime) -> Int {
+        Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+    }
+
+    private func secondsLabel(fromMs ms: Int) -> String {
+        String(format: "%.1fs", Double(ms) / 1000.0)
+    }
+
     /// Parallel download + cache check (like desktop script), then send on miss.
-    func processTrack(imageURL: String, albumId: String?, trackId _: String) async throws {
+    func processTrack(imageURL: String, albumId: String?, trackId: String) async throws {
         beginTransferBackgroundTaskIfNeeded()
         defer { endTransferBackgroundTaskIfNeeded() }
+        setLivePhase("cache check + downloading…")
+        boardAckStatus = "Sending…"
 
+        let totalStart = CFAbsoluteTimeGetCurrent()
         let epochAtStart = transferEpoch
         try ensureTransferEpoch(epochAtStart)
 
         guard let u = URL(string: imageURL) else { throw SpotifyDisplayError.conversionFailed }
 
+        // Start download + cache check in parallel.
+        let downloadStart = CFAbsoluteTimeGetCurrent()
         let download = Task { try await URLSession.shared.data(from: u) }
         activeDownloadTask = download
 
+        let cacheCheckStart = CFAbsoluteTimeGetCurrent()
+        setLivePhase("cache check + downloading…")
         let cacheHit: Bool
         let cacheKey = String.cacheKeyDigest(albumId: albumId, imageURL: imageURL)
         do {
@@ -176,17 +231,38 @@ final class BLEManager: NSObject, ObservableObject {
             activeDownloadTask = nil
             throw error
         }
+        let cacheCheckMs = ms(since: cacheCheckStart)
+        setLivePhase("cache \(secondsLabel(fromMs: cacheCheckMs))")
 
         try ensureTransferEpoch(epochAtStart)
 
         if cacheHit {
-            download.cancel()
+            let previewDownload = download
             activeDownloadTask = nil
+            // Cache hit updates the board from SD immediately. Keep the app preview in sync by
+            // finishing the already-started download in the background for UI only.
+            Task { @MainActor in
+                if let (data, _) = try? await previewDownload.value {
+                    self.currentAlbumArt = data
+                }
+            }
             statusMessage = "Loaded from SD cache"
+            let totalMs = ms(since: totalStart)
+            setLivePhase("cache hit \(secondsLabel(fromMs: totalMs))")
+            lastTransferResult = "Cache hit  \(secondsLabel(fromMs: totalMs))"
+            boardAckStatus = "Board ACK: cache hit"
+            lastConfirmedTrackId = trackId
+            appendLog(TransferLogEntry(
+                cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
+                downloadMs: nil, convertMs: nil, uploadMs: 0,
+                totalMs: totalMs, outcome: "cache hit"
+            ))
+            setLivePhase("last: cache hit \(secondsLabel(fromMs: totalMs))")
             return
         }
 
         let (data, _): (Data, URLResponse)
+        setLivePhase("waiting download…")
         do {
             (data, _) = try await download.value
         } catch {
@@ -194,20 +270,45 @@ final class BLEManager: NSObject, ObservableObject {
             throw error
         }
         activeDownloadTask = nil
+        let downloadMs = ms(since: downloadStart)
+        setLivePhase("download \(secondsLabel(fromMs: downloadMs))")
 
         try ensureTransferEpoch(epochAtStart)
 
         currentAlbumArt = data
 
         statusMessage = "Processing image…"
-        let rgb565 = try ImageProcessor.convertToRGB565(imageData: data)
+        setLivePhase("dithering…")
+        let convertStart = CFAbsoluteTimeGetCurrent()
+        let capturedData = data
+        let rgb565 = try await Task.detached(priority: .userInitiated) {
+            try ImageProcessor.convertToRGB565(imageData: capturedData)
+        }.value
+        let convertMs = ms(since: convertStart)
+        setLivePhase("dither \(secondsLabel(fromMs: convertMs))")
         try ensureTransferEpoch(epochAtStart)
 
         guard rgb565.count == imagePayloadBytes else {
             throw SpotifyDisplayError.conversionFailed
         }
 
+        let uploadStart = CFAbsoluteTimeGetCurrent()
+        setLivePhase("sending BLE…")
         try await sendRGB565(rgb565, epochAtStart: epochAtStart)
+        let uploadMs = ms(since: uploadStart)
+        setLivePhase("sent \(secondsLabel(fromMs: uploadMs))")
+
+        let totalMs = ms(since: totalStart)
+        setLivePhase("done \(secondsLabel(fromMs: totalMs))")
+        lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)))"
+        boardAckStatus = "Board ACK: image sent"
+        lastConfirmedTrackId = trackId
+        appendLog(TransferLogEntry(
+            cacheHit: false, transitionName: nil, cacheCheckMs: cacheCheckMs,
+            downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,
+            totalMs: totalMs, outcome: "ok"
+        ))
+        setLivePhase("last: done \(secondsLabel(fromMs: totalMs))")
     }
 
     func sendRGB565(_ rgb565: Data, epochAtStart: UInt64) async throws {
@@ -260,24 +361,50 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
+        // #region agent log
+        AgentDebugLog.ingest(
+            hypothesisId: "H1",
+            location: "BLEManager.sendRGB565",
+            message: "installing_success_wait",
+            data: ["epochAtStart": Int(epochAtStart), "transferEpoch": Int(transferEpoch)]
+        )
+        // #endregion agent log
+
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.transferContinuation = cont
             self.cancelImageSuccessTimeoutTask()
             self.imageSuccessTimeoutTask = Task { @MainActor in
                 defer { self.imageSuccessTimeoutTask = nil }
                 do {
-                    // Firmware ACK after full redraw + SD save (main.cpp); allow slow SD paths.
-                    try await Task.sleep(nanoseconds: 32_000_000_000)
+                    // Firmware ACK after progressive draw + SD save; typically <2s.
+                    try await Task.sleep(nanoseconds: 8_000_000_000)
                 } catch {
                     return
                 }
                 guard !Task.isCancelled else { return }
                 if let c = self.transferContinuation {
+                    // #region agent log
+                    AgentDebugLog.ingest(
+                        hypothesisId: "H1",
+                        location: "BLEManager.sendRGB565.timeoutTask",
+                        message: "bleTimeout_firing",
+                        data: ["transferEpoch": Int(self.transferEpoch)]
+                    )
+                    // #endregion agent log
                     self.transferContinuation = nil
                     c.resume(throwing: SpotifyDisplayError.bleTimeout)
                 }
             }
         }
+
+        // #region agent log
+        AgentDebugLog.ingest(
+            hypothesisId: "H1",
+            location: "BLEManager.sendRGB565",
+            message: "success_wait_completed_normally",
+            data: ["transferEpoch": Int(transferEpoch)]
+        )
+        // #endregion agent log
 
         cancelImageSuccessTimeoutTask()
 
@@ -286,6 +413,7 @@ final class BLEManager: NSObject, ObservableObject {
         isTransferring = false
         transferProgress = 0
         statusMessage = "Sent to display"
+        setLivePhase("idle")
 
         Task { @MainActor in
             try? await self.refreshSDCacheCount()
@@ -390,10 +518,33 @@ final class BLEManager: NSObject, ObservableObject {
 
         if text == "SUCCESS", awaitingImageComplete {
             if let c = transferContinuation {
+                // #region agent log
+                AgentDebugLog.ingest(
+                    hypothesisId: "H5",
+                    location: "BLEManager.handleMessage",
+                    message: "notify_SUCCESS_msg_char",
+                    data: ["hadContinuation": true]
+                )
+                // #endregion agent log
                 transferContinuation = nil
                 cancelImageSuccessTimeoutTask()
                 c.resume()
             }
+        }
+
+        if text.hasPrefix("ERROR:"), awaitingImageComplete, let c = transferContinuation {
+            // #region agent log
+            AgentDebugLog.ingest(
+                hypothesisId: "H5",
+                location: "BLEManager.handleMessage",
+                message: "notify_ERROR_msg_char",
+                data: ["prefix": String(text.prefix(48))]
+            )
+            // #endregion agent log
+            transferContinuation = nil
+            cancelImageSuccessTimeoutTask()
+            c.resume(throwing: SpotifyDisplayError.bleTransferRejected(String(text)))
+            return
         }
 
         if text.hasPrefix("CACHE_COUNT:") {
@@ -408,6 +559,13 @@ final class BLEManager: NSObject, ObservableObject {
             } else if let c = statsContinuation {
                 statsContinuation = nil
                 c.resume(throwing: SpotifyDisplayError.conversionFailed)
+            }
+        }
+
+        if text.hasPrefix("TRANSITION:") {
+            let t = text.dropFirst("TRANSITION:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty {
+                lastTransitionName = t
             }
         }
     }
@@ -427,6 +585,8 @@ final class BLEManager: NSObject, ObservableObject {
             statusMessage = "Ready"
             // Re-apply persisted brightness value on every reconnect.
             setBrightness(brightness)
+            // Trigger immediate SpotifyManager resync — works even if app is in background.
+            onReadyCallback?()
             defer { sdCacheCountLoading = false }
             try await refreshSDCacheCount()
         } catch {
@@ -578,10 +738,35 @@ extension BLEManager: CBPeripheralDelegate {
                 }
 
             case self.imageUUID:
-                if data.count == 1, data[0] == 0x01, self.awaitingImageComplete, let c = self.transferContinuation {
-                    self.transferContinuation = nil
-                    self.cancelImageSuccessTimeoutTask()
-                    c.resume()
+                if data.count == 1, self.awaitingImageComplete, let c = self.transferContinuation {
+                    switch data[0] {
+                    case 0x01:
+                        // #region agent log
+                        AgentDebugLog.ingest(
+                            hypothesisId: "H5",
+                            location: "BLEManager.didUpdateValue.image",
+                            message: "notify_image_0x01_ok",
+                            data: [:]
+                        )
+                        // #endregion agent log
+                        self.transferContinuation = nil
+                        self.cancelImageSuccessTimeoutTask()
+                        c.resume()
+                    case 0x02:
+                        // #region agent log
+                        AgentDebugLog.ingest(
+                            hypothesisId: "H5",
+                            location: "BLEManager.didUpdateValue.image",
+                            message: "notify_image_0x02_err",
+                            data: [:]
+                        )
+                        // #endregion agent log
+                        self.transferContinuation = nil
+                        self.cancelImageSuccessTimeoutTask()
+                        c.resume(throwing: SpotifyDisplayError.bleTransferRejected("Display reported transfer error (0x02)"))
+                    default:
+                        break
+                    }
                 }
 
             case self.messageUUID:

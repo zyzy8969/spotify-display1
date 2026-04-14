@@ -1,6 +1,6 @@
 # Dev handoff — iOS BLE / background work
 
-Last updated: 2026-04-12
+Last updated: 2026-04-14
 
 ## What was committed
 
@@ -20,6 +20,13 @@ Last updated: 2026-04-12
 2. **Background mid-transfer:** start a non-cached send, background the app — transfer should often complete within the OS background budget (not guaranteed).
 3. **Restore:** kill app or relaunch near the display — restored central path should reconnect or fall back to scan.
 4. **Long lock / long background:** Spotify polling will **not** stay real-time; UI copy documents that — if product needs continuous updates, that is a separate design (e.g. BG refresh / different entitlements), not fixed by `bluetooth-central` alone.
+
+## Current priorities (roadmap alignment)
+
+1. **Cache-check latency reduction (firmware-first):** optimize SD lookup path in `src/main.cpp` (album-id-aware cache key path already lands from app side).
+2. **Reliability fixes:** brightness writes must always apply on hardware, and cache-clear command must always apply + refresh count in app.
+3. **Transfer stability:** continue reducing occasional timeout / unsuccessful transfer cases under rapid track changes.
+4. **Scope guard:** iOS transition picker is intentionally de-prioritized for now (protocol support exists, UI can wait).
 
 ## Optional follow-ups if tests fail
 

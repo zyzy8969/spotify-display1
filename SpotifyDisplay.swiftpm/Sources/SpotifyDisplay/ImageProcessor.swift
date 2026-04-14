@@ -2,9 +2,14 @@ import UIKit
 import CoreImage
 import CoreGraphics
 
-/// sRGB-oriented resize + grade, then quantize+dither directly to little-endian RGB565 for ESP32 (115_200 bytes).
+/// sRGB-oriented resize + grade, then Atkinson-dither to little-endian RGB565 for ESP32 (115 200 bytes).
+/// Pipeline: JPEG decode → CIImage (Lanczos resize + color grade, single GPU render) → RGBA rasterize → dither+pack.
 enum ImageProcessor {
-    private static let targetSize = CGSize(width: 240, height: 240)
+    private static let targetW = 240
+    private static let targetH = 240
+    private static let targetSize = CGSize(width: targetW, height: targetH)
+
+    /// Shared CIContext — reused across calls; GPU-backed when available.
     private static let ciContext: CIContext = {
         if let space = CGColorSpace(name: CGColorSpace.sRGB) {
             return CIContext(options: [
@@ -15,192 +20,202 @@ enum ImageProcessor {
         return CIContext()
     }()
 
+    // MARK: - Public
+
+    /// Decodes image data, resizes, grades, dithers, and returns 115 200 bytes of LE RGB565.
+    /// Safe to call from any thread (no UIKit dependency on main).
     static func convertToRGB565(imageData: Data) throws -> Data {
-        guard let uiImage = UIImage(data: imageData) else {
+        guard let uiImage = UIImage(data: imageData),
+              let srcCG = uiImage.cgImage else {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        let filled = aspectFillImage(uiImage, to: targetSize)
-        guard let cgImage = filled.cgImage else {
-            throw SpotifyDisplayError.conversionFailed
+        // Build a single CIImage pipeline: scale → crop → grade.
+        var ci = CIImage(cgImage: srcCG)
+        let srcW = CGFloat(srcCG.width)
+        let srcH = CGFloat(srcCG.height)
+        let scale = max(CGFloat(targetW) / srcW, CGFloat(targetH) / srcH)
+
+        // Lanczos resize (GPU).
+        if let lanczos = CIFilter(name: "CILanczosScaleTransform") {
+            lanczos.setValue(ci, forKey: kCIInputImageKey)
+            lanczos.setValue(Float(scale), forKey: kCIInputScaleKey)
+            lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
+            if let out = lanczos.outputImage { ci = out }
         }
 
-        let ciImage = CIImage(cgImage: cgImage)
+        // Center-crop to exact target.
+        let scaledW = srcW * scale
+        let scaledH = srcH * scale
+        let cropX = (scaledW - CGFloat(targetW)) / 2
+        let cropY = (scaledH - CGFloat(targetH)) / 2
+        ci = ci.cropped(to: CGRect(x: cropX, y: cropY, width: CGFloat(targetW), height: CGFloat(targetH)))
+            .transformed(by: CGAffineTransform(translationX: -cropX, y: -cropY))
 
-        let graded = applyGrading(ciImage)
+        // Color grade (GPU).
+        ci = applyGrading(ci)
 
+        // Single GPU render → CGImage.
         let bounds = CGRect(origin: .zero, size: targetSize)
-        guard let output = ciContext.createCGImage(graded, from: bounds) else {
+        guard let output = ciContext.createCGImage(ci, from: bounds) else {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        return try packRGB565LittleEndian(cgImage: output, width: 240, height: 240)
+        return try packRGB565LittleEndian(cgImage: output)
     }
 
-    /// Aspect-fill into exact 240×240 (album art style).
-    private static func aspectFillImage(_ image: UIImage, to size: CGSize) -> UIImage {
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
-        format.opaque = true
-        let renderer = UIGraphicsImageRenderer(size: size, format: format)
-        return renderer.image { _ in
-            UIColor.black.setFill()
-            UIBezierPath(rect: CGRect(origin: .zero, size: size)).fill()
-            let src = image.size
-            let scale = max(size.width / src.width, size.height / src.height)
-            let w = src.width * scale
-            let h = src.height * scale
-            let x = (size.width - w) / 2
-            let y = (size.height - h) / 2
-            image.draw(in: CGRect(x: x, y: y, width: w, height: h))
-        }
-    }
+    // MARK: - Grading
 
-    /// Roughly aligned with desktop script: levels + saturation + contrast (Core Image).
+    /// Tuned for 240px TFT (ST7789): punchy saturation, lifted shadows, extra vibrance.
     private static func applyGrading(_ input: CIImage) -> CIImage {
         var img = input
 
+        // Lift blacks / clip whites — TFT panels have poor black levels, so crushed shadows look muddy.
         if let clamp = CIFilter(name: "CIColorClamp") {
             clamp.setValue(img, forKey: kCIInputImageKey)
-            clamp.setValue(CIVector(x: 0.02, y: 0.02, z: 0.02, w: 0.0), forKey: "inputMinComponents")
-            clamp.setValue(CIVector(x: 0.97, y: 0.97, z: 0.97, w: 1.0), forKey: "inputMaxComponents")
+            clamp.setValue(CIVector(x: 0.03, y: 0.03, z: 0.03, w: 0.0), forKey: "inputMinComponents")
+            clamp.setValue(CIVector(x: 0.96, y: 0.96, z: 0.96, w: 1.0), forKey: "inputMaxComponents")
             if let out = clamp.outputImage { img = out }
         }
 
+        // Slight gamma push — brightens midtones for a small backlit display.
         if let gamma = CIFilter(name: "CIGammaAdjust") {
             gamma.setValue(img, forKey: kCIInputImageKey)
-            gamma.setValue(0.88, forKey: "inputPower")
+            gamma.setValue(0.85, forKey: "inputPower")
             if let out = gamma.outputImage { img = out }
         }
 
+        // Vibrance boosts muted colours without over-saturating already vivid areas.
+        if let vibrance = CIFilter(name: "CIVibrance") {
+            vibrance.setValue(img, forKey: kCIInputImageKey)
+            vibrance.setValue(0.25, forKey: "inputAmount")
+            if let out = vibrance.outputImage { img = out }
+        }
+
+        // Main saturation + contrast push.
         if let color = CIFilter(name: "CIColorControls") {
             color.setValue(img, forKey: kCIInputImageKey)
-            color.setValue(1.18, forKey: kCIInputSaturationKey)
-            color.setValue(0.015, forKey: kCIInputBrightnessKey)
-            color.setValue(1.18, forKey: kCIInputContrastKey)
+            color.setValue(1.30, forKey: kCIInputSaturationKey)
+            color.setValue(0.01, forKey: kCIInputBrightnessKey)
+            color.setValue(1.22, forKey: kCIInputContrastKey)
             if let out = color.outputImage { img = out }
         }
 
         return img
     }
 
-    private static func packRGB565LittleEndian(cgImage: CGImage, width: Int, height: Int) throws -> Data {
+    // MARK: - RGB565 packing with Atkinson dithering
+
+    /// Rasterizes the graded CGImage to RGBA, then Atkinson-dithers to LE RGB565.
+    /// Uses an interleaved RGB float buffer + unsafe pointers — eliminates ~1 M function calls vs the old per-channel approach.
+    private static func packRGB565LittleEndian(cgImage: CGImage) throws -> Data {
+        let width = targetW
+        let height = targetH
+        let pixelCount = width * height
         let bytesPerPixel = 4
         let bytesPerRow = width * bytesPerPixel
-        var raw = [UInt8](repeating: 0, count: height * bytesPerRow)
 
+        // Rasterize to RGBA.
+        var raw = [UInt8](repeating: 0, count: height * bytesPerRow)
         guard let cs = CGColorSpace(name: CGColorSpace.sRGB) else {
             throw SpotifyDisplayError.conversionFailed
         }
-
         var rasterizeFailed = false
         raw.withUnsafeMutableBytes { ptr in
-            guard let base = ptr.baseAddress else {
-                rasterizeFailed = true
-                return
-            }
+            guard let base = ptr.baseAddress else { rasterizeFailed = true; return }
             guard let ctx = CGContext(
-                data: base,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: bytesPerRow,
+                data: base, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: bytesPerRow,
                 space: cs,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            ) else {
-                rasterizeFailed = true
-                return
-            }
+            ) else { rasterizeFailed = true; return }
             ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
-        if rasterizeFailed {
-            throw SpotifyDisplayError.conversionFailed
+        if rasterizeFailed { throw SpotifyDisplayError.conversionFailed }
+
+        // Interleaved RGB float buffer (better cache locality than 3 separate arrays).
+        var buf = [Float](repeating: 0, count: pixelCount * 3)
+        for i in 0..<pixelCount {
+            let o = i * 4
+            buf[i * 3]     = Float(raw[o])
+            buf[i * 3 + 1] = Float(raw[o + 1])
+            buf[i * 3 + 2] = Float(raw[o + 2])
         }
 
-        var rBuf = [Float](repeating: 0, count: width * height)
-        var gBuf = [Float](repeating: 0, count: width * height)
-        var bBuf = [Float](repeating: 0, count: width * height)
+        // Quantisation look-up tables (avoid repeated integer division).
+        var dequantR = [Float](repeating: 0, count: 32)
+        for v in 0..<32 { dequantR[v] = Float(v * 255) / 31.0 }
+        var dequantG = [Float](repeating: 0, count: 64)
+        for v in 0..<64 { dequantG[v] = Float(v * 255) / 63.0 }
 
-        for y in 0..<height {
-            let row = y * bytesPerRow
-            for x in 0..<width {
-                let o = row + x * 4
-                let i = y * width + x
-                rBuf[i] = Float(raw[o])
-                gBuf[i] = Float(raw[o + 1])
-                bBuf[i] = Float(raw[o + 2])
-            }
-        }
+        var le = Data(count: pixelCount * 2)
+        le.withUnsafeMutableBytes { outRaw in
+            buf.withUnsafeMutableBufferPointer { bufPtr in
+                dequantR.withUnsafeBufferPointer { drPtr in
+                    dequantG.withUnsafeBufferPointer { dgPtr in
+                        let b = bufPtr.baseAddress!
+                        let o = outRaw.bindMemory(to: UInt8.self).baseAddress!
+                        let dr = drPtr.baseAddress!
+                        let dg = dgPtr.baseAddress!
 
-        var le = Data(count: width * height * 2)
-        le.withUnsafeMutableBytes { out in
-            guard let outBytes = out.bindMemory(to: UInt8.self).baseAddress else { return }
+                        for y in 0..<height {
+                            let rowOff = y * width
+                            for x in 0..<width {
+                                let i = rowOff + x
+                                let i3 = i * 3
 
-            for y in 0..<height {
-                for x in 0..<width {
-                    let i = y * width + x
-                    let oldR = clamp8(rBuf[i])
-                    let oldG = clamp8(gBuf[i])
-                    let oldB = clamp8(bBuf[i])
+                                let oldR = min(255.0, max(0.0, b[i3]))
+                                let oldG = min(255.0, max(0.0, b[i3 + 1]))
+                                let oldB = min(255.0, max(0.0, b[i3 + 2]))
 
-                    let r5 = UInt16(oldR) >> 3
-                    let g6 = UInt16(oldG) >> 2
-                    let b5 = UInt16(oldB) >> 3
-                    let packed = (r5 << 11) | (g6 << 5) | b5
+                                let r5 = Int(UInt16(oldR) >> 3)
+                                let g6 = Int(UInt16(oldG) >> 2)
+                                let b5 = Int(UInt16(oldB) >> 3)
+                                let packed = UInt16((r5 << 11) | (g6 << 5) | b5)
 
-                    let quantR = Float(Int(r5) * 255 / 31)
-                    let quantG = Float(Int(g6) * 255 / 63)
-                    let quantB = Float(Int(b5) * 255 / 31)
+                                let base = i * 2
+                                o[base]     = UInt8(truncatingIfNeeded: packed & 0xff)
+                                o[base + 1] = UInt8(truncatingIfNeeded: packed >> 8)
 
-                    let errR = oldR - quantR
-                    let errG = oldG - quantG
-                    let errB = oldB - quantB
+                                // Atkinson error shares (÷8).
+                                let eR = (oldR - dr[r5]) * 0.125
+                                let eG = (oldG - dg[g6]) * 0.125
+                                let eB = (oldB - dr[b5]) * 0.125 // dequantR reused for 5-bit blue
 
-                    let base = i * 2
-                    outBytes[base] = UInt8(truncatingIfNeeded: packed & 0xff)
-                    outBytes[base + 1] = UInt8(truncatingIfNeeded: packed >> 8)
+                                if eR == 0 && eG == 0 && eB == 0 { continue }
 
-                    distributeAtkinsonError(&rBuf, x: x, y: y, width: width, height: height, error: errR)
-                    distributeAtkinsonError(&gBuf, x: x, y: y, width: width, height: height, error: errG)
-                    distributeAtkinsonError(&bBuf, x: x, y: y, width: width, height: height, error: errB)
+                                // Distribute to 6 Atkinson neighbours — inlined, no function calls.
+                                if x + 1 < width {
+                                    let j = i3 + 3
+                                    b[j] += eR; b[j+1] += eG; b[j+2] += eB
+                                }
+                                if x + 2 < width {
+                                    let j = i3 + 6
+                                    b[j] += eR; b[j+1] += eG; b[j+2] += eB
+                                }
+                                if y + 1 < height {
+                                    let nextRow = (rowOff + width) * 3
+                                    if x > 0 {
+                                        let j = nextRow + (x - 1) * 3
+                                        b[j] += eR; b[j+1] += eG; b[j+2] += eB
+                                    }
+                                    let j2 = nextRow + x * 3
+                                    b[j2] += eR; b[j2+1] += eG; b[j2+2] += eB
+                                    if x + 1 < width {
+                                        let j3 = nextRow + (x + 1) * 3
+                                        b[j3] += eR; b[j3+1] += eG; b[j3+2] += eB
+                                    }
+                                }
+                                if y + 2 < height {
+                                    let j = (rowOff + width * 2 + x) * 3
+                                    b[j] += eR; b[j+1] += eG; b[j+2] += eB
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
         return le
-    }
-
-    private static func clamp8(_ value: Float) -> Float {
-        min(255.0, max(0.0, value))
-    }
-
-    private static func distributeAtkinsonError(
-        _ channel: inout [Float],
-        x: Int,
-        y: Int,
-        width: Int,
-        height: Int,
-        error: Float
-    ) {
-        let share = error / 8.0
-        guard share != 0 else { return }
-        addError(&channel, x: x + 1, y: y, width: width, height: height, error: share)
-        addError(&channel, x: x + 2, y: y, width: width, height: height, error: share)
-        addError(&channel, x: x - 1, y: y + 1, width: width, height: height, error: share)
-        addError(&channel, x: x, y: y + 1, width: width, height: height, error: share)
-        addError(&channel, x: x + 1, y: y + 1, width: width, height: height, error: share)
-        addError(&channel, x: x, y: y + 2, width: width, height: height, error: share)
-    }
-
-    private static func addError(
-        _ channel: inout [Float],
-        x: Int,
-        y: Int,
-        width: Int,
-        height: Int,
-        error: Float
-    ) {
-        guard x >= 0, x < width, y >= 0, y < height else { return }
-        let idx = y * width + x
-        channel[idx] += error
     }
 }

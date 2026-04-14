@@ -10,6 +10,7 @@ private let kSpotifyClientIDPlistKey = "SpotifyClientID"
 @MainActor
 final class SpotifyManager: ObservableObject {
     @Published var currentTrack: Track?
+    @Published var isPlaying = false
     @Published var isAuthenticated = false
     @Published var lastError: String?
     @Published var pollStatus: String?
@@ -24,12 +25,16 @@ final class SpotifyManager: ObservableObject {
     private let debounceSeconds: TimeInterval = 0.12
     private var lastSentToDisplayTrackId: String?
     private var lastSentToDisplayReadyEpoch: UInt64?
+    private var lastSentToDisplayArtURL: String?
     private var lastObservedBleReadyEpoch: UInt64 = 0
     private var lastSceneBackgroundAt: Date?
 
     private weak var monitoredBle: BLEManager?
     private var artSendTask: Task<Void, Never>?
     private var artInFlightTrackId: String?
+    /// Monotonic counter incremented each time a new `artSendTask` is launched.
+    /// Old tasks check this before touching shared state so they don't clobber a newer task.
+    private var artSendGeneration: UInt64 = 0
 
     /// When `requestResync` runs while a download/BLE send is active, defer full resync until the pipeline is idle.
     private var pendingResyncAfterTransfer = false
@@ -43,8 +48,8 @@ final class SpotifyManager: ObservableObject {
     private var lastAnyDisplayFailureAt: Date?
     private let displayFailureGlobalBackoffSeconds: TimeInterval = 0.8
 
-    /// Poll interval while monitoring (~3/min). Tuned for new-track latency vs Spotify rate limits.
-    private let pollIntervalSeconds: TimeInterval = 0.35
+    /// Poll interval while monitoring. Slightly slower to reduce API pressure while keeping responsive updates.
+    private let pollIntervalSeconds: TimeInterval = 0.45
     /// After HTTP 429, skip player API calls until this time (honors Retry-After, capped).
     private var rateLimitedUntil: Date?
 
@@ -110,7 +115,7 @@ final class SpotifyManager: ObservableObject {
             URLQueryItem(name: "client_id", value: clientId),
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "redirect_uri", value: redirectURI),
-            URLQueryItem(name: "scope", value: "user-read-currently-playing"),
+            URLQueryItem(name: "scope", value: "user-read-currently-playing user-modify-playback-state"),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "code_challenge", value: challenge)
         ]
@@ -182,6 +187,7 @@ final class SpotifyManager: ObservableObject {
         pendingTrack = nil
         pendingSince = nil
         lastSentToDisplayTrackId = nil
+        lastSentToDisplayArtURL = nil
         rateLimitedUntil = nil
         monitoredBle?.cancelOngoingTransfer()
         artSendTask?.cancel()
@@ -192,6 +198,51 @@ final class SpotifyManager: ObservableObject {
         lastAnyDisplayFailureAt = nil
         pendingResyncAfterTransfer = false
         pollStatus = "Not authenticated"
+    }
+
+    /// Skip to next track via Spotify Web API.
+    func skipToNext() async {
+        await playerCommand(endpoint: "next", method: "POST")
+    }
+
+    /// Skip to previous track via Spotify Web API.
+    func skipToPrevious() async {
+        await playerCommand(endpoint: "previous", method: "POST")
+    }
+
+    /// Pause playback.
+    func pause() async {
+        await playerCommand(endpoint: "pause", method: "PUT")
+    }
+
+    /// Resume playback.
+    func resume() async {
+        await playerCommand(endpoint: "play", method: "PUT")
+    }
+
+    private func playerCommand(endpoint: String, method: String) async {
+        guard isAuthenticated else { return }
+        do {
+            try await ensureAccessTokenFresh()
+            guard let token = accessToken else { return }
+            var req = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player/\(endpoint)")!)
+            req.httpMethod = method
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let (_, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse, http.statusCode == 403 {
+                lastError = "Requires premium or re-sign-in for new permissions"
+            }
+            // Pause/play should not force a dedupe reset + resend for the same track/art.
+            if endpoint == "pause" || endpoint == "play" {
+                if let ble = monitoredBle {
+                    await pollOnce(bleManager: ble)
+                }
+            } else {
+                await requestResync(reason: endpoint, immediatePoll: true)
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     /// Use saved refresh token if present.
@@ -210,6 +261,15 @@ final class SpotifyManager: ObservableObject {
     func startMonitoring(bleManager: BLEManager) {
         monitoredBle = bleManager
         startNetworkMonitor()
+
+        // Direct callback from BLE — fires even when background poll loop is suspended by iOS.
+        bleManager.onReadyCallback = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.requestResync(reason: "ble-ready-callback", immediatePoll: true)
+            }
+        }
+
         monitorTask?.cancel()
         monitorTask = Task {
             await restoreSession()
@@ -288,6 +348,7 @@ final class SpotifyManager: ObservableObject {
         lastAnyDisplayFailureAt = nil
         // Force a same-track resend after reconnect/session change.
         lastSentToDisplayTrackId = nil
+        lastSentToDisplayArtURL = nil
         lastSentToDisplayReadyEpoch = nil
         pollStatus = "Resyncing (\(reason))…"
         if immediatePoll, let ble = monitoredBle {
@@ -351,11 +412,13 @@ final class SpotifyManager: ObservableObject {
             let state = try await fetchCurrentlyPlayingWithRefresh()
             lastError = nil
 
-            guard let item = state.item, state.isPlaying else {
+            guard let item = state.item else {
                 pollStatus = "Nothing playing"
+                isPlaying = false
                 if currentTrack != nil {
                     currentTrack = nil
                 }
+                bleManager.clearTopTransferStatus()
                 pendingTrack = nil
                 pendingSince = nil
                 bleManager.cancelOngoingTransfer()
@@ -369,8 +432,16 @@ final class SpotifyManager: ObservableObject {
                 return
             }
 
+            // Keep last track metadata on pause so UI can show "Paused" with controls.
+            if !state.isPlaying {
+                isPlaying = false
+                currentTrack = item
+                pollStatus = "Paused"
+                return
+            }
+
             pollStatus = "Playing: \(item.name)"
-            // Always update UI with the current track
+            isPlaying = true
             currentTrack = item
 
             if let inflight = artInFlightTrackId, inflight != item.id {
@@ -380,15 +451,27 @@ final class SpotifyManager: ObservableObject {
                 artInFlightTrackId = nil
             }
 
-            // Session-aware dedupe: same track can still need resend after BLE reconnect.
+            let artURL = bestArtURL(from: item)
+            guard let artURL else {
+                lastError = "No album art for this track"
+                lastSentToDisplayTrackId = item.id
+                pendingTrack = nil
+                pendingSince = nil
+                return
+            }
+
+            // Session-aware dedupe: avoid duplicate cache/send work for same track+art in same BLE epoch.
             let currentReadyEpoch = bleManager.readyEpoch
             if item.id == lastSentToDisplayTrackId,
-               lastSentToDisplayReadyEpoch == currentReadyEpoch
+               artURL == lastSentToDisplayArtURL,
+               lastSentToDisplayReadyEpoch == currentReadyEpoch,
+               bleManager.lastConfirmedTrackId == item.id
             {
                 return
             }
 
             if pendingTrack?.id != item.id {
+                bleManager.clearTopTransferStatus()
                 pendingTrack = item
                 // Old behavior returned here and waited a full `pollIntervalSeconds` before continuing — often +0.6s latency per new song.
                 // Pretend debounce already elapsed so we can download/send in this same poll (dedupe / in-flight guards still apply).
@@ -409,15 +492,6 @@ final class SpotifyManager: ObservableObject {
                 return
             }
 
-            let artURL = bestArtURL(from: item)
-            guard let artURL else {
-                lastError = "No album art for this track"
-                lastSentToDisplayTrackId = item.id
-                pendingTrack = nil
-                pendingSince = nil
-                return
-            }
-
             if let globalFail = lastAnyDisplayFailureAt,
                Date().timeIntervalSince(globalFail) < displayFailureGlobalBackoffSeconds
             {
@@ -433,6 +507,8 @@ final class SpotifyManager: ObservableObject {
             let capturedName = item.name
             let ble = bleManager
             artInFlightTrackId = capturedId
+            artSendGeneration &+= 1
+            let myGeneration = artSendGeneration
             artSendTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
@@ -441,7 +517,18 @@ final class SpotifyManager: ObservableObject {
                         albumId: self.currentTrack?.album?.id,
                         trackId: capturedId
                     )
+                    guard self.artSendGeneration == myGeneration else { return }
                     guard !Task.isCancelled else {
+                        self.artInFlightTrackId = nil
+                        self.artSendTask = nil
+                        await self.flushPendingResyncIfNeeded()
+                        return
+                    }
+                    // Pause/stop clears `currentTrack` before this task finishes; do not mark dedupe or the next
+                    // play will think art was already sent and skip (poll "overrides" / stale state).
+                    if self.currentTrack == nil {
+                        self.pendingTrack = nil
+                        self.pendingSince = nil
                         self.artInFlightTrackId = nil
                         self.artSendTask = nil
                         await self.flushPendingResyncIfNeeded()
@@ -450,6 +537,7 @@ final class SpotifyManager: ObservableObject {
                     if self.currentTrack?.id == capturedId {
                         self.lastError = nil
                         self.lastSentToDisplayTrackId = capturedId
+                        self.lastSentToDisplayArtURL = capturedURL
                         self.lastSentToDisplayReadyEpoch = ble.readyEpoch
                         self.lastDisplayFailureAt = nil
                         self.lastDisplayFailureTrackId = nil
@@ -463,6 +551,7 @@ final class SpotifyManager: ObservableObject {
                     } else {
                         // Transfer finished for `capturedId` but UI already moved — still dedupe so we do not 1 Hz resend.
                         self.lastSentToDisplayTrackId = capturedId
+                        self.lastSentToDisplayArtURL = capturedURL
                         self.lastSentToDisplayReadyEpoch = ble.readyEpoch
                         self.lastDisplayFailureAt = nil
                         self.lastDisplayFailureTrackId = nil
@@ -477,21 +566,67 @@ final class SpotifyManager: ObservableObject {
                         await self.flushPendingResyncIfNeeded()
                     }
                 } catch let error as URLError where error.code == .cancelled {
+                    guard self.artSendGeneration == myGeneration else { return }
                     self.artInFlightTrackId = nil
                     self.artSendTask = nil
                     await self.flushPendingResyncIfNeeded()
                 } catch is CancellationError {
+                    guard self.artSendGeneration == myGeneration else { return }
                     self.artInFlightTrackId = nil
                     self.artSendTask = nil
                     await self.flushPendingResyncIfNeeded()
-                } catch {
+                } catch let error as SpotifyDisplayError {
+                    guard self.artSendGeneration == myGeneration else { return }
+                    // #region agent log
+                    let errLabel: String = {
+                        switch error {
+                        case .bleTimeout: return "bleTimeout"
+                        case let .bleTransferRejected(s): return "bleTransferRejected:\(s.prefix(60))"
+                        case .notConnected: return "notConnected"
+                        case .conversionFailed: return "conversionFailed"
+                        case .authFailed: return "authFailed"
+                        case .missingClientId: return "missingClientId"
+                        }
+                    }()
+                    AgentDebugLog.ingest(
+                        hypothesisId: "H4",
+                        location: "SpotifyManager.artSendTask",
+                        message: "caught_SpotifyDisplayError",
+                        data: ["kind": errLabel, "capturedId": String(capturedId.prefix(12))]
+                    )
+                    // #endregion agent log
+                    switch error {
+                    case .bleTimeout, .bleTransferRejected:
+                        ble.cancelOngoingTransfer()
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                    case .notConnected, .conversionFailed, .authFailed, .missingClientId:
+                        break
+                    }
+                    guard self.artSendGeneration == myGeneration else { return }
                     self.lastError = error.localizedDescription
                     self.pollStatus = "Display transfer failed"
                     let now = Date()
                     self.lastDisplayFailureAt = now
                     self.lastDisplayFailureTrackId = capturedId
                     self.lastAnyDisplayFailureAt = now
-                    // Keep current track retry-eligible; self-heal path will retry quickly.
+                    if let latest = self.currentTrack {
+                        self.pendingTrack = latest
+                        self.pendingSince = Date().addingTimeInterval(-self.debounceSeconds)
+                    } else {
+                        self.pendingTrack = nil
+                        self.pendingSince = nil
+                    }
+                    self.artInFlightTrackId = nil
+                    self.artSendTask = nil
+                    await self.flushPendingResyncIfNeeded()
+                } catch {
+                    guard self.artSendGeneration == myGeneration else { return }
+                    self.lastError = error.localizedDescription
+                    self.pollStatus = "Display transfer failed"
+                    let now = Date()
+                    self.lastDisplayFailureAt = now
+                    self.lastDisplayFailureTrackId = capturedId
+                    self.lastAnyDisplayFailureAt = now
                     if let latest = self.currentTrack {
                         self.pendingTrack = latest
                         self.pendingSince = Date().addingTimeInterval(-self.debounceSeconds)
@@ -521,7 +656,12 @@ final class SpotifyManager: ObservableObject {
 
     private func bestArtURL(from track: Track) -> String? {
         guard let album = track.album else { return nil }
-        return album.images.max(by: { ($0.width ?? 0) < ($1.width ?? 0) })?.url
+        // Prefer exact 300x300 for speed, but fall back to whatever is available so songs still display.
+        if let exact300 = album.images.first(where: { ($0.width ?? 0) == 300 && ($0.height ?? 0) == 300 }) {
+            return exact300.url
+        }
+        // Fallback: choose nearest to 300 from available variants.
+        return album.images.min(by: { abs(($0.width ?? 0) - 300) < abs(($1.width ?? 0) - 300) })?.url
     }
 
     private func fetchCurrentlyPlayingWithRefresh() async throws -> CurrentlyPlayingResponse {
