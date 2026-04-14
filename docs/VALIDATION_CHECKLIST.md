@@ -15,6 +15,8 @@ Use this on a physical iPhone + ESP32 display before and after roadmap changes.
 - Unlock and confirm app reconnects/continues updates.
 - Send one new track after unlock.
 - Expected: no stuck transfer state; updates resume without app restart.
+- While still on the same song, force a BLE reconnect (power-cycle display or move out/in range).
+- Expected: current song is resent automatically without manually skipping tracks.
 
 ## Cache correctness
 
@@ -25,7 +27,13 @@ Use this on a physical iPhone + ESP32 display before and after roadmap changes.
 
 ## Transition + rendering checks
 
-- Test random transition mode (`255`) for at least 10 images.
-- Test forced transitions with 3-5 different indices.
+- Test random transitions for at least 10 images.
 - Check for tearing/artifacts in diagonal/circular style transitions.
 - Expected: transitions complete without frozen rows or stale regions.
+
+## Latency checks
+
+- In foreground, measure song-change-to-display time across 10 skips.
+- Expected: median update latency is under ~1 second on stable BLE.
+- Disable internet for 10-20 seconds, then restore it.
+- Expected: app auto-recovers and updates current song without reopening app.

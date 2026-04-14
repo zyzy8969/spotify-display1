@@ -20,8 +20,11 @@ final class SpotifyManager: ObservableObject {
 
     private var pendingTrack: Track?
     private var pendingSince: Date?
-    private let debounceSeconds: TimeInterval = 0.5
+    private let debounceSeconds: TimeInterval = 0.2
     private var lastSentToDisplayTrackId: String?
+    private var lastSentToDisplayReadyEpoch: UInt64?
+    private var lastObservedBleReadyEpoch: UInt64 = 0
+    private var lastSceneBackgroundAt: Date?
 
     private weak var monitoredBle: BLEManager?
     private var artSendTask: Task<Void, Never>?
@@ -30,13 +33,13 @@ final class SpotifyManager: ObservableObject {
     /// After a display transfer error, do not start another send for the same track every poll (prevents BLE retry storms).
     private var lastDisplayFailureAt: Date?
     private var lastDisplayFailureTrackId: String?
-    private let displayFailureCooldownSeconds: TimeInterval = 3.0
+    private let displayFailureCooldownSeconds: TimeInterval = 1.2
     /// After any display error, brief pause before starting a send for a *different* track (reduces hammering on bad link).
     private var lastAnyDisplayFailureAt: Date?
-    private let displayFailureGlobalBackoffSeconds: TimeInterval = 1.5
+    private let displayFailureGlobalBackoffSeconds: TimeInterval = 0.8
 
-    /// ~1 Hz so skips are noticed quickly; rate limits handled via `rateLimitedUntil` + 429 handling.
-    private let pollIntervalSeconds: TimeInterval = 1.0
+    /// Faster poll for quicker new-song pickup while app is active.
+    private let pollIntervalSeconds: TimeInterval = 0.6
     /// After HTTP 429, skip player API calls until this time (honors Retry-After, capped).
     private var rateLimitedUntil: Date?
 
@@ -189,7 +192,13 @@ final class SpotifyManager: ObservableObject {
         monitorTask?.cancel()
         monitorTask = Task {
             await restoreSession()
+            await requestResync(reason: "monitor-start", immediatePoll: false)
             while !Task.isCancelled {
+                let bleEpoch = bleManager.readyEpoch
+                if bleEpoch != lastObservedBleReadyEpoch {
+                    lastObservedBleReadyEpoch = bleEpoch
+                    await requestResync(reason: "ble-ready-\(bleEpoch)", immediatePoll: true)
+                }
                 if networkIsReachable {
                     await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                         ProcessInfo.processInfo.performExpiringActivity(withReason: "SpotifyPollRecovery") { _ in
@@ -221,6 +230,35 @@ final class SpotifyManager: ObservableObject {
         stopNetworkMonitor()
     }
 
+    func scenePhaseDidChange(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            lastSceneBackgroundAt = Date()
+        case .active:
+            let gap = Date().timeIntervalSince(lastSceneBackgroundAt ?? .distantPast)
+            Task { @MainActor in
+                await requestResync(reason: "scene-active-gap-\(Int(gap))", immediatePoll: gap > 1.0)
+            }
+        default:
+            break
+        }
+    }
+
+    func requestResync(reason: String, immediatePoll: Bool = true) async {
+        pendingTrack = nil
+        pendingSince = nil
+        lastDisplayFailureAt = nil
+        lastDisplayFailureTrackId = nil
+        lastAnyDisplayFailureAt = nil
+        // Force a same-track resend after reconnect/session change.
+        lastSentToDisplayTrackId = nil
+        lastSentToDisplayReadyEpoch = nil
+        pollStatus = "Resyncing (\(reason))…"
+        if immediatePoll, let ble = monitoredBle {
+            await pollOnce(bleManager: ble)
+        }
+    }
+
     private func startNetworkMonitor() {
         guard !networkMonitorStarted else { return }
         let monitor = NWPathMonitor()
@@ -234,9 +272,7 @@ final class SpotifyManager: ObservableObject {
                 self.networkIsReachable = reachable
                 if reachable && !wasReachable {
                     self.pollStatus = "Network restored — resuming"
-                    if let ble = self.monitoredBle {
-                        await self.pollOnce(bleManager: ble)
-                    }
+                    await self.requestResync(reason: "network-restored", immediatePoll: true)
                 } else if !reachable {
                     self.pollStatus = "Offline — waiting for network"
                 }
@@ -299,8 +335,13 @@ final class SpotifyManager: ObservableObject {
                 artInFlightTrackId = nil
             }
 
-            // Only deduplicate BLE sends, not UI updates
-            if item.id == lastSentToDisplayTrackId { return }
+            // Session-aware dedupe: same track can still need resend after BLE reconnect.
+            let currentReadyEpoch = bleManager.readyEpoch
+            if item.id == lastSentToDisplayTrackId,
+               lastSentToDisplayReadyEpoch == currentReadyEpoch
+            {
+                return
+            }
 
             if pendingTrack?.id != item.id {
                 pendingTrack = item
@@ -362,6 +403,7 @@ final class SpotifyManager: ObservableObject {
                     if self.currentTrack?.id == capturedId {
                         self.lastError = nil
                         self.lastSentToDisplayTrackId = capturedId
+                        self.lastSentToDisplayReadyEpoch = ble.readyEpoch
                         self.lastDisplayFailureAt = nil
                         self.lastDisplayFailureTrackId = nil
                         self.lastAnyDisplayFailureAt = nil
@@ -373,6 +415,7 @@ final class SpotifyManager: ObservableObject {
                     } else {
                         // Transfer finished for `capturedId` but UI already moved — still dedupe so we do not 1 Hz resend.
                         self.lastSentToDisplayTrackId = capturedId
+                        self.lastSentToDisplayReadyEpoch = ble.readyEpoch
                         self.lastDisplayFailureAt = nil
                         self.lastDisplayFailureTrackId = nil
                         self.lastAnyDisplayFailureAt = nil
@@ -397,8 +440,14 @@ final class SpotifyManager: ObservableObject {
                     self.lastDisplayFailureAt = now
                     self.lastDisplayFailureTrackId = capturedId
                     self.lastAnyDisplayFailureAt = now
-                    self.pendingTrack = nil
-                    self.pendingSince = nil
+                    // Keep current track retry-eligible; self-heal path will retry quickly.
+                    if let latest = self.currentTrack {
+                        self.pendingTrack = latest
+                        self.pendingSince = Date().addingTimeInterval(-self.debounceSeconds)
+                    } else {
+                        self.pendingTrack = nil
+                        self.pendingSince = nil
+                    }
                     self.artInFlightTrackId = nil
                     self.artSendTask = nil
                 }

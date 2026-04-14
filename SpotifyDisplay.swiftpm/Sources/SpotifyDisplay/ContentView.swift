@@ -118,6 +118,9 @@ struct ContentView: View {
                 bleManager.startScanning()
                 spotifyManager.startMonitoring(bleManager: bleManager)
             }
+            .onChange(of: scenePhase) { newPhase in
+                spotifyManager.scenePhaseDidChange(newPhase)
+            }
             .onDisappear {
                 spotifyManager.stopMonitoring()
             }

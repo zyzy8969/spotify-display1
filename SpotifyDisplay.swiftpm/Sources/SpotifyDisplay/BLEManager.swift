@@ -14,6 +14,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var sdCacheEntryCount: Int?
     /// True after connect until the first post-`READY` cache stats request finishes (success or failure).
     @Published private(set) var sdCacheCountLoading = false
+    /// Increments whenever GATT is fully ready after (re)connect; consumers can use this as a sync session token.
+    @Published private(set) var readyEpoch: UInt64 = 0
     @Published var brightness: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_brightness"))
 
     private var central: CBCentralManager!
@@ -415,6 +417,7 @@ final class BLEManager: NSObject, ObservableObject {
         try? await Task.sleep(nanoseconds: 50_000_000)
         do {
             try await waitForReady()
+            readyEpoch &+= 1
             statusMessage = "Ready"
             // Re-apply persisted brightness value on every reconnect.
             setBrightness(brightness)
