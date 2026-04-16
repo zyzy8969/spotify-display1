@@ -43,6 +43,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var transferContinuation: CheckedContinuation<Void, Error>?
     private var statsContinuation: CheckedContinuation<Int, Error>?
     private var clearContinuation: CheckedContinuation<Void, Error>?
+    private var cacheRenderContinuation: CheckedContinuation<Void, Error>?
     /// CoreBluetooth write queue (without-response) drain signal
     private var writeDrainContinuation: CheckedContinuation<Void, Never>?
 
@@ -50,6 +51,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// Ensures `readyEpoch` increments at most once per BLE connection even if characteristics discovery runs more than once.
     private var readyEpochCommittedForConnection = false
     private var awaitingImageComplete = false
+    private var awaitingCacheRenderConfirm = false
+    private var cacheRenderConfirmed = false
     /// Last transition announced by firmware via `MESSAGE` notify (`TRANSITION:<name>`).
     @Published private(set) var lastTransitionName: String?
 
@@ -157,6 +160,10 @@ final class BLEManager: NSObject, ObservableObject {
         activeDownloadTask = nil
         transferContinuation?.resume(throwing: CancellationError())
         transferContinuation = nil
+        cacheRenderContinuation?.resume(throwing: CancellationError())
+        cacheRenderContinuation = nil
+        awaitingCacheRenderConfirm = false
+        cacheRenderConfirmed = false
         if isTransferring {
             isTransferring = false
             transferProgress = 0
@@ -204,7 +211,8 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     /// Parallel download + cache check (like desktop script), then send on miss.
-    func processTrack(imageURL: String, albumId: String?, trackId: String) async throws {
+    /// `imageURLs` is ordered by preference; only the first two are attempted.
+    func processTrack(imageURLs: [String], albumId: String?, trackId: String) async throws {
         beginTransferBackgroundTaskIfNeeded()
         defer { endTransferBackgroundTaskIfNeeded() }
         setLivePhase("cache check + downloading…")
@@ -213,22 +221,25 @@ final class BLEManager: NSObject, ObservableObject {
         let totalStart = CFAbsoluteTimeGetCurrent()
         let epochAtStart = transferEpoch
         try ensureTransferEpoch(epochAtStart)
-
-        guard let u = URL(string: imageURL) else { throw SpotifyDisplayError.conversionFailed }
+        guard let primaryURL = imageURLs.first else { throw SpotifyDisplayError.conversionFailed }
 
         // Start download + cache check in parallel.
         let downloadStart = CFAbsoluteTimeGetCurrent()
-        let download = Task { try await URLSession.shared.data(from: u) }
+        let download = Task { try await self.fetchAlbumArtData(urlCandidates: imageURLs) }
         activeDownloadTask = download
 
         let cacheCheckStart = CFAbsoluteTimeGetCurrent()
         setLivePhase("cache check + downloading…")
         let cacheHit: Bool
-        let cacheKeySource = String.cacheKeySource(albumId: albumId, imageURL: imageURL)
+        let cacheKeySource = String.cacheKeySource(albumId: albumId, imageURL: primaryURL)
         let cacheKey = cacheKeySource.md5Digest
+        awaitingCacheRenderConfirm = true
+        cacheRenderConfirmed = false
         do {
             cacheHit = try await checkCacheHit(cacheKey: cacheKey)
         } catch {
+            awaitingCacheRenderConfirm = false
+            cacheRenderConfirmed = false
             download.cancel()
             activeDownloadTask = nil
             throw error
@@ -241,10 +252,11 @@ final class BLEManager: NSObject, ObservableObject {
         if cacheHit {
             let previewDownload = download
             activeDownloadTask = nil
+            try await awaitCacheRenderConfirmation()
             // Cache hit updates the board from SD immediately. Keep the app preview in sync by
             // finishing the already-started download in the background for UI only.
             Task { @MainActor in
-                if let (data, _) = try? await previewDownload.value {
+                if let data = try? await previewDownload.value {
                     self.currentAlbumArt = data
                 }
             }
@@ -262,11 +274,13 @@ final class BLEManager: NSObject, ObservableObject {
             setLivePhase("last: cache hit \(secondsLabel(fromMs: totalMs))")
             return
         }
+        awaitingCacheRenderConfirm = false
+        cacheRenderConfirmed = false
 
-        let (data, _): (Data, URLResponse)
+        let data: Data
         setLivePhase("waiting download…")
         do {
-            (data, _) = try await download.value
+            data = try await download.value
         } catch {
             activeDownloadTask = nil
             throw error
@@ -311,6 +325,48 @@ final class BLEManager: NSObject, ObservableObject {
             totalMs: totalMs, outcome: "ok"
         ))
         setLivePhase("last: done \(secondsLabel(fromMs: totalMs))")
+    }
+
+    private func fetchAlbumArtData(urlCandidates: [String]) async throws -> Data {
+        var firstError: Error?
+        for candidate in urlCandidates.prefix(2) {
+            guard let url = URL(string: candidate) else { continue }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    throw URLError(.badServerResponse)
+                }
+                guard UIImage(data: data) != nil else {
+                    throw SpotifyDisplayError.conversionFailed
+                }
+                return data
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        }
+        throw firstError ?? SpotifyDisplayError.conversionFailed
+    }
+
+    private func awaitCacheRenderConfirmation() async throws {
+        if cacheRenderConfirmed {
+            awaitingCacheRenderConfirm = false
+            cacheRenderConfirmed = false
+            return
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            self.cacheRenderContinuation = cont
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if let pending = self.cacheRenderContinuation {
+                    self.cacheRenderContinuation = nil
+                    self.awaitingCacheRenderConfirm = false
+                    self.cacheRenderConfirmed = false
+                    pending.resume(throwing: SpotifyDisplayError.bleTransferRejected("ERROR: Cache render confirmation missing"))
+                }
+            }
+        }
+        awaitingCacheRenderConfirm = false
+        cacheRenderConfirmed = false
     }
 
     func sendRGB565(_ rgb565: Data, epochAtStart: UInt64) async throws {
@@ -475,6 +531,10 @@ final class BLEManager: NSObject, ObservableObject {
         cacheContinuation = nil
         transferContinuation?.resume(throwing: error)
         transferContinuation = nil
+        cacheRenderContinuation?.resume(throwing: error)
+        cacheRenderContinuation = nil
+        awaitingCacheRenderConfirm = false
+        cacheRenderConfirmed = false
         statsContinuation?.resume(throwing: error)
         statsContinuation = nil
         clearContinuation?.resume(throwing: error)
@@ -532,6 +592,14 @@ final class BLEManager: NSObject, ObservableObject {
                 // #endregion agent log
                 transferContinuation = nil
                 cancelImageSuccessTimeoutTask()
+                c.resume()
+            }
+        }
+
+        if (text == "CACHE_RENDERED" || text == "SUCCESS"), awaitingCacheRenderConfirm {
+            cacheRenderConfirmed = true
+            if let c = cacheRenderContinuation {
+                cacheRenderContinuation = nil
                 c.resume()
             }
         }

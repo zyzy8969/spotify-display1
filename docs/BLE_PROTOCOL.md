@@ -2,7 +2,7 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.5** (Firmware-owned cache semantics v1: versioned filenames, cache health/timing messages, deterministic clear ack/count flow.)
+Version: **1.6** (Album-art fallback resilience + explicit cache render confirmation for reliability-first cache-hit UX.)
 
 ## Peripheral
 
@@ -40,6 +40,8 @@ Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications aft
 
 **Notify response** (1 byte): `0x01` = image is cached on SD and was loaded; `0x00` = send image.
 Firmware stores files with internal cache key version prefix (`v1_...bin`) and may keep backward compatibility with legacy unversioned entries.
+
+On cache hit render completion, firmware also emits Message notify `CACHE_RENDERED` (authoritative board-render confirmation). Clients should prefer this over optimistic UI status.
 
 ## Image transfer (write to Image characteristic)
 

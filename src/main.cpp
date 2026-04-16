@@ -165,6 +165,7 @@ uint32_t computeCRC32(const uint8_t* data, size_t len);
 void clearCacheDirectory();
 void printRainbowText(String text, int x, int y, int textSize);
 void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor);
+void resetToWaitingScreen();
 void drawZoomBlocks(uint16_t* buffer, int width, int height);
 
 // BLE work flags (set by callbacks, processed in loop())
@@ -244,16 +245,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
         Serial.println("BLE Client disconnected");
-
-        // Return to waiting state (yes=black, no=red)
-        showBluetoothConnectionScreen(BLACK, RED);
-
-        showingStartupScreen = true;
-        Serial.println("Display reset to waiting state");
-
-        // Restart advertising
-        pServer->startAdvertising();
-        Serial.println("BLE Advertising restarted");
+        // Defer UI reset + advertising restart to loop() single-owner disconnect path.
     }
 };
 
@@ -980,6 +972,13 @@ void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor) {
     gfx->print("no");
 }
 
+void resetToWaitingScreen() {
+    showingStartupScreen = true;
+    pulseIsWhite = false;
+    lastPulseUpdate = millis();
+    showBluetoothConnectionScreen(BLACK, RED);
+}
+
 // ==================================================
 // BLUETOOTH LE SETUP FUNCTION
 // ==================================================
@@ -1683,6 +1682,11 @@ void loop() {
         pMsgChar->notify();
         delay(10);  // Small delay to ensure message is sent before cache response
 
+        // Authoritative cache-hit render confirmation for app-side reliability.
+        pMsgChar->setValue("CACHE_RENDERED");
+        pMsgChar->notify();
+        delay(5);
+
         // Notify CACHED response AFTER drawing completes
         // This prevents Python from sending new data while we're still drawing
         uint8_t response = 0x01;
@@ -1780,11 +1784,10 @@ void loop() {
   // Handle BLE connection state changes
   if (!deviceConnected && oldDeviceConnected) {
     // Client just disconnected
-    showingStartupScreen = true;
-    pulseIsWhite = false;
-    showBluetoothConnectionScreen(BLACK, RED);
+    resetToWaitingScreen();
     pServer->startAdvertising();  // Restart advertising
     Serial.println("BLE: Restarted advertising after disconnect");
+    Serial.println("Display reset to waiting state");
     oldDeviceConnected = deviceConnected;
   }
 

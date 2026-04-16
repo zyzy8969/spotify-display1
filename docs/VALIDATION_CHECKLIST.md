@@ -9,6 +9,8 @@ Last updated: 2026-04-15
 - Start playback on Spotify and verify art appears on device.
 - Skip tracks rapidly 5-10 times while transfer is in progress.
 - Expected: no partial/corrupt frames, final frame matches current track.
+- While transfer is active, power-cycle display or move out of range to force disconnect.
+- Expected: display returns to waiting screen immediately and cleanly (no broken/misaligned waiting UI), then reconnects normally.
 
 ## Background behavior
 
@@ -18,11 +20,15 @@ Last updated: 2026-04-15
 - Expected: no stuck transfer state; updates resume without app restart.
 - While still on the same song, force a BLE reconnect (power-cycle display or move out/in range).
 - Expected: current song is resent automatically without manually skipping tracks.
+- Repeat disconnect/reconnect cycle at least 5 times in a row.
+- Expected: waiting screen always restores correctly on disconnect and never gets visually corrupted.
 
 ## Cache correctness
 
 - Play a new album once, wait for transfer success.
 - Replay same track/album and verify cache hit behavior on display.
+- Verify app cache-hit badge/status appears only after board render confirmation (`CACHE_RENDERED` / confirmation-compatible `SUCCESS`).
+- Verify there is no false-positive "cache hit" state when the board did not visibly update.
 - Run "Clear display cache" in app and verify `CACHE_COUNT` drops.
 - Expected: cache misses after clear, cache refills correctly.
 - Repeat clear-cache twice in a row and verify both runs are acknowledged (`CACHE_CLEARED`) and reflected in app cache count.
@@ -45,6 +51,8 @@ Last updated: 2026-04-15
 
 - In foreground, measure song-change-to-display time across 10 skips.
 - Expected: median update latency is under ~1 second on stable BLE.
+- Test tracks that have no exact 300x300 art but do have other sizes; expected: still displays via fallback + 240x240 conversion.
+- Test a very small and a non-square source image; expected: still displays (center-cropped 240x240).
 - Disable internet for 10-20 seconds, then restore it.
 - Expected: app auto-recovers and updates current song without reopening app.
 - Capture cache-check timing separately (cache-hit songs) before/after firmware cache-lookup optimization (`CACHE_HIT_MS`, `CACHE_MISS_MS`, serial lookup timings).

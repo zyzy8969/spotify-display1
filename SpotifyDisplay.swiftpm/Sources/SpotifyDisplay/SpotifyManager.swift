@@ -238,6 +238,12 @@ final class SpotifyManager: ObservableObject {
                     await pollOnce(bleManager: ble)
                 }
             } else {
+                // Cancel any in-flight transfer so resync proceeds immediately
+                // instead of being deferred by the transferPipelineBusy guard.
+                monitoredBle?.cancelOngoingTransfer()
+                artSendTask?.cancel()
+                artSendTask = nil
+                artInFlightTrackId = nil
                 await requestResync(reason: endpoint, immediatePoll: true)
             }
         } catch {
@@ -413,21 +419,26 @@ final class SpotifyManager: ObservableObject {
             lastError = nil
 
             guard let item = state.item else {
-                pollStatus = "Nothing playing"
-                isPlaying = false
-                if currentTrack != nil {
+                // If we were playing and now get nil, keep currentTrack briefly so
+                // the UI doesn't flash (Spotify API can return nil right after pause).
+                if isPlaying || currentTrack == nil {
+                    pollStatus = "Nothing playing"
+                    isPlaying = false
                     currentTrack = nil
+                    bleManager.clearTopTransferStatus()
+                    pendingTrack = nil
+                    pendingSince = nil
+                    bleManager.cancelOngoingTransfer()
+                    artSendTask?.cancel()
+                    artSendTask = nil
+                    artInFlightTrackId = nil
+                    lastDisplayFailureAt = nil
+                    lastDisplayFailureTrackId = nil
+                    lastAnyDisplayFailureAt = nil
+                } else {
+                    // Was already paused — keep showing last track metadata + controls.
+                    pollStatus = "Paused"
                 }
-                bleManager.clearTopTransferStatus()
-                pendingTrack = nil
-                pendingSince = nil
-                bleManager.cancelOngoingTransfer()
-                artSendTask?.cancel()
-                artSendTask = nil
-                artInFlightTrackId = nil
-                lastDisplayFailureAt = nil
-                lastDisplayFailureTrackId = nil
-                lastAnyDisplayFailureAt = nil
                 await flushPendingResyncIfNeeded()
                 return
             }
@@ -451,8 +462,8 @@ final class SpotifyManager: ObservableObject {
                 artInFlightTrackId = nil
             }
 
-            let artURL = bestArtURL(from: item)
-            guard let artURL else {
+            let artURLs = preferredArtURLs(from: item)
+            guard let artURL = artURLs.first else {
                 lastError = "No album art for this track"
                 lastSentToDisplayTrackId = item.id
                 pendingTrack = nil
@@ -513,7 +524,7 @@ final class SpotifyManager: ObservableObject {
                 guard let self else { return }
                 do {
                     try await ble.processTrack(
-                        imageURL: capturedURL,
+                        imageURLs: Array(artURLs.prefix(2)),
                         albumId: self.currentTrack?.album?.id,
                         trackId: capturedId
                     )
@@ -654,14 +665,32 @@ final class SpotifyManager: ObservableObject {
         }
     }
 
-    private func bestArtURL(from track: Track) -> String? {
-        guard let album = track.album else { return nil }
-        // Prefer exact 300x300 for speed, but fall back to whatever is available so songs still display.
-        if let exact300 = album.images.first(where: { ($0.width ?? 0) == 300 && ($0.height ?? 0) == 300 }) {
-            return exact300.url
+    private func preferredArtURLs(from track: Track) -> [String] {
+        guard let album = track.album else { return [] }
+        var ranked = album.images.filter { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !ranked.isEmpty else { return [] }
+
+        // Prefer exact 300x300 first, then largest available (or first valid URL if sizes are missing).
+        ranked.sort { lhs, rhs in
+            let lExact = (lhs.width == 300 && lhs.height == 300)
+            let rExact = (rhs.width == 300 && rhs.height == 300)
+            if lExact != rExact { return lExact && !rExact }
+            let lArea = (lhs.width ?? 0) * (lhs.height ?? 0)
+            let rArea = (rhs.width ?? 0) * (rhs.height ?? 0)
+            if lArea != rArea { return lArea > rArea }
+            return lhs.url < rhs.url
         }
-        // Fallback: choose nearest to 300 from available variants.
-        return album.images.min(by: { abs(($0.width ?? 0) - 300) < abs(($1.width ?? 0) - 300) })?.url
+
+        var out: [String] = []
+        var seen = Set<String>()
+        for img in ranked {
+            let u = img.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !u.isEmpty, !seen.contains(u) {
+                out.append(u)
+                seen.insert(u)
+            }
+        }
+        return out
     }
 
     private func fetchCurrentlyPlayingWithRefresh() async throws -> CurrentlyPlayingResponse {

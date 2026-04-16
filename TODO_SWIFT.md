@@ -166,6 +166,10 @@ Do this before implementing items 2 and 3.
 - **iOS CIContext color space** — force `CGColorSpace.sRGB` to prevent extended-sRGB
   values > 1.0 from clipping when packing to RGB565.
 
+### Future Path C (optional, post A+B metrics)
+- Keep flash-backend migration as an option only after validating A+B speed/reliability metrics on hardware.
+- If SD remains the bottleneck/failure source, run a scoped evaluation (capacity, wear, migration cost) before any backend switch.
+
 ---
 
 ## FUTURE — once app is fully polished
