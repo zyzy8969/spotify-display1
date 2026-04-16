@@ -9,10 +9,17 @@ extension String {
         return Data(hash)
     }
 
-    /// Album-aware cache key: stable source string, then MD5 to keep 16-byte BLE payload.
+    /// Firmware-owned cache semantics v1: app only sends canonical identifier hint.
+    static let firmwareCacheKeyVersion = 1
+
+    /// Canonical cache identifier source sent to firmware (firmware controls filename/versioning).
+    static func cacheKeySource(albumId: String?, imageURL: String) -> String {
+        (albumId?.isEmpty == false) ? "album:\(albumId!)" : "url:\(imageURL)"
+    }
+
+    /// BLE transport key: 16-byte digest of canonical source.
     static func cacheKeyDigest(albumId: String?, imageURL: String) -> Data {
-        let source = (albumId?.isEmpty == false) ? "album:\(albumId!)" : "url:\(imageURL)"
-        return source.md5Digest
+        cacheKeySource(albumId: albumId, imageURL: imageURL).md5Digest
     }
 }
 

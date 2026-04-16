@@ -6,6 +6,8 @@
 #include <SD.h>
 #include <FS.h>
 #include <SPI.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 // Bluetooth LE includes
 #include <BLEDevice.h>
@@ -30,6 +32,8 @@
 #define DISPLAY_WIDTH 240
 #define DISPLAY_HEIGHT 240
 #define IMAGE_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)
+#define CACHE_KEY_VERSION 1
+#define CACHE_INDEX_MAX_ENTRIES 1024
 
 // Performance and timing constants
 #define TFT_BRIGHTNESS_MAX 200
@@ -127,6 +131,17 @@ enum TransitionType {
 // Track last transition to avoid repeats
 static TransitionType lastTransition = TRANSITION_COUNT;  // Invalid value initially
 
+// Cache health/metrics counters
+uint32_t cacheEntryCount = 0;
+uint32_t cacheCRCErrors = 0;
+uint32_t cacheRecoveries = 0;
+
+struct CacheIndexEntry {
+  uint8_t key[16];
+  bool used;
+};
+static CacheIndexEntry cacheIndex[CACHE_INDEX_MAX_ENTRIES];
+
 // Forward declarations
 void flushSerialInput();
 void printCardInfo();
@@ -135,6 +150,17 @@ void showTroubleshooting();
 bool isCached(uint8_t* cacheKey);
 bool loadFromCache(uint8_t* cacheKey);
 bool saveToCache(uint8_t* cacheKey);
+String getCacheFileNameVersioned(const uint8_t* cacheKey, uint8_t version);
+bool parseCacheFilenameToKey(const String& path, uint8_t* outKey, uint8_t* outVersion);
+void buildCacheIndex();
+bool cacheIndexContains(const uint8_t* cacheKey);
+bool cacheIndexInsert(const uint8_t* cacheKey);
+bool cacheIndexRemove(const uint8_t* cacheKey);
+void clearCacheIndex();
+bool removeCacheFileAndIndex(const String& filename, const uint8_t* cacheKey);
+void publishCacheCount();
+void publishCacheStats();
+void enforceCacheCapacityHook();
 uint32_t computeCRC32(const uint8_t* data, size_t len);
 void clearCacheDirectory();
 void printRainbowText(String text, int x, int y, int textSize);
@@ -1172,6 +1198,9 @@ void setup() {
     Serial.println("✓ Cache directory exists\n");
   }
 
+  buildCacheIndex();
+  Serial.printf("Cache index ready: %lu entries\n", (unsigned long)cacheEntryCount);
+
   Serial.println("========================================");
   Serial.println("SD CARD READY FOR CACHING");
   Serial.println("========================================\n");
@@ -1230,8 +1259,21 @@ void flushSerialInput() {
   }
 }
 
-// Generate 32-character filename from full 16-byte cache key
-String getCacheFileName(uint8_t* cacheKey) {
+String getCacheFileNameVersioned(const uint8_t* cacheKey, uint8_t version) {
+  char filename[48];
+  sprintf(filename, "/cache/v%u_"
+          "%02X%02X%02X%02X%02X%02X%02X%02X"
+          "%02X%02X%02X%02X%02X%02X%02X%02X.bin",
+          (unsigned)version,
+          cacheKey[0], cacheKey[1], cacheKey[2], cacheKey[3],
+          cacheKey[4], cacheKey[5], cacheKey[6], cacheKey[7],
+          cacheKey[8], cacheKey[9], cacheKey[10], cacheKey[11],
+          cacheKey[12], cacheKey[13], cacheKey[14], cacheKey[15]);
+  return String(filename);
+}
+
+// Backward-compatible legacy name (no version prefix).
+String getLegacyCacheFileName(const uint8_t* cacheKey) {
   char filename[44];
   sprintf(filename, "/cache/"
           "%02X%02X%02X%02X%02X%02X%02X%02X"
@@ -1243,10 +1285,118 @@ String getCacheFileName(uint8_t* cacheKey) {
   return String(filename);
 }
 
-// Check if image exists in SD card cache
+bool parseCacheFilenameToKey(const String& path, uint8_t* outKey, uint8_t* outVersion) {
+  String name = path;
+  int slash = name.lastIndexOf('/');
+  if (slash >= 0) name = name.substring(slash + 1);
+  if (!name.endsWith(".bin")) return false;
+
+  uint8_t version = 0;
+  String hexPart;
+  if (name.startsWith("v")) {
+    int underscore = name.indexOf('_');
+    if (underscore < 2) return false;
+    String ver = name.substring(1, underscore);
+    for (size_t i = 0; i < ver.length(); i++) {
+      if (!isdigit((unsigned char)ver[i])) return false;
+    }
+    version = (uint8_t)ver.toInt();
+    hexPart = name.substring(underscore + 1, name.length() - 4);
+  } else {
+    hexPart = name.substring(0, name.length() - 4);
+  }
+  if (hexPart.length() != 32) return false;
+  for (int i = 0; i < 16; i++) {
+    char c1 = hexPart[i * 2];
+    char c2 = hexPart[i * 2 + 1];
+    if (!isxdigit((unsigned char)c1) || !isxdigit((unsigned char)c2)) return false;
+    char pair[3] = {c1, c2, '\0'};
+    outKey[i] = (uint8_t)strtoul(pair, nullptr, 16);
+  }
+  *outVersion = version;
+  return true;
+}
+
+void clearCacheIndex() {
+  for (size_t i = 0; i < CACHE_INDEX_MAX_ENTRIES; i++) {
+    cacheIndex[i].used = false;
+  }
+  cacheEntryCount = 0;
+}
+
+bool cacheIndexContains(const uint8_t* cacheKey) {
+  for (size_t i = 0; i < CACHE_INDEX_MAX_ENTRIES; i++) {
+    if (cacheIndex[i].used && memcmp(cacheIndex[i].key, cacheKey, 16) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool cacheIndexInsert(const uint8_t* cacheKey) {
+  if (cacheIndexContains(cacheKey)) return true;
+  for (size_t i = 0; i < CACHE_INDEX_MAX_ENTRIES; i++) {
+    if (!cacheIndex[i].used) {
+      memcpy(cacheIndex[i].key, cacheKey, 16);
+      cacheIndex[i].used = true;
+      cacheEntryCount++;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool cacheIndexRemove(const uint8_t* cacheKey) {
+  for (size_t i = 0; i < CACHE_INDEX_MAX_ENTRIES; i++) {
+    if (cacheIndex[i].used && memcmp(cacheIndex[i].key, cacheKey, 16) == 0) {
+      cacheIndex[i].used = false;
+      if (cacheEntryCount > 0) cacheEntryCount--;
+      return true;
+    }
+  }
+  return false;
+}
+
+void buildCacheIndex() {
+  clearCacheIndex();
+  File root = SD.open("/cache");
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    return;
+  }
+  for (;;) {
+    File f = root.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) {
+      String name = String(f.name());
+      uint8_t key[16];
+      uint8_t version = 0;
+      if (parseCacheFilenameToKey(name, key, &version) && (version == 0 || version == CACHE_KEY_VERSION)) {
+        if (!cacheIndexInsert(key)) {
+          Serial.println("WARN: Cache index full; fallback to SD.exists for extra files");
+        }
+      }
+    }
+    f.close();
+  }
+  root.close();
+}
+
+bool removeCacheFileAndIndex(const String& filename, const uint8_t* cacheKey) {
+  bool removed = SD.remove(filename);
+  if (removed && cacheKey) {
+    cacheIndexRemove(cacheKey);
+    cacheRecoveries++;
+  }
+  return removed;
+}
+
+// Check if image exists in cache index; fallback to SD.exists if index evicted/full.
 bool isCached(uint8_t* cacheKey) {
-  String filename = getCacheFileName(cacheKey);
-  return SD.exists(filename);
+  if (cacheIndexContains(cacheKey)) return true;
+  if (SD.exists(getCacheFileNameVersioned(cacheKey, CACHE_KEY_VERSION))) return true;
+  if (SD.exists(getLegacyCacheFileName(cacheKey))) return true;
+  return false;
 }
 
 uint32_t computeCRC32(const uint8_t* data, size_t len) {
@@ -1265,7 +1415,10 @@ uint32_t computeCRC32(const uint8_t* data, size_t len) {
 bool loadFromCache(uint8_t* cacheKey) {
   unsigned long startTime = millis();
 
-  String filename = getCacheFileName(cacheKey);
+  String filename = getCacheFileNameVersioned(cacheKey, CACHE_KEY_VERSION);
+  if (!SD.exists(filename)) {
+    filename = getLegacyCacheFileName(cacheKey);
+  }
   File file = SD.open(filename, FILE_READ);
 
   if (!file) {
@@ -1278,7 +1431,7 @@ bool loadFromCache(uint8_t* cacheKey) {
   if (fileSize != IMAGE_SIZE && fileSize != expectedWithCRC) {
     Serial.printf("ERROR: Cache size mismatch %d\n", (int)fileSize);
     file.close();
-    SD.remove(filename);
+    removeCacheFileAndIndex(filename, cacheKey);
     return false;
   }
 
@@ -1287,7 +1440,7 @@ bool loadFromCache(uint8_t* cacheKey) {
   if (bytesRead != IMAGE_SIZE) {
     Serial.printf("ERROR: Cache read failed %d\n", bytesRead);
     file.close();
-    SD.remove(filename);
+    removeCacheFileAndIndex(filename, cacheKey);
     return false;
   }
 
@@ -1297,7 +1450,8 @@ bool loadFromCache(uint8_t* cacheKey) {
     if (crcRead != 4) {
       Serial.println("ERROR: Cache CRC read failed");
       file.close();
-      SD.remove(filename);
+      cacheCRCErrors++;
+      removeCacheFileAndIndex(filename, cacheKey);
       return false;
     }
     uint32_t expectedCrc = (uint32_t)crcBytes[0]
@@ -1309,11 +1463,13 @@ bool loadFromCache(uint8_t* cacheKey) {
       Serial.printf("ERROR: Cache CRC mismatch expected=0x%08lX actual=0x%08lX\n",
                     (unsigned long)expectedCrc, (unsigned long)actualCrc);
       file.close();
-      SD.remove(filename);
+      cacheCRCErrors++;
+      removeCacheFileAndIndex(filename, cacheKey);
       return false;
     }
   }
   file.close();
+  cacheIndexInsert(cacheKey);
 
   unsigned long loadTime = millis() - startTime;
   Serial.printf("Cache HIT: %s (load: %lums)\n", filename.c_str(), loadTime);
@@ -1322,14 +1478,12 @@ bool loadFromCache(uint8_t* cacheKey) {
 
 // Save image to SD card cache
 bool saveToCache(uint8_t* cacheKey) {
-  String filename = getCacheFileName(cacheKey);
+  String filename = getCacheFileNameVersioned(cacheKey, CACHE_KEY_VERSION);
+  String tmpFilename = filename + ".tmp";
 
-  // Delete old file if exists
-  if (SD.exists(filename)) {
-    SD.remove(filename);
-  }
+  SD.remove(tmpFilename);
 
-  File file = SD.open(filename, FILE_WRITE);
+  File file = SD.open(tmpFilename, FILE_WRITE);
   if (!file) {
     Serial.println("ERROR: Cannot create cache file");
     return false;
@@ -1344,53 +1498,64 @@ bool saveToCache(uint8_t* cacheKey) {
     (uint8_t)((crc >> 24) & 0xFF)
   };
   size_t crcWritten = file.write(crcLE, 4);
+  file.flush();
   file.close();
 
   if (bytesWritten != IMAGE_SIZE || crcWritten != 4) {
     Serial.printf("ERROR: Cache write failed image=%d crc=%d\n", (int)bytesWritten, (int)crcWritten);
-    SD.remove(filename); // Remove incomplete file
+    SD.remove(tmpFilename); // Remove incomplete file
     return false;
   }
 
+  if (SD.exists(filename)) {
+    SD.remove(filename);
+  }
+  if (!SD.rename(tmpFilename, filename)) {
+    Serial.println("ERROR: Cache atomic rename failed");
+    SD.remove(tmpFilename);
+    return false;
+  }
+
+  cacheIndexInsert(cacheKey);
+  enforceCacheCapacityHook();
   Serial.printf("Cache SAVE: %s\n", filename.c_str());
   return true;
 }
 
 // Count *.bin files in /cache (for BLE CACHE_COUNT message)
 static uint32_t countCacheBinFiles() {
-  File root = SD.open("/cache");
-  if (!root) {
-    return 0;
-  }
-  if (!root.isDirectory()) {
-    root.close();
-    return 0;
-  }
-  uint32_t n = 0;
-  for (;;) {
-    File f = root.openNextFile();
-    if (!f) {
-      break;
-    }
-    if (!f.isDirectory()) {
-      String name = String(f.name());
-      name.toLowerCase();
-      if (name.endsWith(".bin")) {
-        n++;
-      }
-    }
-    f.close();
-  }
-  root.close();
-  return n;
+  return cacheEntryCount;
 }
 
+void publishCacheCount() {
+  String msg = "CACHE_COUNT:" + String((unsigned long)countCacheBinFiles());
+  pMsgChar->setValue(msg.c_str());
+  pMsgChar->notify();
+  Serial.printf("BLE: %s\n", msg.c_str());
+}
+
+void publishCacheStats() {
+  String msg = "CACHE_HEALTH:count=" + String((unsigned long)countCacheBinFiles()) +
+               ",crc=" + String((unsigned long)cacheCRCErrors) +
+               ",recoveries=" + String((unsigned long)cacheRecoveries) +
+               ",ver=" + String((unsigned long)CACHE_KEY_VERSION);
+  pMsgChar->setValue(msg.c_str());
+  pMsgChar->notify();
+  Serial.printf("BLE: %s\n", msg.c_str());
+}
+
+// Phase B hook: firmware owns capacity policy; currently no-op until product limits are chosen.
+void enforceCacheCapacityHook() {}
+
 void clearCacheDirectory() {
+  unsigned long start = millis();
   File root = SD.open("/cache");
   if (!root || !root.isDirectory()) {
     if (root) root.close();
+    clearCacheIndex();
     return;
   }
+  uint32_t removed = 0;
   for (;;) {
     File f = root.openNextFile();
     if (!f) break;
@@ -1398,12 +1563,25 @@ void clearCacheDirectory() {
       String name = String(f.name());
       name.toLowerCase();
       if (name.endsWith(".bin")) {
-        SD.remove(String(f.name()));
+        String path = String(f.name());
+        uint8_t key[16];
+        uint8_t version = 0;
+        if (parseCacheFilenameToKey(path, key, &version)) {
+          if (SD.remove(path)) {
+            cacheIndexRemove(key);
+            removed++;
+          }
+        } else if (SD.remove(path)) {
+          removed++;
+        }
       }
     }
     f.close();
   }
   root.close();
+  clearCacheIndex();
+  unsigned long elapsed = millis() - start;
+  Serial.printf("Cache clear complete: removed=%lu elapsed=%lums\n", (unsigned long)removed, elapsed);
 }
 
 void loop() {
@@ -1431,18 +1609,21 @@ void loop() {
   // BLE stats: number of /cache/*.bin files — sent to the phone app only (never drawn on this display)
   if (statsRequestPending) {
     statsRequestPending = false;
-    uint32_t n = countCacheBinFiles();
-    String msg = "CACHE_COUNT:" + String((unsigned long)n);
-    pMsgChar->setValue(msg.c_str());
-    pMsgChar->notify();
-    Serial.printf("BLE: %s\n", msg.c_str());
+    publishCacheCount();
+    publishCacheStats();
   }
 
   if (clearCachePending) {
     clearCachePending = false;
+    unsigned long clearStart = millis();
     clearCacheDirectory();
     String msg = "CACHE_CLEARED";
     pMsgChar->setValue(msg.c_str());
+    pMsgChar->notify();
+    publishCacheCount();
+    unsigned long clearElapsed = millis() - clearStart;
+    String timing = "CACHE_CLEAR_MS:" + String((unsigned long)clearElapsed);
+    pMsgChar->setValue(timing.c_str());
     pMsgChar->notify();
     Serial.println("BLE: CACHE_CLEARED");
   }
@@ -1467,7 +1648,10 @@ void loop() {
     }
 
     // Check if image is cached
+    unsigned long cacheCheckStart = millis();
     cacheHit = isCached(currentCacheKey);
+    unsigned long cacheCheckMs = millis() - cacheCheckStart;
+    Serial.printf("Cache lookup: %lums (hit=%d)\n", cacheCheckMs, cacheHit ? 1 : 0);
 
     if (cacheHit) {
       unsigned long totalStartTime = millis();
@@ -1488,6 +1672,9 @@ void loop() {
 
         unsigned long totalTime = millis() - totalStartTime;
         Serial.printf("⚡ Cache hit total: %lums (display: %lums)\n", totalTime, displayTime);
+        String hitTiming = "CACHE_HIT_MS:" + String((unsigned long)totalTime);
+        pMsgChar->setValue(hitTiming.c_str());
+        pMsgChar->notify();
 
         // Send transition name FIRST (before cache response)
         // This ensures Python receives it before printing the cache hit message
@@ -1511,6 +1698,9 @@ void loop() {
       }
     } else {
       Serial.println("BLE: Cache MISS");
+      String missTiming = "CACHE_MISS_MS:" + String((unsigned long)cacheCheckMs);
+      pMsgChar->setValue(missTiming.c_str());
+      pMsgChar->notify();
 
       // Notify: NEED (0x00)
       uint8_t response = 0x00;

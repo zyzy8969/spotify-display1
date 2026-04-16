@@ -42,6 +42,7 @@ final class BLEManager: NSObject, ObservableObject {
     private var cacheContinuation: CheckedContinuation<Bool, Error>?
     private var transferContinuation: CheckedContinuation<Void, Error>?
     private var statsContinuation: CheckedContinuation<Int, Error>?
+    private var clearContinuation: CheckedContinuation<Void, Error>?
     /// CoreBluetooth write queue (without-response) drain signal
     private var writeDrainContinuation: CheckedContinuation<Void, Never>?
 
@@ -223,7 +224,8 @@ final class BLEManager: NSObject, ObservableObject {
         let cacheCheckStart = CFAbsoluteTimeGetCurrent()
         setLivePhase("cache check + downloading…")
         let cacheHit: Bool
-        let cacheKey = String.cacheKeyDigest(albumId: albumId, imageURL: imageURL)
+        let cacheKeySource = String.cacheKeySource(albumId: albumId, imageURL: imageURL)
+        let cacheKey = cacheKeySource.md5Digest
         do {
             cacheHit = try await checkCacheHit(cacheKey: cacheKey)
         } catch {
@@ -475,6 +477,8 @@ final class BLEManager: NSObject, ObservableObject {
         transferContinuation = nil
         statsContinuation?.resume(throwing: error)
         statsContinuation = nil
+        clearContinuation?.resume(throwing: error)
+        clearContinuation = nil
         writeDrainContinuation?.resume()
         writeDrainContinuation = nil
         if isTransferring {
@@ -560,6 +564,11 @@ final class BLEManager: NSObject, ObservableObject {
                 statsContinuation = nil
                 c.resume(throwing: SpotifyDisplayError.conversionFailed)
             }
+        }
+
+        if text == "CACHE_CLEARED", let c = clearContinuation {
+            clearContinuation = nil
+            c.resume()
         }
 
         if text.hasPrefix("TRANSITION:") {
@@ -801,11 +810,22 @@ extension BLEManager {
     func clearDisplayCache() async throws {
         try ensureGattReady()
         guard let p = peripheral, let c = cacheChar else { throw SpotifyDisplayError.notConnected }
+        clearContinuation?.resume(throwing: CancellationError())
+        clearContinuation = nil
         var packet = Data()
         withUnsafeBytes(of: UInt32(0xCAC4E1EA).littleEndian) { packet.append(contentsOf: $0) }
         packet.append(Data(count: 16))
-        p.writeValue(packet, for: c, type: .withResponse)
-        try await Task.sleep(nanoseconds: 400_000_000)
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            self.clearContinuation = cont
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if let pending = self.clearContinuation {
+                    self.clearContinuation = nil
+                    pending.resume(throwing: SpotifyDisplayError.bleTimeout)
+                }
+            }
+            p.writeValue(packet, for: c, type: .withResponse)
+        }
         try await refreshSDCacheCount()
     }
 }

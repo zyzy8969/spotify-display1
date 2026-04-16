@@ -2,7 +2,7 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.4** (Transfer ERROR notify + Image `0x02`; ESP32 clears partial receive on cache check.)
+Version: **1.5** (Firmware-owned cache semantics v1: versioned filenames, cache health/timing messages, deterministic clear ack/count flow.)
 
 ## Peripheral
 
@@ -27,12 +27,19 @@ Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications aft
 **20 bytes**, little-endian:
 
 1. **Magic** `0xDEADBEEF` (4 bytes) — cache lookup.
-2. **Key** (16 bytes) — MD5 digest of the app-side cache key source (`album:<spotifyAlbumId>` preferred, fallback `url:<imageURL>`).
+2. **Key** (16 bytes) — MD5 digest of canonical identifier source (`album:<spotifyAlbumId>` preferred, fallback `url:<imageURL>`). App sends this hint; firmware owns filename/version semantics.
 
-**Alternative magic** `0xC0FFEEE1` + 16 bytes padding — SD cache **file count** stats; firmware responds with a `MESSAGE` notify: `CACHE_COUNT:<n>`.
-**Alternative magic** `0xCAC4E1EA` + 16 bytes padding — clear `/cache/*.bin`; firmware responds with `CACHE_CLEARED`.
+**Alternative magic** `0xC0FFEEE1` + 16 bytes padding — SD cache stats; firmware responds with:
+- `CACHE_COUNT:<n>` (required for app UI)
+- `CACHE_HEALTH:count=<n>,crc=<failures>,recoveries=<n>,ver=<cacheVersion>` (optional telemetry)
+
+**Alternative magic** `0xCAC4E1EA` + 16 bytes padding — clear `/cache/*.bin`; firmware responds in order:
+1) `CACHE_CLEARED` (authoritative clear ACK),
+2) `CACHE_COUNT:0` (or post-clear count),
+3) `CACHE_CLEAR_MS:<elapsedMs>` (timing metric).
 
 **Notify response** (1 byte): `0x01` = image is cached on SD and was loaded; `0x00` = send image.
+Firmware stores files with internal cache key version prefix (`v1_...bin`) and may keep backward compatibility with legacy unversioned entries.
 
 ## Image transfer (write to Image characteristic)
 

@@ -1,6 +1,6 @@
 # Dev handoff — iOS BLE / background work
 
-Last updated: 2026-04-14
+Last updated: 2026-04-15
 
 ## What was committed
 
@@ -8,6 +8,9 @@ Last updated: 2026-04-14
 - **BLEManager:** Core Bluetooth state restoration (`CBCentralManagerOptionRestoreIdentifierKey`, `willRestoreState`, reconnect / rediscover services), `UIApplication.beginBackgroundTask` for the full `processTrack` scope, cancellable 32s post-chunk `SUCCESS` timeout.
 - **ContentView:** `scenePhase`-aware copy about limited background Spotify updates + always-visible expectation line.
 - **SpotifyManager:** Display failure cooldown (same track), short global backoff after any display error, and `lastSentToDisplayTrackId` when a transfer completes after the UI track has already changed (avoids 1 Hz resend loops).
+- **Firmware cache (`src/main.cpp`):** startup in-memory cache index, versioned cache filenames (`v1_*.bin` with legacy fallback), atomic temp-write + rename, CRC corruption counters/recovery deletes, deterministic clear flow with immediate count publish and timing telemetry.
+- **BLE cache protocol usage:** firmware now emits cache telemetry messages (`CACHE_HEALTH:*`, `CACHE_HIT_MS:*`, `CACHE_MISS_MS:*`, `CACHE_CLEAR_MS:*`) while retaining `CACHE_COUNT:*` compatibility.
+- **BLEManager clear cache:** waits for `CACHE_CLEARED` ACK before refreshing count (more reliable than fixed sleep).
 
 ## Build / tooling — known issues
 

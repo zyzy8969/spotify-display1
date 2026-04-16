@@ -1,7 +1,7 @@
 # Validation Checklist
 
 Use this on a physical iPhone + ESP32 display before and after roadmap changes.
-Last updated: 2026-04-14
+Last updated: 2026-04-15
 
 ## BLE transfer + track switching
 
@@ -26,6 +26,8 @@ Last updated: 2026-04-14
 - Run "Clear display cache" in app and verify `CACHE_COUNT` drops.
 - Expected: cache misses after clear, cache refills correctly.
 - Repeat clear-cache twice in a row and verify both runs are acknowledged (`CACHE_CLEARED`) and reflected in app cache count.
+- Confirm firmware also emits `CACHE_CLEAR_MS:<n>` and that the app still refreshes count immediately after ACK.
+- On repeated cache-hit playback, verify optional `CACHE_HEALTH:*` telemetry remains parse-safe (does not break count parsing).
 
 ## Brightness reliability
 
@@ -45,4 +47,4 @@ Last updated: 2026-04-14
 - Expected: median update latency is under ~1 second on stable BLE.
 - Disable internet for 10-20 seconds, then restore it.
 - Expected: app auto-recovers and updates current song without reopening app.
-- Capture cache-check timing separately (cache-hit songs) before/after firmware cache-lookup optimization.
+- Capture cache-check timing separately (cache-hit songs) before/after firmware cache-lookup optimization (`CACHE_HIT_MS`, `CACHE_MISS_MS`, serial lookup timings).
