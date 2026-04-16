@@ -17,8 +17,7 @@ Last updated: 2026-04-15 (end of session)
 ## Open issues (active)
 - Cover art size appears to change while downloading, then returns to normal after completion.
 - App layout still does not fill the full intended screen area consistently.
-- False cache-hit behavior is still observed in some skip/reconnect edge cases.
-- On rapid skip, part of the previous image can draw briefly before the correct next track appears.
+- Transfer sequencing race (often perceived as a false cache-hit): on rapid skip/reconnect, stale pixels from the previous frame can flash briefly before the correct next track appears.
 
 ## Suspected hotspots for next session
 - `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/ContentView.swift` (`AlbumArtView` sizing / layout behavior).
@@ -28,6 +27,6 @@ Last updated: 2026-04-15 (end of session)
 
 ## Next-session priorities
 1. Stabilize album-art view sizing and full-screen layout behavior in SwiftUI.
-2. Reproduce false cache-hit + stale-frame-on-skip with deterministic test sequence.
+2. Reproduce stale-frame-on-skip transfer sequencing race (commonly misread as false cache hit) with deterministic test sequence.
 3. Tighten skip/resync and cache-confirm race handling across app/firmware boundary.
 4. Re-validate with repeated skip/disconnect stress tests and capture before/after timings.
