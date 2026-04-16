@@ -2,6 +2,17 @@
 
 An ESP32-S3 + iOS app project that displays Spotify album art on a 240x240 ST7789 screen over BLE.
 
+## What This Project Is
+
+This project is a real-time "now playing" display for Spotify.
+
+- The iOS app monitors your currently playing Spotify track.
+- It downloads album art, converts it to a 240x240 RGB565 frame, and sends it to the ESP32 over BLE.
+- The ESP32 renders the image on the LCD, caches it on SD card, and reuses cached art on repeat plays.
+- Transitions and progressive drawing make track changes visible and responsive.
+
+In short: it is a hardware + mobile app system for showing Spotify album art on a standalone display with caching and low-latency updates.
+
 ## Current Status (Apr 2026)
 
 ### Working now
