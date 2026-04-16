@@ -29,6 +29,16 @@ some bugs i forgot to put in this idk if they r solved  (4-byte cache key trunca
 - Check code in Claude inside Xcode and compare findings with this roadmap.
 - Continue bug hunt to reduce occasional transfer timeouts / unsuccessful sends.
 - Fix pause/unpause behavior so same track is not miscounted as a new cache/download event; keep debug output accurate and show explicit write-confirmed state.
+- Fix album-art preview sizing jump in app (image grows during download then shrinks after pipeline settles); keep a consistent frame size through loading and completion.
+- Fix app layout so album art / content uses full intended screen space consistently.
+- Fix remaining false cache-hit scenarios under rapid skip/reconnect paths.
+- Fix stale partial-frame flash on skip (old image draws briefly before correct next song).
+
+### End-of-session issue capture (2026-04-15)
+- App: cover art can resize during download and then return to normal.
+- App: UI still does not fill the entire screen consistently.
+- Cache: occasional false cache-hit state still observed.
+- Transfer: on skip, a portion of the previous image can render briefly before the correct next song.
 
 ## ESP32 / `main.cpp` — laptop backlog (git + flash here)
 

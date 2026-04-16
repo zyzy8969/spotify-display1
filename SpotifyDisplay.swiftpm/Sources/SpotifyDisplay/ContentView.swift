@@ -8,131 +8,129 @@ struct ContentView: View {
     @State private var showSettings = false
 
     var body: some View {
-        ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+        VStack(spacing: 0) {
+            // Album art — full width, square, extends into top safe area
+            AlbumArtView(imageData: bleManager.currentAlbumArt)
 
-            VStack(spacing: 0) {
-                // Album art — full width, square
-                AlbumArtView(imageData: bleManager.currentAlbumArt)
+            // Transfer progress (thin bar, seamless under art)
+            if bleManager.isTransferring {
+                ProgressView(value: bleManager.transferProgress)
+                    .tint(.white.opacity(0.5))
+                    .background(Color.white.opacity(0.08))
+            } else {
+                Color.clear.frame(height: 4)
+            }
 
-                // Transfer progress (thin bar, seamless under art)
-                if bleManager.isTransferring {
-                    ProgressView(value: bleManager.transferProgress)
-                        .tint(.white.opacity(0.5))
-                        .background(Color.white.opacity(0.08))
-                } else {
-                    Color.clear.frame(height: 4)
-                }
-
-                // Track info
-                VStack(spacing: 5) {
-                    if let track = spotifyManager.currentTrack {
-                        Text(track.name)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(2)
-                        Text(track.artists.map(\.name).joined(separator: ", "))
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.55))
-                        if let album = track.album?.name {
-                            Text(album)
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.3))
-                        }
-                        if !spotifyManager.isPlaying {
-                            Text("Paused")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.white.opacity(0.55))
-                        }
-                    } else {
-                        Text(spotifyManager.isAuthenticated ? "Nothing playing" : "Not signed in")
-                            .font(.title3.weight(.medium))
-                            .foregroundStyle(.white.opacity(0.35))
-                    }
-
-                    // Cache hit / sent indicator
-                    if let result = bleManager.lastTransferResult {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(result.hasPrefix("Cache") ? .cyan : .green)
-                                .frame(width: 5, height: 5)
-                            Text(result)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.white.opacity(0.35))
-                        }
-                        .padding(.top, 2)
-                    }
-                    if let ack = bleManager.boardAckStatus {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(.green.opacity(0.75))
-                                .frame(width: 5, height: 5)
-                            Text(ack)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.white.opacity(0.4))
-                        }
-                    }
-                    if let transition = bleManager.lastTransitionName {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(.purple.opacity(0.75))
-                                .frame(width: 5, height: 5)
-                            Text("Transition: \(transition)")
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.white.opacity(0.35))
-                        }
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 14)
-
-                // Playback controls
-                if spotifyManager.isAuthenticated {
-                    PlaybackControls(spotifyManager: spotifyManager)
-                        .padding(.top, 12)
-                }
-
-                Spacer(minLength: 0)
-
-                // Inline debug log
-                DebugStrip(bleManager: bleManager, spotifyManager: spotifyManager)
-
-                // Bottom bar: status + settings
-                HStack(spacing: 16) {
-                    StatusDot(active: bleManager.isConnected, label: "Display")
-                    StatusDot(active: spotifyManager.isAuthenticated, label: "Spotify")
-                    if let poll = spotifyManager.pollStatus, poll.contains("Rate limited") {
-                        Text("Rate limited")
-                            .font(.caption2)
-                            .foregroundStyle(.orange.opacity(0.8))
-                    }
-                    if bleManager.isConnected, let n = bleManager.sdCacheEntryCount {
-                        Text("\(n) cached")
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.25))
-                    }
-                    Spacer()
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gearshape")
-                            .font(.body)
-                            .foregroundStyle(.white.opacity(0.35))
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 6)
-
-                // Error
-                if let err = spotifyManager.lastError {
-                    Text(err)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.4))
+            // Track info
+            VStack(spacing: 5) {
+                if let track = spotifyManager.currentTrack {
+                    Text(track.name)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 6)
+                        .lineLimit(2)
+                    Text(track.artists.map(\.name).joined(separator: ", "))
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.55))
+                    if let album = track.album?.name {
+                        Text(album)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.3))
+                    }
+                    if !spotifyManager.isPlaying {
+                        Text("Paused")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                } else {
+                    Text(spotifyManager.isAuthenticated ? "Nothing playing" : "Not signed in")
+                        .font(.title3.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+
+                // Cache hit / sent indicator
+                if let result = bleManager.lastTransferResult {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(result.hasPrefix("Cache") ? .cyan : .green)
+                            .frame(width: 5, height: 5)
+                        Text(result)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+                    .padding(.top, 2)
+                }
+                if let ack = bleManager.boardAckStatus {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(.green.opacity(0.75))
+                            .frame(width: 5, height: 5)
+                        Text(ack)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+                }
+                if let transition = bleManager.lastTransitionName {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(.purple.opacity(0.75))
+                            .frame(width: 5, height: 5)
+                        Text("Transition: \(transition)")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
                 }
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+
+            // Playback controls
+            if spotifyManager.isAuthenticated {
+                PlaybackControls(spotifyManager: spotifyManager)
+                    .padding(.top, 12)
+            }
+
+            Spacer(minLength: 0)
+
+            // Inline debug log
+            DebugStrip(bleManager: bleManager, spotifyManager: spotifyManager)
+
+            // Bottom bar: status + settings
+            HStack(spacing: 16) {
+                StatusDot(active: bleManager.isConnected, label: "Display")
+                StatusDot(active: spotifyManager.isAuthenticated, label: "Spotify")
+                if let poll = spotifyManager.pollStatus, poll.contains("Rate limited") {
+                    Text("Rate limited")
+                        .font(.caption2)
+                        .foregroundStyle(.orange.opacity(0.8))
+                }
+                if bleManager.isConnected, let n = bleManager.sdCacheEntryCount {
+                    Text("\(n) cached")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.25))
+                }
+                Spacer()
+                Button { showSettings = true } label: {
+                    Image(systemName: "gearshape")
+                        .font(.body)
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 6)
+
+            // Error
+            if let err = spotifyManager.lastError {
+                Text(err)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.4))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 6)
+            }
         }
+        .background(Color.black)
+        .ignoresSafeArea()
         .sheet(isPresented: $showSettings) {
             SettingsView(spotifyManager: spotifyManager, bleManager: bleManager)
         }
@@ -271,13 +269,10 @@ struct DebugStrip: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             let entries = bleManager.transferLog
-            let avgMs = entries.isEmpty ? 0 : Int(entries.map(\.totalMs).reduce(0, +) / entries.count)
-            let downloadVals = entries.compactMap(\.downloadMs)
-            let convertVals = entries.compactMap(\.convertMs)
-            let cacheHitTotals = entries.filter(\.cacheHit).map(\.totalMs)
-            let avgDownload = downloadVals.isEmpty ? nil : Int(downloadVals.reduce(0, +) / downloadVals.count)
-            let avgConvert = convertVals.isEmpty ? nil : Int(convertVals.reduce(0, +) / convertVals.count)
-            let avgCacheHit = cacheHitTotals.isEmpty ? nil : Int(cacheHitTotals.reduce(0, +) / cacheHitTotals.count)
+            let freshEntries = entries.filter { !$0.cacheHit }
+            let cacheEntries = entries.filter(\.cacheHit)
+            let avgFresh = freshEntries.isEmpty ? nil : Int(freshEntries.map(\.totalMs).reduce(0, +) / freshEntries.count)
+            let avgCache = cacheEntries.isEmpty ? nil : Int(cacheEntries.map(\.totalMs).reduce(0, +) / cacheEntries.count)
             let live = bleManager.currentLivePhase
 
             if let live {
@@ -293,33 +288,25 @@ struct DebugStrip: View {
 
             if !entries.isEmpty {
                 HStack(spacing: 0) {
-                    Text("avg")
+                    Text("avg new")
                         .frame(width: 58, alignment: .leading)
-                    Text("\(s(avgMs))")
-                        .foregroundStyle(.yellow.opacity(0.85))
-                    Text(" over \(entries.count)")
-                        .foregroundStyle(.white.opacity(0.35))
-                    Spacer()
-                }
-                HStack(spacing: 0) {
-                    Text("avg dl")
-                        .frame(width: 58, alignment: .leading)
-                    Text(avgDownload.map(s) ?? "n/a")
-                        .foregroundStyle(.cyan.opacity(0.85))
+                    Text(avgFresh.map(s) ?? "n/a")
+                        .foregroundStyle(.green.opacity(0.85))
+                    if !freshEntries.isEmpty {
+                        Text(" over \(freshEntries.count)")
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
                     Spacer()
                 }
                 HStack(spacing: 0) {
                     Text("avg hit")
                         .frame(width: 58, alignment: .leading)
-                    Text(avgCacheHit.map(s) ?? "n/a")
-                        .foregroundStyle(.green.opacity(0.85))
-                    Spacer()
-                }
-                HStack(spacing: 0) {
-                    Text("avg dith")
-                        .frame(width: 58, alignment: .leading)
-                    Text(avgConvert.map(s) ?? "n/a")
-                        .foregroundStyle(.purple.opacity(0.85))
+                    Text(avgCache.map(s) ?? "n/a")
+                        .foregroundStyle(.cyan.opacity(0.85))
+                    if !cacheEntries.isEmpty {
+                        Text(" over \(cacheEntries.count)")
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
                     Spacer()
                 }
             }

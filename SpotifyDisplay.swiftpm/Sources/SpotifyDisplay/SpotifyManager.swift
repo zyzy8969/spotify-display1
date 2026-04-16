@@ -32,6 +32,9 @@ final class SpotifyManager: ObservableObject {
     private weak var monitoredBle: BLEManager?
     private var artSendTask: Task<Void, Never>?
     private var artInFlightTrackId: String?
+    /// Track ID whose album art preview was last downloaded for the app UI.
+    private var lastPreviewArtTrackId: String?
+    private var previewArtTask: Task<Void, Never>?
     /// Monotonic counter incremented each time a new `artSendTask` is launched.
     /// Old tasks check this before touching shared state so they don't clobber a newer task.
     private var artSendGeneration: UInt64 = 0
@@ -193,6 +196,9 @@ final class SpotifyManager: ObservableObject {
         artSendTask?.cancel()
         artSendTask = nil
         artInFlightTrackId = nil
+        lastPreviewArtTrackId = nil
+        previewArtTask?.cancel()
+        previewArtTask = nil
         lastDisplayFailureAt = nil
         lastDisplayFailureTrackId = nil
         lastAnyDisplayFailureAt = nil
@@ -448,6 +454,10 @@ final class SpotifyManager: ObservableObject {
                 isPlaying = false
                 currentTrack = item
                 pollStatus = "Paused"
+                let pauseArtURLs = preferredArtURLs(from: item)
+                if !pauseArtURLs.isEmpty {
+                    ensureAlbumArtPreview(trackId: item.id, artURLs: pauseArtURLs, bleManager: bleManager)
+                }
                 return
             }
 
@@ -463,22 +473,29 @@ final class SpotifyManager: ObservableObject {
             }
 
             let artURLs = preferredArtURLs(from: item)
+            let currentReadyEpoch = bleManager.readyEpoch
             guard let artURL = artURLs.first else {
-                lastError = "No album art for this track"
+                if lastSentToDisplayTrackId != item.id {
+                    lastError = "No album art for this track"
+                }
                 lastSentToDisplayTrackId = item.id
+                lastSentToDisplayArtURL = nil
+                lastSentToDisplayReadyEpoch = currentReadyEpoch
                 pendingTrack = nil
                 pendingSince = nil
                 return
             }
 
             // Session-aware dedupe: avoid duplicate cache/send work for same track+art in same BLE epoch.
-            let currentReadyEpoch = bleManager.readyEpoch
             if item.id == lastSentToDisplayTrackId,
                artURL == lastSentToDisplayArtURL,
-               lastSentToDisplayReadyEpoch == currentReadyEpoch,
-               bleManager.lastConfirmedTrackId == item.id
+               lastSentToDisplayReadyEpoch == currentReadyEpoch
             {
-                return
+                // Either board confirmed this track, or we already know it has no art.
+                if bleManager.lastConfirmedTrackId == item.id || lastSentToDisplayArtURL == nil {
+                    ensureAlbumArtPreview(trackId: item.id, artURLs: artURLs, bleManager: bleManager)
+                    return
+                }
             }
 
             if pendingTrack?.id != item.id {
@@ -691,6 +708,30 @@ final class SpotifyManager: ObservableObject {
             }
         }
         return out
+    }
+
+    /// Downloads album art for the app preview if not already showing for this track.
+    private func ensureAlbumArtPreview(trackId: String, artURLs: [String], bleManager: BLEManager) {
+        guard lastPreviewArtTrackId != trackId || bleManager.currentAlbumArt == nil else { return }
+        previewArtTask?.cancel()
+        lastPreviewArtTrackId = trackId
+        previewArtTask = Task { @MainActor [weak self] in
+            for candidate in artURLs.prefix(2) {
+                guard let url = URL(string: candidate) else { continue }
+                do {
+                    let (data, response) = try await URLSession.shared.data(from: url)
+                    guard !Task.isCancelled else { return }
+                    if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) { continue }
+                    guard UIImage(data: data) != nil else { continue }
+                    bleManager.currentAlbumArt = data
+                    return
+                } catch {
+                    continue
+                }
+            }
+            // All URLs failed — clear the stale preview marker so next poll retries.
+            self?.lastPreviewArtTrackId = nil
+        }
     }
 
     private func fetchCurrentlyPlayingWithRefresh() async throws -> CurrentlyPlayingResponse {

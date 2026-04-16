@@ -47,6 +47,13 @@ final class BLEManager: NSObject, ObservableObject {
     /// CoreBluetooth write queue (without-response) drain signal
     private var writeDrainContinuation: CheckedContinuation<Void, Never>?
 
+    /// Generation counters so stale timeout tasks don't cancel a newer continuation.
+    private var cacheCheckGen: UInt64 = 0
+    private var statsCheckGen: UInt64 = 0
+    private var readyCheckGen: UInt64 = 0
+    private var cacheRenderGen: UInt64 = 0
+    private var clearCheckGen: UInt64 = 0
+
     private var sawReady = false
     /// Ensures `readyEpoch` increments at most once per BLE connection even if characteristics discovery runs more than once.
     private var readyEpochCommittedForConnection = false
@@ -67,7 +74,10 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// Incremented on `cancelOngoingTransfer()` and `failPending` so in-flight `processTrack` / `sendRGB565` abort cooperatively.
     private var transferEpoch: UInt64 = 0
-    private var activeDownloadTask: Task<(Data, URLResponse), Error>?
+    private var activeDownloadTask: Task<Data, Error>?
+
+    /// Cache keys successfully sent via BLE this session. Only trust firmware cache hits for keys in this set.
+    private var confirmedCacheKeys = Set<Data>()
 
     private let serviceUUID = CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB")
     private let statusUUID = CBUUID(string: "0000FFE1-0000-1000-8000-00805F9B34FB")
@@ -146,8 +156,16 @@ final class BLEManager: NSObject, ObservableObject {
         withUnsafeBytes(of: cacheMagic.littleEndian) { packet.append(contentsOf: $0) }
         packet.append(cacheKey)
 
+        cacheCheckGen &+= 1
+        let myGen = cacheCheckGen
         return try await withCheckedThrowingContinuation { cont in
             self.cacheContinuation = cont
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard self.cacheCheckGen == myGen, let pending = self.cacheContinuation else { return }
+                self.cacheContinuation = nil
+                pending.resume(throwing: SpotifyDisplayError.bleTimeout)
+            }
             p.writeValue(packet, for: c, type: .withResponse)
         }
     }
@@ -158,6 +176,8 @@ final class BLEManager: NSObject, ObservableObject {
         cancelImageSuccessTimeoutTask()
         activeDownloadTask?.cancel()
         activeDownloadTask = nil
+        cacheContinuation?.resume(throwing: CancellationError())
+        cacheContinuation = nil
         transferContinuation?.resume(throwing: CancellationError())
         transferContinuation = nil
         cacheRenderContinuation?.resume(throwing: CancellationError())
@@ -250,29 +270,33 @@ final class BLEManager: NSObject, ObservableObject {
         try ensureTransferEpoch(epochAtStart)
 
         if cacheHit {
-            let previewDownload = download
-            activeDownloadTask = nil
-            try await awaitCacheRenderConfirmation()
-            // Cache hit updates the board from SD immediately. Keep the app preview in sync by
-            // finishing the already-started download in the background for UI only.
-            Task { @MainActor in
-                if let data = try? await previewDownload.value {
-                    self.currentAlbumArt = data
+            do {
+                try await awaitCacheRenderConfirmation()
+                // Cache hit confirmed — finish download in background for app preview only.
+                let previewDownload = download
+                activeDownloadTask = nil
+                Task { @MainActor in
+                    if let data = try? await previewDownload.value {
+                        self.currentAlbumArt = data
+                    }
                 }
+                statusMessage = "Loaded from SD cache"
+                let totalMs = ms(since: totalStart)
+                setLivePhase("cache hit \(secondsLabel(fromMs: totalMs))")
+                lastTransferResult = "Cache hit  \(secondsLabel(fromMs: totalMs))"
+                boardAckStatus = "Board ACK: cache hit"
+                lastConfirmedTrackId = trackId
+                appendLog(TransferLogEntry(
+                    cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
+                    downloadMs: nil, convertMs: nil, uploadMs: 0,
+                    totalMs: totalMs, outcome: "cache hit"
+                ))
+                setLivePhase("last: cache hit \(secondsLabel(fromMs: totalMs))")
+                return
+            } catch {
+                // Cache render confirmation failed — fall through to fresh BLE send.
+                setLivePhase("cache render failed, sending fresh…")
             }
-            statusMessage = "Loaded from SD cache"
-            let totalMs = ms(since: totalStart)
-            setLivePhase("cache hit \(secondsLabel(fromMs: totalMs))")
-            lastTransferResult = "Cache hit  \(secondsLabel(fromMs: totalMs))"
-            boardAckStatus = "Board ACK: cache hit"
-            lastConfirmedTrackId = trackId
-            appendLog(TransferLogEntry(
-                cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
-                downloadMs: nil, convertMs: nil, uploadMs: 0,
-                totalMs: totalMs, outcome: "cache hit"
-            ))
-            setLivePhase("last: cache hit \(secondsLabel(fromMs: totalMs))")
-            return
         }
         awaitingCacheRenderConfirm = false
         cacheRenderConfirmed = false
@@ -327,12 +351,19 @@ final class BLEManager: NSObject, ObservableObject {
         setLivePhase("last: done \(secondsLabel(fromMs: totalMs))")
     }
 
+    private static let artDownloadSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 15
+        return URLSession(configuration: config)
+    }()
+
     private func fetchAlbumArtData(urlCandidates: [String]) async throws -> Data {
         var firstError: Error?
         for candidate in urlCandidates.prefix(2) {
             guard let url = URL(string: candidate) else { continue }
             do {
-                let (data, response) = try await URLSession.shared.data(from: url)
+                let (data, response) = try await Self.artDownloadSession.data(from: url)
                 if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                     throw URLError(.badServerResponse)
                 }
@@ -353,16 +384,17 @@ final class BLEManager: NSObject, ObservableObject {
             cacheRenderConfirmed = false
             return
         }
+        cacheRenderGen &+= 1
+        let myGen = cacheRenderGen
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.cacheRenderContinuation = cont
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
-                if let pending = self.cacheRenderContinuation {
-                    self.cacheRenderContinuation = nil
-                    self.awaitingCacheRenderConfirm = false
-                    self.cacheRenderConfirmed = false
-                    pending.resume(throwing: SpotifyDisplayError.bleTransferRejected("ERROR: Cache render confirmation missing"))
-                }
+                guard self.cacheRenderGen == myGen, let pending = self.cacheRenderContinuation else { return }
+                self.cacheRenderContinuation = nil
+                self.awaitingCacheRenderConfirm = false
+                self.cacheRenderConfirmed = false
+                pending.resume(throwing: SpotifyDisplayError.bleTransferRejected("ERROR: Cache render confirmation missing"))
             }
         }
         awaitingCacheRenderConfirm = false
@@ -490,14 +522,15 @@ final class BLEManager: NSObject, ObservableObject {
         withUnsafeBytes(of: statsMagic.littleEndian) { packet.append(contentsOf: $0) }
         packet.append(Data(count: 16))
 
+        statsCheckGen &+= 1
+        let myGen = statsCheckGen
         let count = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
             self.statsContinuation = cont
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
-                if let c = self.statsContinuation {
-                    self.statsContinuation = nil
-                    c.resume(throwing: SpotifyDisplayError.bleTimeout)
-                }
+                guard self.statsCheckGen == myGen, let c = self.statsContinuation else { return }
+                self.statsContinuation = nil
+                c.resume(throwing: SpotifyDisplayError.bleTimeout)
             }
             p.writeValue(packet, for: c, type: .withResponse)
         }
@@ -565,14 +598,15 @@ final class BLEManager: NSObject, ObservableObject {
 
     private func waitForReady() async throws {
         if sawReady { return }
+        readyCheckGen &+= 1
+        let myGen = readyCheckGen
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.readyContinuation = cont
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 6_000_000_000)
-                if let c = self.readyContinuation {
-                    self.readyContinuation = nil
-                    c.resume(throwing: SpotifyDisplayError.bleTimeout)
-                }
+                guard self.readyCheckGen == myGen, let c = self.readyContinuation else { return }
+                self.readyContinuation = nil
+                c.resume(throwing: SpotifyDisplayError.bleTimeout)
             }
         }
     }
@@ -760,7 +794,6 @@ extension BLEManager: CBCentralManagerDelegate {
             self.sdCacheCountLoading = false
             self.resetGattState()
             self.statusMessage = "Disconnected — retrying…"
-            self.failPending(error: SpotifyDisplayError.notConnected)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 self.startScanning()
             }
@@ -883,14 +916,15 @@ extension BLEManager {
         var packet = Data()
         withUnsafeBytes(of: UInt32(0xCAC4E1EA).littleEndian) { packet.append(contentsOf: $0) }
         packet.append(Data(count: 16))
+        clearCheckGen &+= 1
+        let myGen = clearCheckGen
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.clearContinuation = cont
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                if let pending = self.clearContinuation {
-                    self.clearContinuation = nil
-                    pending.resume(throwing: SpotifyDisplayError.bleTimeout)
-                }
+                guard self.clearCheckGen == myGen, let pending = self.clearContinuation else { return }
+                self.clearContinuation = nil
+                pending.resume(throwing: SpotifyDisplayError.bleTimeout)
             }
             p.writeValue(packet, for: c, type: .withResponse)
         }
