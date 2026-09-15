@@ -161,7 +161,9 @@ final class BLEManager: NSObject, ObservableObject {
         return try await withCheckedThrowingContinuation { cont in
             self.cacheContinuation = cont
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                // On a hit the firmware loads from SD and runs the full transition before replying;
+                // per-pixel transitions can take several seconds.
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
                 guard self.cacheCheckGen == myGen, let pending = self.cacheContinuation else { return }
                 self.cacheContinuation = nil
                 pending.resume(throwing: SpotifyDisplayError.bleTimeout)
@@ -687,6 +689,11 @@ final class BLEManager: NSObject, ObservableObject {
             p.setNotifyValue(true, for: ch)
         }
         try? await Task.sleep(nanoseconds: 50_000_000)
+        // Firmware notifies READY in onConnect, before we have subscribed, so that notify is lost.
+        // The status characteristic is readable and holds 0x01 while connected; read it instead.
+        if let status = statusChar {
+            p.readValue(for: status)
+        }
         do {
             try await waitForReady()
             if !readyEpochCommittedForConnection {
@@ -764,8 +771,10 @@ extension BLEManager: CBCentralManagerDelegate {
     }
 
     nonisolated func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         Task { @MainActor in
-            guard peripheral.name == "Spotify Display" else { return }
+            // Name may arrive only in the scan response (firmware uses setScanResponse), so check both.
+            guard peripheral.name == "Spotify Display" || advertisedName == "Spotify Display" else { return }
             self.statusMessage = "Connecting…"
             self.peripheral = peripheral
             central.stopScan()

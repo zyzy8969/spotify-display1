@@ -22,6 +22,8 @@ Version: **1.6** (Album-art fallback resilience + explicit cache render confirma
 
 Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications after discovery. Firmware signals readiness with status byte `0x01` and/or message `READY`.
 
+**Readiness must be read, not only awaited.** Firmware notifies `READY` from its connect callback, which fires before the client has discovered services or enabled notifications, so that notify is normally dropped. The Status characteristic is readable and holds `0x01` while connected (`0x00` after disconnect); clients should **read Status after subscribing**. The iOS app does this.
+
 ## Cache check (write to Cache characteristic)
 
 **20 bytes**, little-endian:
@@ -42,6 +44,8 @@ Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications aft
 Firmware stores files with internal cache key version prefix (`v1_...bin`) and may keep backward compatibility with legacy unversioned entries.
 
 On cache hit render completion, firmware also emits Message notify `CACHE_RENDERED` (authoritative board-render confirmation). Clients should prefer this over optimistic UI status.
+
+On a hit, the `0x01` reply is sent only **after** the SD load and the full transition animation, which can take several seconds; the iOS app waits up to 8 s. If the file exists but fails to load (size/read/CRC error), firmware removes it and replies `0x00` (miss) so the client falls back to a normal image transfer.
 
 ## Image transfer (write to Image characteristic)
 

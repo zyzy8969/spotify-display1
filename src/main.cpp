@@ -206,44 +206,24 @@ class MyServerCallbacks: public BLEServerCallbacks {
         deviceConnected = true;
         Serial.println("BLE Client connected");
 
-        // Update to connected state (yes=green, no=black - connected!)
-        showingStartupScreen = false;
-        showBluetoothConnectionScreen(GREEN, BLACK);
-
-        // Clear and show ready message - LARGER & CENTERED
-        gfx->fillScreen(WHITE);
-        gfx->setTextSize(3);  // Increased from 2 to 3
-        gfx->setTextColor(BLACK);
-        gfx->setCursor(39, 80);  // Centered: "Play some" = 9 chars
-        gfx->print("Play some");
-        gfx->setCursor(48, 110);  // Centered: "music on" = 8 chars
-        gfx->print("music on");
-        gfx->setCursor(48, 140);  // Centered: "Spotify!" = 8 chars
-        gfx->setTextColor(SPOTIFY_GREEN); // Darker Spotify green
-        gfx->print("Spotify!");
-
-        // Get negotiated MTU size
-        uint16_t mtu = pServer->getPeerMTU(pServer->getConnId());
-        Serial.printf("BLE: Negotiated MTU = %d bytes\n", mtu);
-
-        if (mtu < 200) {
-            Serial.println("WARNING: MTU negotiation may have failed! Expected 517, got " + String(mtu));
-            Serial.println("Performance will be degraded. Check client MTU request.");
-        }
-
-        // Notify client we're ready
+        // Keep the status value readable as 0x01. Notifications sent here are dropped because
+        // the phone has not subscribed yet (it is still discovering services), so iOS reads
+        // this value after subscribing instead of relying on the notify below.
         uint8_t ready = 0x01;
         pStatusChar->setValue(&ready, 1);
         pStatusChar->notify();
 
-        // Send READY message
+        // Send READY message (best-effort; reaches clients that subscribe quickly)
         pMsgChar->setValue("READY");
         pMsgChar->notify();
         Serial.println("BLE: Sent READY signal");
+        // Display drawing is deferred to loop() — BTC_TASK stack is tiny.
     }
 
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
+        uint8_t notReady = 0x00;
+        pStatusChar->setValue(&notReady, 1);
         Serial.println("BLE Client disconnected");
         // Defer UI reset + advertising restart to loop() single-owner disconnect path.
     }
@@ -1697,8 +1677,12 @@ void loop() {
         pMsgChar->setValue("SUCCESS");
         pMsgChar->notify();
       } else {
-        Serial.println("ERROR: Cache load failed");
-        notifyImageTransferRejected("ERROR: Cache load failed");
+        Serial.println("ERROR: Cache load failed — reporting miss so the client sends fresh");
+        // The client is waiting on the Cache characteristic, not the Image one; without this
+        // reply it times out instead of falling back to a normal transfer.
+        uint8_t response = 0x00;
+        pCacheChar->setValue(&response, 1);
+        pCacheChar->notify();
       }
     } else {
       Serial.println("BLE: Cache MISS");
@@ -1793,8 +1777,30 @@ void loop() {
 
   if (deviceConnected && !oldDeviceConnected) {
     // Client just connected
-    Serial.println("BLE: Client connected, ready for data");
     oldDeviceConnected = deviceConnected;
+
+    // Update to connected state (yes=green, no=black - connected!)
+    showingStartupScreen = false;
+    showBluetoothConnectionScreen(GREEN, BLACK);
+
+    // Clear and show ready message - LARGER & CENTERED
+    gfx->fillScreen(WHITE);
+    gfx->setTextSize(3);
+    gfx->setTextColor(BLACK);
+    gfx->setCursor(39, 80);  // Centered: "Play some" = 9 chars
+    gfx->print("Play some");
+    gfx->setCursor(48, 110);  // Centered: "music on" = 8 chars
+    gfx->print("music on");
+    gfx->setCursor(48, 140);  // Centered: "Spotify!" = 8 chars
+    gfx->setTextColor(SPOTIFY_GREEN);
+    gfx->print("Spotify!");
+
+    uint16_t mtu = pServer->getPeerMTU(pServer->getConnId());
+    Serial.printf("BLE: Negotiated MTU = %d bytes\n", mtu);
+    if (mtu < 200) {
+      Serial.println("WARNING: Low MTU (" + String(mtu) + "); transfers will be slower.");
+    }
+    Serial.println("BLE: Client connected, ready for data");
   }
 
   // Small delay to prevent tight loop

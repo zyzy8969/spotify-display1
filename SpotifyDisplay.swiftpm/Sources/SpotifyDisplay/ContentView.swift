@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var bleManager = BLEManager()
     @StateObject private var spotifyManager = SpotifyManager()
     @State private var showSettings = false
+    @AppStorage("showDebugInfo") private var showDebugInfo = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,21 +40,21 @@ struct ContentView: View {
                         .lineLimit(2)
                     Text(track.artists.map(\.name).joined(separator: ", "))
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.white.opacity(0.7))
                     if let album = track.album?.name {
                         Text(album)
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.3))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                     if !spotifyManager.isPlaying {
                         Text("Paused")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.55))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 } else {
                     Text(spotifyManager.isAuthenticated ? "Nothing playing" : "Not signed in")
                         .font(.title3.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.35))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
 
                 // Cache hit / sent indicator
@@ -64,7 +65,7 @@ struct ContentView: View {
                             .frame(width: 5, height: 5)
                         Text(result)
                             .font(.caption2.monospaced())
-                            .foregroundStyle(.white.opacity(0.35))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                     .padding(.top, 2)
                 }
@@ -75,7 +76,7 @@ struct ContentView: View {
                             .frame(width: 5, height: 5)
                         Text(ack)
                             .font(.caption2.monospaced())
-                            .foregroundStyle(.white.opacity(0.4))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                 }
                 if let transition = bleManager.lastTransitionName {
@@ -85,7 +86,7 @@ struct ContentView: View {
                             .frame(width: 5, height: 5)
                         Text("Transition: \(transition)")
                             .font(.caption2.monospaced())
-                            .foregroundStyle(.white.opacity(0.35))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                 }
             }
@@ -100,8 +101,10 @@ struct ContentView: View {
 
             Spacer(minLength: 0)
 
-            // Inline debug log
-            DebugStrip(bleManager: bleManager, spotifyManager: spotifyManager)
+            // Inline debug log — opt-in only, off by default (Settings > Debug info)
+            if showDebugInfo {
+                DebugStrip(bleManager: bleManager, spotifyManager: spotifyManager)
+            }
 
             // Bottom bar: status + settings
             HStack(spacing: 16) {
@@ -115,14 +118,17 @@ struct ContentView: View {
                 if bleManager.isConnected, let n = bleManager.sdCacheEntryCount {
                     Text("\(n) cached")
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.25))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
                 Spacer()
                 Button { showSettings = true } label: {
                     Image(systemName: "gearshape")
                         .font(.body)
-                        .foregroundStyle(.white.opacity(0.35))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
+                .accessibilityLabel("Settings")
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 6)
@@ -131,7 +137,7 @@ struct ContentView: View {
             if let err = spotifyManager.lastError {
                 Text(err)
                     .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(.white.opacity(0.6))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 6)
@@ -212,7 +218,7 @@ struct StatusDot: View {
                 .frame(width: 6, height: 6)
             Text(label)
                 .font(.caption2)
-                .foregroundStyle(.white.opacity(active ? 0.45 : 0.25))
+                .foregroundStyle(.white.opacity(active ? 0.7 : 0.6))
         }
     }
 }
@@ -298,7 +304,7 @@ struct DebugStrip: View {
                         .foregroundStyle(.green.opacity(0.85))
                     if !freshEntries.isEmpty {
                         Text(" over \(freshEntries.count)")
-                            .foregroundStyle(.white.opacity(0.35))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                     Spacer()
                 }
@@ -309,7 +315,7 @@ struct DebugStrip: View {
                         .foregroundStyle(.cyan.opacity(0.85))
                     if !cacheEntries.isEmpty {
                         Text(" over \(cacheEntries.count)")
-                            .foregroundStyle(.white.opacity(0.35))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                     Spacer()
                 }
@@ -342,7 +348,7 @@ struct DebugStrip: View {
                     }
                     Spacer()
                     Text(s(entry.totalMs))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
             }
 
@@ -356,10 +362,10 @@ struct DebugStrip: View {
                         .lineLimit(1)
                 }
             }
-            .foregroundStyle(.white.opacity(0.2))
+            .foregroundStyle(.white.opacity(0.55))
         }
-        .font(.system(size: 9, design: .monospaced))
-        .foregroundStyle(.white.opacity(0.3))
+        .font(.system(size: 11, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.6))
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
     }
@@ -374,6 +380,8 @@ struct SettingsView: View {
     @State private var brightnessValue: Double = 200
     @State private var isClearingCache = false
     @State private var isSigningIn = false
+    @State private var isSigningOut = false
+    @AppStorage("showDebugInfo") private var showDebugInfo = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -408,7 +416,15 @@ struct SettingsView: View {
                     .disabled(isSigningIn)
 
                     Button("Sign out", role: .destructive) {
-                        spotifyManager.signOut()
+                        isSigningOut = true
+                    }
+                    .alert("Sign out of Spotify?", isPresented: $isSigningOut) {
+                        Button("Cancel", role: .cancel) {}
+                        Button("Sign Out", role: .destructive) {
+                            spotifyManager.signOut()
+                        }
+                    } message: {
+                        Text("You'll need to sign in again to control playback.")
                     }
                 } header: {
                     Text("Spotify")
@@ -466,6 +482,14 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("Display")
+                }
+
+                Section {
+                    Toggle("Show debug info", isOn: $showDebugInfo)
+                } header: {
+                    Text("Advanced")
+                } footer: {
+                    Text("Shows live BLE transfer and cache timing on the main screen.")
                 }
 
                 Section {
