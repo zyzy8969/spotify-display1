@@ -43,6 +43,13 @@ Bluetooth and Spotify use different paths. Check the on-screen **`pollStatus`** 
 - While monitoring, the app requests **currently playing** about **once per second** (responsive to track skips).
 - If Spotify returns **HTTP 429**, the app reads **`Retry-After`** (seconds, capped) and **avoids further player requests** until that cooldown ends, so traffic stays within practical limits.
 
+## Installing on an iPhone without a Mac (Windows)
+
+1. **Build in the cloud.** Push to GitHub (or run the **Build** workflow manually from the Actions tab). The `ios` job in [`.github/workflows/build.yml`](../.github/workflows/build.yml) compiles on a GitHub-hosted Mac and uploads **`SpotifyDisplay-unsigned-ipa`** as a run artifact. Download and unzip it to get `SpotifyDisplay-unsigned.ipa`.
+2. **Sign and install from Windows** with a sideloading tool such as [Sideloadly](https://sideloadly.io): install Apple's **Apple Devices** app (or iTunes) for USB drivers, plug in the iPhone, trust the computer, drag the `.ipa` in, and sign in with **your own Apple ID** inside the tool. It re-signs the app with a free personal certificate and installs it.
+3. **On the iPhone:** Settings → General → VPN & Device Management → trust your Apple ID; on iOS 16+ also turn on **Settings → Privacy & Security → Developer Mode** and restart.
+4. Free Apple IDs: the install **expires after 7 days** (re-sign to renew) and allow at most 3 sideloaded apps at once. The bundle ID gets rewritten by the tool, which is fine: the Spotify redirect (`spotifydisplay://callback`) is a URL scheme, not tied to the bundle ID.
+
 ## Personal Team / no paid program
 
 - You can install on your own devices for **about seven days** without the Apple Developer Program; renew by rebuilding/reinstalling.

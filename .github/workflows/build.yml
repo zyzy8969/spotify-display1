@@ -1,0 +1,55 @@
+# Builds without needing a local Mac:
+# - ios: compiles the app on a GitHub-hosted macOS runner and uploads an UNSIGNED .ipa.
+#   Sign + install it on your iPhone from Windows with a sideloading tool (see ios/README.md).
+# - firmware: compiles the ESP32 PlatformIO project.
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app (no code signing)
+        run: |
+          xcodebuild \
+            -project ios/SpotifyDisplay.xcodeproj \
+            -scheme SpotifyDisplay \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/SpotifyDisplay.app Payload/
+          zip -qry SpotifyDisplay-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpotifyDisplay-unsigned-ipa
+          path: SpotifyDisplay-unsigned.ipa
+          retention-days: 14
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Compile firmware
+        run: pio run -e esp32-s3-devkitc-1
