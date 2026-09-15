@@ -9,17 +9,25 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Album art — full width, square, extends into top safe area
+            // Album art — full width, square, extends into top safe area.
+            // layoutPriority(1) makes the VStack size this first, against the full
+            // screen height, so `fit` always resolves to the width. Without it the
+            // art gets only the *leftover* height and visibly resizes whenever a
+            // sibling (progress bar, cache badge, debug strip, error line) appears.
             AlbumArtView(imageData: bleManager.currentAlbumArt)
+                .layoutPriority(1)
 
-            // Transfer progress (thin bar, seamless under art)
-            if bleManager.isTransferring {
-                ProgressView(value: bleManager.transferProgress)
-                    .tint(.white.opacity(0.5))
-                    .background(Color.white.opacity(0.08))
-            } else {
-                Color.clear.frame(height: 4)
+            // Transfer progress (thin bar, seamless under art).
+            // Constant-height slot: the bar swaps in and out *inside* a fixed 4pt
+            // frame so starting or finishing a transfer never changes layout height.
+            ZStack {
+                if bleManager.isTransferring {
+                    ProgressView(value: bleManager.transferProgress)
+                        .tint(.white.opacity(0.5))
+                        .background(Color.white.opacity(0.08))
+                }
             }
+            .frame(height: 4)
 
             // Track info
             VStack(spacing: 5) {
@@ -213,26 +221,22 @@ struct AlbumArtView: View {
     let imageData: Data?
 
     var body: some View {
-        GeometryReader { geo in
-            let side = geo.size.width
-            ZStack {
-                if let data = imageData, let uiImage = UIImage(data: data) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: side, height: side)
-                        .clipped()
-                } else {
-                    Rectangle()
-                        .fill(Color.white.opacity(0.04))
-                    Image(systemName: "music.note")
-                        .font(.system(size: 48, weight: .ultraLight))
-                        .foregroundStyle(.white.opacity(0.12))
-                }
+        ZStack {
+            if let data = imageData, let uiImage = UIImage(data: data) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Rectangle()
+                    .fill(Color.white.opacity(0.04))
+                Image(systemName: "music.note")
+                    .font(.system(size: 48, weight: .ultraLight))
+                    .foregroundStyle(.white.opacity(0.12))
             }
-            .frame(width: side, height: side)
         }
+        .frame(maxWidth: .infinity)
         .aspectRatio(1, contentMode: .fit)
+        .clipped()
     }
 }
 
