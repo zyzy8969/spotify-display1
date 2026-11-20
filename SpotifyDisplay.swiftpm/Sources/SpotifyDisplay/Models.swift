@@ -30,7 +30,7 @@ enum SendStage: Equatable {
     /// Cache lookup / art download / waiting for the board; no new pixels on the display yet.
     case checking
     /// Cache miss: the new cover is known and is being converted or sent; the display keeps the
-    /// previous cover below its scan line until the send finishes.
+    /// previous cover until the whole new frame has arrived, then draws it with a transition.
     case preparingFresh
 }
 

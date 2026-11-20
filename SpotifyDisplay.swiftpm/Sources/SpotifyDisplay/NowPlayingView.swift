@@ -38,10 +38,15 @@ struct NowPlayingScreen: View {
     let onOpen: (Panel) -> Void
 
     @Environment(\.theme) private var theme
-    /// Decoded once per change instead of on every render.
+    /// What the keychain shows right now, decoded once per change instead of on every render.
     @State private var shownImage: UIImage?
-    /// The cover the display still shows below its scan line during a fresh send.
-    @State private var priorImage: UIImage?
+    /// A fresh send's new cover, held back until the board confirms it. The firmware draws a new
+    /// frame only when it is whole (with a transition, just before its ACK) and leaves the old
+    /// picture up if the send fails, so the app does the same.
+    @State private var pendingImage: UIImage?
+    /// Newest transfer-log entry when the pending send began; a newer non-cache entry at the end
+    /// of the send means it succeeded.
+    @State private var pendingSinceLogID: UUID?
 
     var body: some View {
         GeometryReader { geo in
@@ -56,12 +61,37 @@ struct NowPlayingScreen: View {
             shownImage = Self.decode(bleManager.currentAlbumArt)
         }
         .onChange(of: bleManager.currentAlbumArt) { newData in
-            artDidChange(newData)
+            // During a fresh send the stage handler below picks the art up; anything else
+            // (a confirmed cache hit, the paused preview) is already what the display shows.
+            guard bleManager.sendStage != .preparingFresh else { return }
+            shownImage = Self.decode(newData)
+            pendingImage = nil
         }
-        // `sendStage` returns to idle on every exit from processTrack (success, error, skip), so
-        // the old cover never lingers after a send that failed or never started.
+        // `sendStage` returns to idle on every exit from processTrack (success, error, skip).
         .onChange(of: bleManager.sendStage) { stage in
-            if stage == .idle { priorImage = nil }
+            stageDidChange(stage)
+        }
+    }
+
+    private func stageDidChange(_ stage: SendStage) {
+        switch stage {
+        case .preparingFresh:
+            // `processTrack` sets the stage and the new art in the same turn, so the art is
+            // already current here, even on a retry that sends identical bytes.
+            pendingImage = Self.decode(bleManager.currentAlbumArt)
+            pendingSinceLogID = bleManager.transferLog.last?.id
+        case .idle:
+            guard let pending = pendingImage else { return }
+            let last = bleManager.transferLog.last
+            let succeeded = last.map { $0.id != pendingSinceLogID && !$0.cacheHit } ?? false
+            // Nothing to mirror without a display: show the song's cover rather than a stale one.
+            if succeeded || !bleManager.isConnected {
+                shownImage = pending
+            }
+            pendingImage = nil
+            pendingSinceLogID = nil
+        case .checking:
+            break
         }
     }
 
@@ -75,10 +105,7 @@ struct NowPlayingScreen: View {
             )
             Color.clear.frame(height: topGap)
             ArtStage(
-                current: shownImage,
-                prior: priorImage,
-                reveal: revealFraction,
-                drawing: isDrawingFresh,
+                image: shownImage,
                 side: side,
                 label: artLabel,
                 value: artValue
@@ -115,31 +142,6 @@ struct NowPlayingScreen: View {
         )
     }
 
-    /// A fresh send is being converted or queued: the new cover is known but the display has
-    /// not started drawing it.
-    private var isPreparingFreshSend: Bool {
-        bleManager.sendStage == .preparingFresh && !bleManager.isTransferring
-    }
-
-    private var isDrawingFresh: Bool {
-        bleManager.isTransferring || isPreparingFreshSend
-    }
-
-    /// How much of the new cover the display has drawn: rows drawn = bytes sent / 480,
-    /// so the byte fraction is exactly the row fraction. 1 = whole picture.
-    private var revealFraction: CGFloat {
-        if bleManager.isTransferring {
-            return CGFloat(min(1, max(0, bleManager.transferProgress)))
-        }
-        return isPreparingFreshSend ? 0 : 1
-    }
-
-    private func artDidChange(_ data: Data?) {
-        let preparing = isDrawingFresh
-        priorImage = preparing ? shownImage : nil
-        shownImage = Self.decode(data)
-    }
-
     private static func decode(_ data: Data?) -> UIImage? {
         guard let data else { return nil }
         return UIImage(data: data)
@@ -164,7 +166,7 @@ struct NowPlayingScreen: View {
 
     private var artValue: String {
         if case .sending(let progress) = stripState {
-            return "The display is drawing the new cover, \(Int((progress * 100).rounded())) percent"
+            return "Sending the new cover to the display, \(Int((progress * 100).rounded())) percent"
         }
         return spotifyManager.isPlaying ? "" : "Paused"
     }
@@ -264,36 +266,24 @@ struct StatusDot: View {
 
 // MARK: - Album art
 
+/// The cover as the keychain shows it. A new cover replaces the old one in one piece, like the
+/// firmware's whole-frame draw; send progress lives in the strip below, not on the art.
 struct ArtStage: View {
-    let current: UIImage?
-    let prior: UIImage?
-    /// 0...1 share of the new cover drawn so far, top to bottom.
-    let reveal: CGFloat
-    /// A fresh send is in flight (show the scan line).
-    let drawing: Bool
+    let image: UIImage?
     let side: CGFloat
     let label: String
     let value: String
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        ZStack(alignment: .top) {
-            if reveal < 1 {
-                // What the display still shows below its scan line.
-                artLayer(prior ?? current)
-            }
-            artLayer(current)
-                .mask(alignment: .top) {
-                    Rectangle().frame(height: max(0, side * reveal))
-                }
-            if drawing && reveal < 1 {
-                Rectangle()
-                    .fill(theme.fresh)
-                    .frame(height: 2.5)
-                    .offset(y: max(0, side * reveal - 1.25))
-            }
+        ZStack {
+            artLayer(image)
+                .id(imageID)
+                .transition(.opacity)
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: imageID)
         .frame(width: side, height: side)
         .background(theme.artSurface)
         .clipShape(RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous))
@@ -304,6 +294,11 @@ struct ArtStage: View {
         .accessibilityLabel(label)
         .accessibilityValue(value)
         .accessibilityAddTraits(.isImage)
+    }
+
+    /// Identity of the picture, so a new cover crossfades in as one piece (Reduce Motion: cut).
+    private var imageID: ObjectIdentifier? {
+        image.map { ObjectIdentifier($0) }
     }
 
     @ViewBuilder

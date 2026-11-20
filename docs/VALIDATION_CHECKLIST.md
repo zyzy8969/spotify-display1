@@ -76,9 +76,10 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
 - Art does not jump: skip to a song that is *not* cached and watch a fresh send. The cover must
   stay the same size and position from first byte to ACK, and while the error line or the
   "sending 62%" footer appears and disappears.
-- Fresh-send preview: during a fresh send the new cover is revealed top-down with a line at the
-  scan position and the previous cover below it, matching the board. On a cache hit the cover
-  just changes.
+- Preview matches the keychain: during a fresh send the app keeps the previous cover while the
+  strip fills, then crossfades to the new one at the moment the keychain shows it (both change
+  together, within about a second). On a cache hit the app's cover changes as the keychain's
+  transition finishes. With Reduce Motion on, the app cuts instead of crossfading.
 - Strip: after a cache hit it shows a filled dot and a solid line; after a fresh send a hollow
   ring; while sending a growing line; while preparing a dashed line.
 - Dynamic Type: Settings > Accessibility > Display & Text Size > Larger Text, largest size. Every
@@ -92,8 +93,9 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
 - Theme switching: changing the theme in Settings updates the open sheet and the main screen
   immediately, Quiet turns the status bar light, and the choice survives an app relaunch.
 - Failed send recovers: start a fresh (uncached) send, then switch the board off or walk out of
-  range mid-transfer. Once the app shows the error, the strip must not stay dashed and the art
-  must not keep a scan line; both return to rest. Same after a send rejected with `ERROR:`.
+  range mid-transfer. Once the app shows the error, the strip must not stay dashed. With the board
+  switched off the app shows the new song's cover; after a send rejected with `ERROR:` (board
+  still connected) both the app and the keychain keep the previous cover until the retry lands.
 - Skip right after a cache hit: play a cached song, then skip at once to an uncached one. The
   preview must end on the new song's cover, never flip back to the cached song's cover.
 - Stats sheet opens at half height with a grabber and drags to full; Settings opens full height

@@ -109,12 +109,13 @@ yet verified on a device** — see `docs/VALIDATION_CHECKLIST.md` › "iOS UI (t
   the password stays with Spotify.
 - [x] Album art resizes mid-download `[app]` — art side depends only on the safe-area size; transient
   status no longer sits above the art.
-- [ ] **Mirror the board's draw state in the app preview** `[app]` — *fresh sends done*: the preview
-  masks the new cover to `transferProgress` (= rows drawn) with the previous cover below the scan line.
-  *Cache hits still open*: they need the app to stop sending `0xFF` (random) in the 5-byte header and
-  pick the transition itself — the protocol already carries a transition index, it is just unused
-  (`BLEManager.sendRGB565`) — then run the same animation locally. That is a `BLEManager` behaviour
-  change, so it was left for a separate, approved step.
+- [ ] **Mirror the board's draw state in the app preview** `[app]` — the firmware now draws a fresh
+  frame only when it is whole (7046add), so the app keeps the old cover during a send and swaps to the
+  new one when the board ACKs; a failed send leaves both on the old cover. *Still open*: the app
+  crossfades rather than playing the board's actual transition. Matching it needs the app to stop
+  sending `0xFF` (random) in the 5-byte header and pick the transition itself — the field already
+  exists, it is just unused (`BLEManager.sendRGB565`) — then run the same animation locally. That is
+  a `BLEManager` behaviour change, so it was left for a separate, approved step.
 - [x] Blanket `.ignoresSafeArea()` pushes the bottom bar under the home indicator `[app]` — only the
   background ignores safe areas now.
 - [ ] Increase Contrast has no dedicated palette `[app]` — every theme already passes AA without it;
