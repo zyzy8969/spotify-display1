@@ -71,15 +71,3 @@ struct PrimaryButtonBackground: View {
         }
     }
 }
-
-extension View {
-    /// Disables the rubber-band bounce when a scroll view's content already fits (iOS 16.4+).
-    @ViewBuilder
-    func bounceOnlyWhenScrollable() -> some View {
-        if #available(iOS 16.4, *) {
-            self.scrollBounceBehavior(.basedOnSize)
-        } else {
-            self
-        }
-    }
-}
