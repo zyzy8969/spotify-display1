@@ -26,7 +26,10 @@ struct ContentView: View {
             sheetContent(panel)
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
-                .presentationDragIndicator(.visible)
+                // HIG sheets.md: a grabber belongs on a resizable sheet. Stats opens at medium
+                // height (a quick glance) and drags to full; Settings is a full-height task.
+                .presentationDetents(panel == .stats ? [.medium, .large] : [.large])
+                .presentationDragIndicator(panel == .stats ? .visible : .hidden)
         }
         .onAppear {
             bleManager.startScanning()

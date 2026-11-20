@@ -219,7 +219,8 @@ struct SettingsView: View {
                 )
                 .themeText(.rowValue)
                 .foregroundStyle(theme.ink)
-                .textContentType(.username)
+                // Not a username: tagging it so made iOS offer saved passwords for this field.
+                .keyboardType(.asciiCapable)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .frame(minHeight: 44)

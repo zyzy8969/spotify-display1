@@ -29,6 +29,13 @@ final class BLEManager: NSObject, ObservableObject {
     }()
     @Published private(set) var transferLog: [TransferLogEntry] = []
     @Published private(set) var currentLivePhase: String? = "idle"
+    /// Typed pipeline stage for the UI, so views never parse `currentLivePhase` / `boardAckStatus`
+    /// text. UI-only: nothing in the transfer path reads it. Reset to `.idle` on every exit from
+    /// `processTrack`, including errors and cancellation.
+    @Published private(set) var sendStage: SendStage = .idle
+    /// Bumped per `processTrack` call, so an older call unwinding after a skip cannot reset the
+    /// newer call's `sendStage` or overwrite its preview art.
+    private var sendStageGen: UInt64 = 0
     /// Shows "Cache hit" / "Sent to display" / nil on main screen.
     @Published private(set) var lastTransferResult: String?
     /// Human-readable board confirmation for latest transfer stage.
@@ -317,6 +324,12 @@ final class BLEManager: NSObject, ObservableObject {
     func processTrack(imageURLs: [String], albumId: String?, trackId: String) async throws {
         holdTransferBackgroundTime()
         defer { releaseTransferBackgroundTime() }
+        sendStageGen &+= 1
+        let myStageGen = sendStageGen
+        sendStage = .checking
+        defer {
+            if sendStageGen == myStageGen { sendStage = .idle }
+        }
         setLivePhase("cache check + downloading…")
         boardAckStatus = "Sending…"
 
@@ -371,7 +384,8 @@ final class BLEManager: NSObject, ObservableObject {
                 let previewDownload = download
                 activeDownloadTask = nil
                 Task { @MainActor in
-                    if let data = try? await previewDownload.value {
+                    // Skip if a newer track started meanwhile: its art must not be replaced by ours.
+                    if let data = try? await previewDownload.value, self.sendStageGen == myStageGen {
                         self.currentAlbumArt = data
                     }
                 }
@@ -410,6 +424,8 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
+        // Set before the art so the preview sees "fresh send coming" when the new cover lands.
+        sendStage = .preparingFresh
         currentAlbumArt = data
 
         statusMessage = "Processing image…"

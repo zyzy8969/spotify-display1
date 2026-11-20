@@ -91,3 +91,11 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
   stay smooth, with no visible stutter while the progress strip fills.
 - Theme switching: changing the theme in Settings updates the open sheet and the main screen
   immediately, Quiet turns the status bar light, and the choice survives an app relaunch.
+- Failed send recovers: start a fresh (uncached) send, then switch the board off or walk out of
+  range mid-transfer. Once the app shows the error, the strip must not stay dashed and the art
+  must not keep a scan line; both return to rest. Same after a send rejected with `ERROR:`.
+- Skip right after a cache hit: play a cached song, then skip at once to an uncached one. The
+  preview must end on the new song's cover, never flip back to the cached song's cover.
+- Stats sheet opens at half height with a grabber and drags to full; Settings opens full height
+  with no grabber. Both close by swiping down.
+- Client ID field: tapping it must not offer saved passwords above the keyboard.

@@ -42,7 +42,7 @@ extension ThemeID {
                 : "Adds a Stats button and live transfer details."
         case .themeTitle: return p ? "look" : "Theme"
         case .onTheDisplay: return p ? "on the keychain" : "On the display"
-        case .emptyCache: return p ? "empty it" : "Clear the display"
+        case .emptyCache: return p ? "empty it" : "Clear display cache"
         case .emptyCacheConfirm: return "Clear the display cache?"
         case .signOut: return p ? "sign out" : "Sign out"
         case .signInAgain: return p ? "sign in again" : "Sign in again"
@@ -76,27 +76,29 @@ extension ThemeID {
         case .quiet:
             return "\(n) cached"
         case .serif:
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .spellOut
-            let words = formatter.string(from: NSNumber(value: n)) ?? "\(n)"
+            let words = Self.spellOut.string(from: NSNumber(value: n)) ?? "\(n)"
             let first = String(words.prefix(1)).uppercased()
             let rest = String(words.dropFirst())
             return first + rest + " cached"
         }
     }
 
-    /// Seconds from milliseconds: "0.9s", or "0.9" for Serif where the unit is spelled out nearby.
+    /// Built once: the footer asks for the count on every render, including each progress tick.
+    private static let spellOut: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .spellOut
+        return formatter
+    }()
+
+    /// Seconds from milliseconds, always with its unit ("0.9s"): most timings on Stats stand
+    /// alone in a row, with no label nearby to say what the number is.
     func seconds(_ ms: Int) -> String {
-        let value = String(format: "%.1f", Double(ms) / 1000.0)
-        return self == .serif ? value : value + "s"
+        String(format: "%.1f", Double(ms) / 1000.0) + "s"
     }
 
-    /// The word after the big number on Stats: "hit" / "cached" / "seconds, cached".
+    /// The word after the big number on Stats: "hit" / "cached".
     func heroUnit(cacheHit: Bool) -> String {
-        switch self {
-        case .serif: return cacheHit ? "seconds, cached" : "seconds, sent fresh"
-        case .crayon, .quiet: return text(cacheHit ? .cachedWord : .freshWord)
-        }
+        text(cacheHit ? .cachedWord : .freshWord)
     }
 
     var displayName: String {

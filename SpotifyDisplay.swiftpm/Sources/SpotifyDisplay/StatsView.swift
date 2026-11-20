@@ -281,8 +281,10 @@ struct RecentTransfers: View {
     let entries: [TransferLogEntry]
 
     private static let timeFormatter: DateFormatter = {
+        // Follows the person's 12/24-hour setting and locale.
         let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
+        formatter.dateStyle = .none
+        formatter.timeStyle = .medium
         return formatter
     }()
 

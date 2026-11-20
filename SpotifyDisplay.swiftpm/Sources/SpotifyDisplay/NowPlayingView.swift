@@ -58,8 +58,10 @@ struct NowPlayingScreen: View {
         .onChange(of: bleManager.currentAlbumArt) { newData in
             artDidChange(newData)
         }
-        .onChange(of: bleManager.isTransferring) { active in
-            if !active { priorImage = nil }
+        // `sendStage` returns to idle on every exit from processTrack (success, error, skip), so
+        // the old cover never lingers after a send that failed or never started.
+        .onChange(of: bleManager.sendStage) { stage in
+            if stage == .idle { priorImage = nil }
         }
     }
 
@@ -107,17 +109,16 @@ struct NowPlayingScreen: View {
         StripState.derive(
             isTransferring: bleManager.isTransferring,
             progress: bleManager.transferProgress,
-            ackStatus: bleManager.boardAckStatus,
+            stage: bleManager.sendStage,
             lastResult: bleManager.lastTransferResult,
             lastEntry: bleManager.transferLog.last
         )
     }
 
     /// A fresh send is being converted or queued: the new cover is known but the display has
-    /// not started drawing it. `processTrack` sets these phases right after `currentAlbumArt`.
+    /// not started drawing it.
     private var isPreparingFreshSend: Bool {
-        guard let phase = bleManager.currentLivePhase else { return false }
-        return phase.hasPrefix("dither") || phase.hasPrefix("sending BLE")
+        bleManager.sendStage == .preparingFresh && !bleManager.isTransferring
     }
 
     private var isDrawingFresh: Bool {
@@ -452,15 +453,14 @@ enum StripState: Equatable {
     static func derive(
         isTransferring: Bool,
         progress: Double,
-        ackStatus: String?,
+        stage: SendStage,
         lastResult: String?,
         lastEntry: TransferLogEntry?
     ) -> StripState {
         if isTransferring {
             return .sending(min(1, max(0, progress)))
         }
-        // `processTrack` sets "Sending…" when it starts and replaces it on success.
-        if let ack = ackStatus, ack.hasPrefix("Sending") {
+        if stage != .idle {
             return .preparing
         }
         if lastResult != nil, let entry = lastEntry {
