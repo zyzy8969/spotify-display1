@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AuthenticationServices
 import CryptoKit
 import Network
@@ -282,6 +283,14 @@ final class SpotifyManager: ObservableObject {
             }
         }
 
+        // Board heartbeat: the only thing that runs this app once iOS suspends it in the background.
+        bleManager.onHeartbeat = { [weak self, weak bleManager] in
+            guard let self, let bleManager else { return }
+            Task { @MainActor in
+                await self.handleBoardHeartbeat(bleManager: bleManager)
+            }
+        }
+
         monitorTask?.cancel()
         monitorTask = Task {
             await restoreSession()
@@ -405,7 +414,38 @@ final class SpotifyManager: ObservableObject {
         networkMonitorStarted = false
     }
 
+    /// When the last `pollOnce` started; heartbeats skip polling if the foreground loop is keeping up.
+    private var lastPollStartedAt: Date?
+    private var heartbeatPollInFlight = false
+
+    /// One Spotify poll per board heartbeat (~2 s). In the foreground the 0.45 s loop already polls, so
+    /// this is skipped; in the background that loop is suspended and this is what keeps the display current.
+    /// A background task covers the poll itself; `processTrack` takes its own for any transfer it starts.
+    private func handleBoardHeartbeat(bleManager: BLEManager) async {
+        guard !heartbeatPollInFlight else { return }
+        if let last = lastPollStartedAt, Date().timeIntervalSince(last) < 1.5 { return }
+        guard networkIsReachable else { return }
+        heartbeatPollInFlight = true
+        heartbeatBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "SpotifyHeartbeatPoll") { [weak self] in
+            Task { @MainActor in self?.endHeartbeatBackgroundTask() }
+        }
+        defer {
+            heartbeatPollInFlight = false
+            endHeartbeatBackgroundTask()
+        }
+        await pollOnce(bleManager: bleManager)
+    }
+
+    private var heartbeatBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+
+    private func endHeartbeatBackgroundTask() {
+        guard heartbeatBackgroundTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(heartbeatBackgroundTaskID)
+        heartbeatBackgroundTaskID = .invalid
+    }
+
     private func pollOnce(bleManager: BLEManager) async {
+        lastPollStartedAt = Date()
         guard isAuthenticated else {
             pollStatus = "Not authenticated"
             return

@@ -2,7 +2,10 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.6** (Album-art fallback resilience + explicit cache render confirmation for reliability-first cache-hit UX.)
+Version: **1.7** (Board heartbeat `HB` so the iOS app keeps working in the background.)
+
+Changes in 1.7: firmware notifies Message `HB` every ~2 s while connected (see **Heartbeat**). Clients that
+log or collect unknown messages must ignore it.
 
 ## Peripheral
 
@@ -66,6 +69,19 @@ On a hit, the `0x01` reply is sent only **after** the SD load and the full trans
 The iOS app treats both Message `ERROR:*` and Image `0x02` as an immediate failure of the in-flight transfer (same stage as SUCCESS negotiation).
 
 **Partial receive vs cache check:** If a previous transfer was abandoned mid-chunk (`RECEIVING_DATA` with partial bytes), the next **Cache** write (lookup) is processed in `loop()` **before** hit/miss: firmware resets image receive state so cache hit/miss and SD load are not racing progressive draw.
+
+## Heartbeat (1.7)
+
+While a client is connected, firmware notifies UTF-8 `HB` on **Message** every **2 s**
+(`HEARTBEAT_INTERVAL_MS` in `src/main.cpp`), from `loop()`, so it pauses while `loop()` is busy with a
+cache-hit transition or SD save.
+
+Why: iOS suspends a backgrounded app about 30 s after it leaves the foreground, which stops its Spotify
+poll. With the `bluetooth-central` background mode, each notify on a subscribed characteristic wakes the
+app briefly. The iOS app polls Spotify once per `HB` (skipped when its foreground poll ran in the last
+1.5 s), so the display keeps up with song changes while the phone is locked, ~2 s behind at worst.
+
+`HB` carries no state. Clients must not treat it as `READY`, `SUCCESS`, or a reply to any request.
 
 ## Image format
 

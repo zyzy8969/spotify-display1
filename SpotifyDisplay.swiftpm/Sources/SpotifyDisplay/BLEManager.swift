@@ -40,6 +40,10 @@ final class BLEManager: NSObject, ObservableObject {
     /// Called on MainActor when GATT is fully ready after (re)connect. SpotifyManager registers this for instant resync.
     var onReadyCallback: (() -> Void)?
 
+    /// Called on MainActor for each board heartbeat (`HB` message, every ~2 s while connected).
+    /// iOS wakes the suspended app for each notify, so this is the background poll trigger.
+    var onHeartbeat: (() -> Void)?
+
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var statusChar: CBCharacteristic?
@@ -708,6 +712,10 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func handleMessage(_ text: String) {
+        if text == "HB" {
+            onHeartbeat?()
+            return
+        }
         if text == "READY" { signalReady() }
 
         // Firmware ERROR: replies reject the frame and reset its receive state; no ACK will follow.

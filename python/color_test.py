@@ -144,6 +144,8 @@ class BLEContext:
                 self.transfer_complete_event.set()
         elif sender == MESSAGE_CHAR_UUID:
             msg = data.decode('utf-8', errors='ignore')
+            if msg == "HB":
+                return  # Board heartbeat (BLE protocol 1.7)
             self.messages.append(msg)
             if msg == "READY":
                 self.ready_event.set()
