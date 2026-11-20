@@ -57,7 +57,7 @@ pio device monitor -b 921600
 pio device list
 ```
 
-`platformio.ini` hardcodes `upload_port`/`monitor_port` as `COM3`; change it if the board
+`platformio.ini` hardcodes `upload_port`/`monitor_port` as `COM6` (upload at 921600 baud); change it if the board
 enumerates elsewhere. There is no firmware test suite (`test/` holds only a README).
 
 ### iOS app
