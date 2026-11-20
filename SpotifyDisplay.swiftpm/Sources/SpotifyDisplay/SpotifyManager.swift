@@ -820,7 +820,24 @@ final class SpotifyManager: ObservableObject {
         }
     }
 
+    /// In-flight refresh shared by every caller. Spotify rotates refresh tokens, so two concurrent
+    /// refreshes with the same token make the loser fail with `invalid_grant` (looks like a random
+    /// sign-out, typically at BLE reconnect when resync and the poll loop both refresh).
+    private var tokenRefreshTask: Task<Void, Error>?
+
     private func refreshAccessToken(clientId: String, refreshToken: String) async throws {
+        if let inFlight = tokenRefreshTask {
+            return try await inFlight.value
+        }
+        let task = Task { @MainActor in
+            try await self.performTokenRefresh(clientId: clientId, refreshToken: refreshToken)
+        }
+        tokenRefreshTask = task
+        defer { tokenRefreshTask = nil }
+        try await task.value
+    }
+
+    private func performTokenRefresh(clientId: String, refreshToken: String) async throws {
         var req = URLRequest(url: URL(string: "https://accounts.spotify.com/api/token")!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
