@@ -38,6 +38,153 @@ some bugs i forgot to put in this idk if they r solved  (4-byte cache key trunca
 - App: UI still does not fill the entire screen consistently.
 - Intermittent skip-render artifact: previous image can appear briefly before the correct next track renders. Root cause TBD (cache status vs transfer/render sequencing).
 
+## Audit backlog (2026-11-18) — from `docs/AGENT_REPORT.md`
+
+Full reasoning, line references and citations live in [`docs/AGENT_REPORT.md`](docs/AGENT_REPORT.md).
+Severity order. `[fw]` firmware, `[app]` iOS, `[both]` crosses the boundary.
+
+### Done, awaiting hardware verification
+- [x] **Brightness never worked** `[both]` — `ledcWrite()` was passed the GPIO instead of the LEDC
+  channel, so every BLE brightness write hit a nonexistent channel. Fixed with a named
+  `TFT_BL_PWM_CHANNEL`. **Also needed an app-side fix**: `UserDefaults.integer(forKey:)` returns 0
+  when unset, so a fresh install pushed brightness 0 and would have blacked out the screen once the
+  firmware started obeying it. Branch `fix/brightness-ledc-channel`. Compiles; **not yet flashed**.
+
+### Blocking bugs
+- [ ] **Frame buffer overwritten mid-draw** `[both]` — firmware clears `imageState` in the BLE
+  callback before `loop()` has drawn/saved, so a fast skip can overwrite `imageBuffer` during the
+  previous frame's draw and SD write. Produces the skip-render artifact **and can poison the cache**
+  with a half-and-half frame whose CRC passes. Prime suspect for the long-standing artifact.
+- [ ] **`awaitWriteWindow` lost wakeup** `[app]` — `peripheralIsReady` hops to the main actor, so
+  the wakeup can land while the continuation is nil and be lost; also overwrites any stored
+  continuation, leaking it. Causes stalled transfers that fail on timeout.
+- [ ] **Stale timeout kills healthy transfers** `[app]` — the SUCCESS timeout task has no
+  generation guard, unlike the cache/clear/ready paths. Can fire against a newer transfer.
+- [ ] **Token refresh race** `[app]` — two concurrent refreshes can use the same refresh token;
+  Spotify rotates them, so the loser gets `invalid_grant` and the Keychain is overwritten by
+  whichever finishes last. Most likely at BLE reconnect → looks like a random sign-out.
+
+### Image quality (do as ONE pass, with before/after photos — not with the brightness flash)
+- [ ] **Quantiser truncates instead of rounding** `[app]` — `Int(UInt16(oldR) >> 3)` biases error
+  to about +3 instead of straddling zero, doubling dither noise and (because Atkinson discards 25%
+  of error) throwing away brightness. Two-line fix, highest value in the image path.
+- [ ] **Grading clamp is cancelled by its own contrast filter** `[app]` — move `CIColorClamp` to
+  the end of `applyGrading`.
+- [ ] **Double gamma boost** `[both]` — the app grade and the panel gamma registers both push for
+  "punch", and the firmware curve deviates from `resources/` reference. Aggressive panel gamma also
+  breaks dithering, which relies on near-linear response between adjacent levels. Revert the panel
+  to reference, keep the look on the phone.
+- [ ] **Prefer largest album art, not 300×300** `[app]` — `preferredArtURLs` sorts exact 300×300
+  first. Download size does not affect BLE time; a 640→240 downscale averages away Spotify's JPEG
+  artifacts, which otherwise get locked in by dithering. Update `VALIDATION_CHECKLIST.md` too.
+- [ ] **Bump `CACHE_KEY_VERSION`** `[fw]` whenever any of the above lands — the cache is keyed on
+  album, not pipeline, so old entries keep the old look and you end up comparing two pipelines.
+- [ ] No serpentine scan `[app]` — error always diffuses one direction; faint worming in gradients.
+
+### UI / accessibility (see report §10, reviewed against Apple HIG)
+- [ ] **Connection state is colour-only and invisible to VoiceOver** `[app]` — `StatusDot` uses
+  green vs dim white with identical label text. Needs a shape difference + `.accessibilityLabel`.
+- [ ] **The spec's live strip inherits the same gap** — fix in the spec before building.
+- [ ] **Decide: drop the Appearance picker** — HIG says avoid app-specific appearance settings, but
+  explicitly allows permanently-dark for media-viewing apps. Recommend staying dark; it also avoids
+  converting every hard-coded `.white.opacity()` to semantic colours.
+- [ ] Fixed 11 pt debug type ignores Dynamic Type `[app]`.
+- [ ] Six accent colours with no system `[app]` — the monochrome spec removes this entirely.
+- [ ] Sign-in screen gives no reason for signing in `[app]`.
+- [ ] Album art resizes mid-download `[app]` — greedy `GeometryReader` + siblings appearing.
+- [ ] **Mirror the board's draw state in the app preview** `[app]` — show exactly what the display
+  shows at that instant. Fresh sends are exact for free: rows drawn = `bytesSent / 480`, mask the
+  preview to that height, and keep the *previous* cover visible below the scan line because that is
+  what the firmware leaves there. Cache hits need the app to stop sending `0xFF` (random) in the
+  5-byte header and pick the transition itself — the protocol already carries a transition index,
+  it is just unused (`BLEManager.sendRGB565`) — then run the same animation locally on its own
+  clock. No protocol change needed; the field already exists.
+- [ ] Blanket `.ignoresSafeArea()` pushes the bottom bar under the home indicator `[app]`.
+
+### Auth hardening (report §11 — PKCE itself is correctly built)
+- [ ] `restoreSession()` reports "Session expired" for network failures `[app]`.
+- [ ] Spotify's `error_description` is discarded `[app]`.
+- [ ] `KeychainHelper.save` ignores `SecItemAdd` status — silent logout one launch later `[app]`.
+- [ ] No `state` parameter `[app]` — low risk under `ASWebAuthenticationSession`, add anyway.
+
+### Hygiene / process
+- [ ] **Pin `platform = espressif32`** — unpinned, and core 3.x inverts the meaning of the
+  brightness fix. Highest-value hygiene item.
+- [ ] Remove `AgentDebugLog` — dead Cursor instrumentation shipping in the app `[app]`.
+- [ ] CI: fail on Swift warnings; regenerate the Xcode project to catch a forgotten
+  `gen_xcodeproj.py`. Both free, repo is public so Actions minutes are free.
+- [ ] `sdkconfig.defaults` is inert under `framework = arduino` — delete or mark as such `[fw]`.
+- [ ] Docs say a 32 s transfer timeout; code says 8 s.
+- [ ] `src/main.cpp:45` claims GPIO1 as LCD bus MISO; the LCD has no MISO and GPIO1 is a free
+  header pin. Pass `GFX_NOT_DEFINED` `[fw]`.
+- [ ] Perf, no visual change `[app]`: `CIContext.render(toBitmap:)` removes a whole redundant
+  rasterisation; `vDSP_vfltu8` replaces the UInt8→Float loop.
+- [ ] Move `SpotifyDisplay_UI_Spec.md` into `docs/` so it is versioned with the code.
+
+### Captured 2026-11-18 from the UI mockup session (features, not fixes)
+Mockups for these live on the design canvas. None are started.
+
+- [ ] **Set a still picture on the device** `[app]` — pick from the camera roll and display it
+  instead of album art. Easiest of the lot: `PHPickerViewController` → existing
+  `ImageProcessor.convertToRGB565()` → existing BLE image path. **No firmware change, no API, no
+  licensing question.** Needs a "pinned" mode so the next track does not overwrite it — app-side
+  only, since the app decides what to send. Ship this before the GIF work.
+- [ ] **GIF search from an API** `[both]` — mocked up. Extends roadmap item 19.
+  **Use GIPHY: Tenor is out.** Tenor's own quickstart carries the notice "As of Jan 2026, we are no
+  longer accepting new API clients", so a new key is not obtainable
+  (<https://developers.google.com/tenor/guides/quickstart>).
+  GIPHY specifics, from <https://developers.giphy.com/docs/api/>:
+  - API key required on every call. Beta keys are rate limited to **100 calls/hour**, `limit` max
+    50 per search. Production needs an application and GIPHY "will reach out to discuss pricing" —
+    100/hour is plenty for personal use. Separate keys per platform. Key goes in Info.plist like
+    `SpotifyClientID`, never committed.
+  - **"Powered By GIPHY" attribution is mandatory** and must be "conspicuously" displayed where the
+    API is used. It is in the mockup footer. Approved marks: `giphy-attribution-marks.zip`.
+  - Request the **small renditions** — `downsized_small` (max 200 kB) or `fixed_width_small`. We
+    only need 240×240, so never pull `original`.
+  - **Decided 2026-11-18: GIFs are never written to the SD card — only music art is cached.**
+    This sidesteps GIPHY's "do not cache or store copies of GIPHY's media assets" clause entirely,
+    and it simplifies the firmware. Frames live in **PSRAM only** and are lost on power cycle.
+  - Firmware side, revised by that decision: animation mode with a new packet magic, frames held
+    in PSRAM (no `/anim/` directory, no SD writes), `loop()` cycling on `millis()`. **Playback is
+    actually faster this way** — a PSRAM read per frame beats re-reading 115 KB off SD, which is
+    what would have capped the frame rate. Budget: 115,200 bytes/frame against 8 MB PSRAM, less
+    the existing image buffer and BLE stack — roughly 30–40 frames is the realistic ceiling, so
+    the ~12-frame trim (~1.4 MB, ~14 s over BLE) sits comfortably inside it.
+  - Consequence to show in the UI (already in the mockup): a GIF is a temporary mode. Unplug the
+    keychain and it is gone, and it falls back to album art. Re-sending costs another ~14 s.
+  - **The still picture is the exception**: it is the user's own photo with no third-party terms,
+    so that one *can* be written to SD and survive a reboot if a persistent "wallpaper" is wanted.
+- [ ] **Live log view in the app** `[both]` — mocked up, **but needs a protocol change and your
+  OK**. The firmware prints these lines over USB serial only; forwarding them to the phone means a
+  new notify characteristic (log level + UTF-8 line), rate limiting so logging does not starve the
+  image transfer, and a firmware-side ring buffer. Not started.
+- [ ] **Theme choice** `[app]` — three directions mocked: Crayon (Comic Sans, white, bright),
+  Quiet (dark, small colour accents), Serif (paper, Times New Roman). Undecided.
+  Note: **iOS has no Comic Sans** — the stack falls back to Chalkboard SE. Bundling Comic Neue
+  would be needed for a consistent look.
+- [ ] **Peer-to-peer similarity score** `[both]` — extends roadmap item 18 with the agreed visual:
+  two devices compare cached track IDs and each shows an **8-bit heart filled in proportion to the
+  match percentage**, bottom-up, with the caption "music similarity score" on the device screen.
+  240×240 device mockup is on the canvas. Prerequisite from the protocol doc: cache keys must be
+  **track-ID-based and identical across devices** — today the key is MD5 of `album:<id>`, which is
+  stable between devices, so this is closer than it looks. Still needs a device-to-device BLE role
+  (both units currently act only as peripherals).
+
+### Physical model (captured 2026-11-18 — requirements only, nothing designed)
+- Attachment: a **clip** in the spirit of the square iPod nano, possibly **plus a magnet**; or at
+  minimum a **slit in the plastic** for a keychain loop.
+- Constraint: the keychain attachment must hold the unit **flat and square to the plane (180°)** —
+  it should not hang skewed.
+- These are enclosure requirements to carry into the eventual CAD work. Per the standing
+  instruction, no enclosure or PCB design has been started.
+
+### Unused hardware already on the board (not bugs — future leverage)
+`VBAT_ADC` GPIO6 (the BLE Battery Service in `docs/BLE_PROTOCOL.md` says "requires hardware" — it
+is already wired), WS2812B RGB LED GPIO15, QMI8658 IMU GPIO47/48 + INT 45/46, `RST_Control` GPIO19.
+
+---
+
 ## ESP32 / `main.cpp` — laptop backlog (git + flash here)
 
 Do these on the machine where your **known-good** `src/main.cpp` lives; push before/after each logical chunk. Update [`docs/BLE_PROTOCOL.md`](docs/BLE_PROTOCOL.md) whenever GATT or file formats change.

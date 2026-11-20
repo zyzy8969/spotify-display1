@@ -16,7 +16,17 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var sdCacheCountLoading = false
     /// Increments whenever GATT is fully ready after (re)connect; consumers can use this as a sync session token.
     @Published private(set) var readyEpoch: UInt64 = 0
-    @Published var brightness: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_brightness"))
+    /// Backlight level used when the user has never moved the slider.
+    static let defaultBrightness: UInt8 = 200
+    /// Persisted backlight level. `integer(forKey:)` cannot tell "never set" from a stored 0,
+    /// so read the object first — otherwise a fresh install pushes 0 on connect and the display
+    /// goes dark (harmless only while the firmware's LEDC channel bug swallowed the write).
+    @Published var brightness: UInt8 = {
+        guard let stored = UserDefaults.standard.object(forKey: "ble_brightness") as? Int else {
+            return BLEManager.defaultBrightness
+        }
+        return UInt8(clamping: stored)
+    }()
     @Published private(set) var transferLog: [TransferLogEntry] = []
     @Published private(set) var currentLivePhase: String? = "idle"
     /// Shows "Cache hit" / "Sent to display" / nil on main screen.

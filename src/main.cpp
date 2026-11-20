@@ -37,6 +37,11 @@
 
 // Performance and timing constants
 #define TFT_BRIGHTNESS_MAX 200
+// LEDC PWM channel driving the backlight. NOT a GPIO: on Arduino-ESP32 core 2.x
+// ledcWrite()/ledcSetup() take a CHANNEL (0-7 on the S3), while ledcAttachPin()
+// binds that channel to the TFT_BL pin. Passing the pin number to ledcWrite()
+// silently targets a nonexistent channel and the backlight never changes.
+#define TFT_BL_PWM_CHANNEL 0
 #define TRANSITION_WIPE_DELAY_US 500
 #define CIRCULAR_WIPE_MAX_RADIUS 170
 
@@ -382,7 +387,7 @@ class BrightnessCallbacks: public BLECharacteristicCallbacks {
             return;
         }
         brightness = (uint8_t)value[0];
-        ledcWrite(TFT_BL, brightness);
+        ledcWrite(TFT_BL_PWM_CHANNEL, brightness);
         Serial.printf("BLE: Brightness set to %d\n", brightness);
     }
 };
@@ -1072,9 +1077,9 @@ void setup() {
 
   // FIXED: Initialize backlight BEFORE display (prevents white screen)
   pinMode(TFT_BL, OUTPUT);
-  ledcSetup(0, 5000, 8);        // Setup PWM: channel 0, 5kHz, 8-bit
-  ledcAttachPin(TFT_BL, 0);
-  ledcWrite(0, 50);              // Start at low brightness (20%) during init
+  ledcSetup(TFT_BL_PWM_CHANNEL, 5000, 8);   // 5kHz, 8-bit duty (0-255)
+  ledcAttachPin(TFT_BL, TFT_BL_PWM_CHANNEL);
+  ledcWrite(TFT_BL_PWM_CHANNEL, 50);        // Low brightness during init
 
   // Hardware reset sequence
   pinMode(TFT_RST, OUTPUT);
@@ -1107,7 +1112,7 @@ void setup() {
   bus->endWrite();
 
   // Increase backlight to normal brightness after init complete
-  ledcWrite(0, brightness);
+  ledcWrite(TFT_BL_PWM_CHANNEL, brightness);
 
   // Initialize SD card for caching
   // Try default SPI first, then FSPI, then HSPI
