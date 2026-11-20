@@ -29,6 +29,9 @@ Indices 5 (Slide), 10 (Curtain) and 16 (Zigzag) duplicated other transitions and
 selection skips them, and if forced they draw Wipe Left, Vertical Split and Barn Doors. Other indices are
 unchanged. `0xFF` (random) is still what the iOS app sends. `TRANSITION:<name>` messages can carry the new names.
 
+Changes in 1.7.1: documents Message notifies the firmware already sent but this file did not list
+(`CACHE_HIT_MS:`, `CACHE_MISS_MS:`, `TRANSITION:`, and the `SUCCESS` that follows a cache hit). See
+**Message reference**. Firmware, the iOS app and the Python tools are unchanged.
 
 Changes in 1.7: firmware notifies Message `HB` every ~1 s while connected (see **Heartbeat**). Clients that
 log or collect unknown messages must ignore it.
@@ -108,6 +111,27 @@ app briefly. The iOS app polls Spotify once per `HB` (skipped when its foregroun
 0.8 s), so the display keeps up with song changes while the phone is locked, ~1 s behind at worst.
 
 `HB` carries no state. Clients must not treat it as `READY`, `SUCCESS`, or a reply to any request.
+
+## Message reference
+
+Every UTF-8 notify the firmware sends on **Message** (`ffe4`), in `src/main.cpp`. Clients must ignore any
+message they do not recognise.
+
+| Message | When | Clients |
+|---------|------|---------|
+| `READY` | Connect callback (usually lost; read Status instead) | Readiness |
+| `HB` | Every ~1 s while connected | iOS: background poll tick. Not a reply to anything |
+| `CACHE_HIT_MS:<ms>` | Cache hit, after SD load + transition | Telemetry only |
+| `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS` | iOS: shown in Stats |
+| `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |
+| `SUCCESS` | (a) after a frame's SD save, with Image `0x01`; (b) after a cache hit, right after the Cache `0x01` reply | (a) ends the transfer wait. (b) is redundant with `CACHE_RENDERED`; the iOS app accepts it only while it is waiting for a render confirmation, and ignores it otherwise |
+| `CACHE_MISS_MS:<ms>` | Cache miss, before the Cache `0x00` reply | Telemetry only |
+| `CACHE_COUNT:<n>` | Stats request, and after a clear | Required for app UI |
+| `CACHE_HEALTH:…` | Stats request | Optional telemetry |
+| `CACHE_CLEARED`, `CACHE_CLEAR_MS:<ms>` | Clear request | See Cache check |
+| `ERROR: <reason>` | Invalid header, size mismatch, buffer overflow (with Image `0x02`) | Fail the in-flight transfer |
+
+Cache-hit order on the wire: `CACHE_HIT_MS` → `TRANSITION` → `CACHE_RENDERED` → Cache `0x01` → `SUCCESS`.
 
 ## Image format
 

@@ -155,7 +155,14 @@ dithering happens app-side.)
   `requestResync`/`lastSentToDisplayTrackId` to stop 1 Hz resend loops.
 - `ImageProcessor` — JPEG decode → CIImage Lanczos resize + grade (one GPU render) → RGBA
   rasterize → Atkinson dither → packed LE RGB565.
-- `ContentView` — `AlbumArtView`, `PlaybackControls`, `DebugStrip`, `SettingsView`.
+- Views — `ContentView` (root: owns the managers, picks the screen, applies the theme),
+  `NowPlayingView` (now playing + sending state, live strip, playback controls),
+  `SignedOutView`, `SettingsView` (incl. theme picker), `StatsView` (transfer log + live
+  details, shown when "show stats" is on). Views only *read* manager state.
+- Theme system — `Theme` (token struct per theme, exposed as `\.theme` in the environment),
+  `ThemeTypography` (text roles → fonts scaled with Dynamic Type), `ThemeCopy` (wording per
+  theme), `CrayonShapes` (seeded wobble shapes and icons; wobble 0 = crisp for Quiet/Serif),
+  `ThemeComponents`. Add a theme by adding a `ThemeID` case and its tokens, not new screens.
 - `KeychainHelper` holds tokens; Client ID comes from `Resources/Info.plist`
   (`SpotifyClientID`) with a UserDefaults override in Settings.
 
@@ -184,10 +191,14 @@ Changes here need on-device stress testing (rapid skip, disconnect mid-transfer)
 roadmap and bug backlog) where they disagree. `docs/DEV_HANDOFF.md` records what was last
 committed and what still needs device verification.
 
-The pending iOS UI redesign (minimalist dark full-screen, monochrome white/black only with no
-accent colors, live strip, debug stats hidden behind a Settings toggle) is tracked against
-`SpotifyDisplay_UI_Spec.md` — **that spec file is not present in this repo or its git history.**
-Ask for it before implementing the redesign rather than inferring the spec.
+The iOS UI follows the user's Design canvas mockup, which defines three user-selectable themes:
+**Crayon** (default; white, hand-drawn crayon marks, Chalkboard SE), **Quiet** (dark, system
+font, small colour accents) and **Serif** (white, Times New Roman, rules and dot leaders, one
+rust accent). The theme is picked in Settings and stored under `@AppStorage("uiTheme")`. The
+older monochrome `SpotifyDisplay_UI_Spec.md` is superseded; only its live strip under the art
+and its "debug stats behind a Settings toggle" ideas were kept. The canvas's live serial log,
+"+ gif" upload and 240x240 device-screen boards need firmware or BLE protocol changes and are
+not built; ask before starting them.
 
 ## Hardware pins (do not change without asking)
 

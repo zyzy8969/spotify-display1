@@ -63,3 +63,41 @@ Last updated: 2026-04-15
 - Disable internet for 10-20 seconds, then restore it.
 - Expected: app auto-recovers and updates current song without reopening app.
 - Capture cache-check timing separately (cache-hit songs) before/after firmware cache-lookup optimization (`CACHE_HIT_MS`, `CACHE_MISS_MS`, serial lookup timings).
+
+## iOS UI (themes)
+
+Added with the three-theme UI (`feat/themes-ui`). Nothing here has been run yet. Repeat the visual
+checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
+
+- Safe area, Face ID iPhone: the gear and status dots sit below the status bar / Dynamic Island,
+  and the footer line ("47 saved" / "47 cached") sits fully above the home indicator.
+- Safe area, home-button iPhone (SE) if available: nothing is clipped at the top, the footer has
+  a small margin above the bottom edge, and the playback buttons are fully on screen.
+- Art does not jump: skip to a song that is *not* cached and watch a fresh send. The cover must
+  stay the same size and position from first byte to ACK, and while the error line or the
+  "sending 62%" footer appears and disappears.
+- Preview matches the keychain: during a fresh send the app keeps the previous cover while the
+  strip fills, then crossfades to the new one at the moment the keychain shows it (both change
+  together, within about a second). On a cache hit the app's cover changes as the keychain's
+  transition finishes. With Reduce Motion on, the app cuts instead of crossfading.
+- Strip: after a cache hit it shows a filled dot and a solid line; after a fresh send a hollow
+  ring; while sending a growing line; while preparing a dashed line.
+- Dynamic Type: Settings > Accessibility > Display & Text Size > Larger Text, largest size. Every
+  screen stays usable (main screen scrolls if needed; dot names hide but the dots stay), nothing
+  overlaps, buttons still work. Turn on Bold Text and check that Crayon and Serif text gets bolder.
+- VoiceOver: dots read "Spotify connected" / "Display not connected"; the strip reads "Display"
+  plus its state; playback buttons read "Previous track", "Play"/"Pause", "Next track"; the
+  "show stats" switch reads as a switch with its on/off value; the theme options read "selected".
+- Crayon strokes render without lag: rapid skips and a full fresh send with the main screen open
+  stay smooth, with no visible stutter while the progress strip fills.
+- Theme switching: changing the theme in Settings updates the open sheet and the main screen
+  immediately, Quiet turns the status bar light, and the choice survives an app relaunch.
+- Failed send recovers: start a fresh (uncached) send, then switch the board off or walk out of
+  range mid-transfer. Once the app shows the error, the strip must not stay dashed. With the board
+  switched off the app shows the new song's cover; after a send rejected with `ERROR:` (board
+  still connected) both the app and the keychain keep the previous cover until the retry lands.
+- Skip right after a cache hit: play a cached song, then skip at once to an uncached one. The
+  preview must end on the new song's cover, never flip back to the cached song's cover.
+- Stats sheet opens at half height with a grabber and drags to full; Settings opens full height
+  with no grabber. Both close by swiping down.
+- Client ID field: tapping it must not offer saved passwords above the keyboard.

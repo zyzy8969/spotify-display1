@@ -23,6 +23,17 @@ struct AlbumImage: Codable {
     let width: Int?
 }
 
+/// Where `BLEManager.processTrack` is for the current track (UI state only).
+enum SendStage: Equatable {
+    /// Nothing in flight.
+    case idle
+    /// Cache lookup / art download / waiting for the board; no new pixels on the display yet.
+    case checking
+    /// Cache miss: the new cover is known and is being converted or sent; the display keeps the
+    /// previous cover until the whole new frame has arrived, then draws it with a transition.
+    case preparingFresh
+}
+
 struct TransferLogEntry: Identifiable {
     let id = UUID()
     let timestamp = Date()
