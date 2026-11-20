@@ -235,6 +235,16 @@ class MyServerCallbacks: public BLEServerCallbacks {
         // Display drawing is deferred to loop() — BTC_TASK stack is tiny.
     }
 
+    // Ask the phone for a 15 ms connection interval (iOS default is ~30 ms). Image transfer
+    // throughput scales with connection events: ~28 KB/s at 30 ms → one 115 KB cover took ~3.7 s,
+    // so quick skips cut transfers off before they finished. 15 ms min = max is within Apple's
+    // accessory guidelines; iOS may still pick its own value. Units: 1.25 ms (interval), 10 ms (timeout).
+    // Lightweight (queues a GAP request) — safe on the small BTC_TASK stack.
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
+        pServer->updateConnParams(param->connect.remote_bda, 12, 12, 0, 400);
+        Serial.println("BLE: Requested 15 ms connection interval");
+    }
+
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
         uint8_t notReady = 0x00;
