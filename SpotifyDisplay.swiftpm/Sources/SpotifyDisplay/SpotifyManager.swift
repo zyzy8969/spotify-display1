@@ -33,7 +33,16 @@ final class SpotifyManager: ObservableObject {
     /// (see stale flip-back guard in `pollOnce`). Several, not one: on rapid skips A→B→C, Spotify
     /// can briefly report B *or* A again, and either would cancel C's transfer and redraw old art.
     private var recentlyReplaced: [String: Date] = [:]
-    private let staleFlipBackWindowSeconds: TimeInterval = 1.5
+    /// Serial logs (2026-11-20) show Spotify reporting the previous song again 2–3 s after a switch.
+    private let staleFlipBackWindowSeconds: TimeInterval = 3.0
+
+    /// Newest Spotify `timestamp` (playback-state change time) applied so far. A later answer with an
+    /// older timestamp comes from a server that has not seen the latest skip, so it is dropped.
+    private var newestPlaybackTimestamp: Int64?
+    /// When we started dropping older-timestamp answers. If they persist this long, accept them:
+    /// the timestamp went backwards for a real reason (another device took over), not lag.
+    private var olderTimestampSince: Date?
+    private let olderTimestampAcceptAfterSeconds: TimeInterval = 5.0
 
     /// Polls overlap (0.45 s loop, board-heartbeat poll, 250 ms polls after an in-app skip), and
     /// their answers can arrive out of order. An answer older than one already applied describes
@@ -498,6 +507,17 @@ final class SpotifyManager: ObservableObject {
             let state = try await fetchCurrentlyPlayingWithRefresh()
             guard mySeq > lastAppliedPollSeq else { return }
             lastAppliedPollSeq = mySeq
+            if let ts = state.timestamp {
+                if let newest = newestPlaybackTimestamp, ts < newest {
+                    let since = olderTimestampSince ?? Date()
+                    olderTimestampSince = since
+                    if Date().timeIntervalSince(since) < olderTimestampAcceptAfterSeconds {
+                        return
+                    }
+                }
+                newestPlaybackTimestamp = ts
+                olderTimestampSince = nil
+            }
             lastError = nil
 
             guard let item = state.item else {
@@ -876,7 +896,7 @@ final class SpotifyManager: ObservableObject {
         }
         if http.statusCode == 204 {
             rateLimitedUntil = nil
-            return CurrentlyPlayingResponse(item: nil, isPlaying: false)
+            return CurrentlyPlayingResponse(item: nil, isPlaying: false, timestamp: nil)
         }
         guard (200 ... 299).contains(http.statusCode) else {
             throw SpotifyAPIError.http(http.statusCode)
@@ -1004,10 +1024,14 @@ private struct TokenResponse: Codable {
 struct CurrentlyPlayingResponse: Codable {
     let item: Track?
     let isPlaying: Bool
+    /// Unix ms when Spotify last changed playback state (play, pause, skip, new song…). Used to drop
+    /// answers from a lagging Spotify server that still describes the song before a skip.
+    let timestamp: Int64?
 
     enum CodingKeys: String, CodingKey {
         case item
         case isPlaying = "is_playing"
+        case timestamp
     }
 }
 

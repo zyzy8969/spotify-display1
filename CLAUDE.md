@@ -91,7 +91,8 @@ Copy `env.example` to `.env` for `SPOTIFY_CLIENT_ID`/`SECRET`. `.env` is gitigno
 
 Spotify Web API (poll ~1 Hz) → art URL → download JPEG → `ImageProcessor` resize/grade/
 Atkinson-dither → 115,200 bytes LE RGB565 → BLE cache-key probe → hit: firmware renders from
-SD; miss: chunked BLE image write → firmware progressive line draw + SD save → ACK.
+SD; miss: chunked BLE image write → (nothing drawn until complete) → firmware transition draw +
+SD save → ACK.
 
 ### Firmware (`src/main.cpp`, ~1900 lines, single file)
 
@@ -104,8 +105,8 @@ work into a callback — it overflows the stack and crashes the board.
 
 `loop()` is the single owner of ordered state transitions, in this sequence: pending stats →
 pending clear-cache → pending cache check (which first *resets* a partial `RECEIVING_DATA`
-frame so SD load cannot race progressive draw) → progressive line draw of newly arrived bytes →
-transfer-complete (final rows, SD save, then ACK) → connect/disconnect UI. Exception: a cache
+frame) → transfer-complete (copy rx → image, transition draw, SD save, then ACK) →
+connect/disconnect UI. Exception: a cache
 check waits one iteration while `imageTransferComplete` is pending, so a finished frame is drawn and
 saved (under `transferCacheKey`, snapshotted at its header) before a hit can load over
 `imageBuffer`. Disconnect recovery
@@ -115,12 +116,11 @@ resets; keep them there.
 Transfer state machine: `WAITING_FOR_SIZE` → `RECEIVING_DATA` → `COMPLETE`. A valid header
 arriving mid-frame is treated as a client resync and discards the partial frame.
 
-Two PSRAM frame buffers: BLE chunks land only in `rxBuffer` (progressive draw reads it);
-`imageBuffer` is the last *complete* picture (SD load/save, transitions). On completion `loop()`
-copies rx → image. When a skip abandons a partly drawn frame (`rxFrameSeq` bump or cache-check
-reset), `restoreFrontImage()` redraws `imageBuffer` so no half frame stays on screen.
-`lastDrawnBytes` is written only by `loop()`. If chunks stop for 2 s mid-frame (iOS suspended the
-app), `loop()` restores the last picture but keeps the frame; resumed chunks repaint from row 0.
+Two PSRAM frame buffers: BLE chunks land only in `rxBuffer`, and nothing is drawn from it while
+it fills (owner's choice, 2026-11-20: "whole image, then show" — no progressive draw). On
+completion `loop()` copies rx → `imageBuffer` and draws it with a transition, like a cache hit.
+`imageBuffer` is the picture on the panel (SD load/save, transitions). A transfer abandoned by a
+skip or an app suspension therefore never changes the screen.
 
 Cache: 16-byte MD5 key from the app, stored as `/cache/v1_<key>.bin` with a CRC32 trailer.
 An in-memory index (`cacheIndex`, up to 1024 entries) is built at startup to avoid SD scans.
@@ -166,8 +166,10 @@ Changes here need on-device stress testing (rapid skip, disconnect mid-transfer)
   `CACHE_RENDERED` message rather than showing optimistic cache-hit UI.
 - `SpotifyManager` skip/resync sequencing and in-flight cancellation. Polls overlap and can
   answer out of order; `pollOnce` drops any answer older than one already applied (`pollSeq`)
-  and ignores every recently replaced track for 1.5 s (`recentlyReplaced`). Without that, an old
-  answer re-sends the previous song right after the new one is drawn.
+  and ignores every recently replaced track for 3 s (`recentlyReplaced`). It also drops answers
+  whose Spotify `timestamp` is older than the newest seen (a lagging Spotify server; accepted after
+  5 s so a real device switch still goes through). Without these, an old answer re-sends the
+  previous song right after the new one is drawn.
 - `src/main.cpp` partial-frame and transition sequencing during rapid track changes.
 - Skip-render artifact: root cause found 2026-11-19 — cache replies carry no song id, so after a
   skip the old song's late reply was matched to the new song. The app now never sends a cache check
