@@ -35,6 +35,14 @@ final class SpotifyManager: ObservableObject {
     private var recentlyReplaced: [String: Date] = [:]
     /// Serial logs (2026-11-20) show Spotify reporting the previous song again 2–3 s after a switch.
     private let staleFlipBackWindowSeconds: TimeInterval = 3.0
+    /// ...and once ~4 s after (a fresh song drew, then the old one's art covered it). Going back to a
+    /// song replaced within this window is acted on only if Spotify keeps reporting it.
+    private let returnConfirmWindowSeconds: TimeInterval = 20.0
+    /// How long every answer must agree on the "back to an earlier song" before it counts. Stale
+    /// answers come interleaved with correct ones; a real "previous" holds steadily.
+    private let returnConfirmHoldSeconds: TimeInterval = 1.5
+    private var returnCandidateId: String?
+    private var returnCandidateSince: Date?
 
     /// Newest Spotify `timestamp` (playback-state change time) applied so far. A later answer with an
     /// older timestamp comes from a server that has not seen the latest skip, so it is dropped.
@@ -52,6 +60,17 @@ final class SpotifyManager: ObservableObject {
 
     private weak var monitoredBle: BLEManager?
     private var artSendTask: Task<Void, Never>?
+
+    /// Prefetch (BLE_PROTOCOL 1.8): once the current song is on the board, send the next queued
+    /// song's cover to the SD card without drawing, so skipping to it is a fast cache hit.
+    /// Any real song change cancels it (`cancelOngoingTransfer` + this task).
+    private var prefetchTask: Task<Void, Never>?
+    /// Tracks whose cover was stored (or found) on the board this BLE session; reset on reconnect.
+    private var prefetchedTrackIds = Set<String>()
+    private var prefetchedForReadyEpoch: UInt64?
+    /// The queue endpoint needs `user-read-playback-state`; tokens from before it was added get
+    /// 401/403. Prefetch then stays off until the user signs in again.
+    private var prefetchUnavailable = false
     private var artInFlightTrackId: String?
     /// Track ID whose album art preview was last downloaded for the app UI.
     private var lastPreviewArtTrackId: String?
@@ -139,7 +158,8 @@ final class SpotifyManager: ObservableObject {
             URLQueryItem(name: "client_id", value: clientId),
             URLQueryItem(name: "response_type", value: "code"),
             URLQueryItem(name: "redirect_uri", value: redirectURI),
-            URLQueryItem(name: "scope", value: "user-read-currently-playing user-modify-playback-state"),
+            // user-read-playback-state: needed by GET /me/player/queue for cover prefetch.
+            URLQueryItem(name: "scope", value: "user-read-currently-playing user-read-playback-state user-modify-playback-state"),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "code_challenge", value: challenge)
         ]
@@ -197,6 +217,7 @@ final class SpotifyManager: ObservableObject {
 
             try await exchangeCode(code, clientId: clientId, verifier: verifier)
             isAuthenticated = true
+            prefetchUnavailable = false  // a fresh sign-in grants the queue scope
         } catch {
             lastError = error.localizedDescription
         }
@@ -213,6 +234,7 @@ final class SpotifyManager: ObservableObject {
         lastSentToDisplayTrackId = nil
         lastSentToDisplayArtURL = nil
         rateLimitedUntil = nil
+        cancelPrefetch()
         monitoredBle?.cancelOngoingTransfer()
         artSendTask?.cancel()
         artSendTask = nil
@@ -351,6 +373,7 @@ final class SpotifyManager: ObservableObject {
     }
 
     func stopMonitoring() {
+        cancelPrefetch()
         monitoredBle?.cancelOngoingTransfer()
         artSendTask?.cancel()
         artSendTask = nil
@@ -530,6 +553,7 @@ final class SpotifyManager: ObservableObject {
                     bleManager.clearTopTransferStatus()
                     pendingTrack = nil
                     pendingSince = nil
+                    cancelPrefetch()
                     bleManager.cancelOngoingTransfer()
                     artSendTask?.cancel()
                     artSendTask = nil
@@ -557,14 +581,31 @@ final class SpotifyManager: ObservableObject {
                 return
             }
 
-            // Right after a skip, Spotify can briefly report the track we just switched away from.
-            // Acting on it cancels the new song's transfer mid-draw (stray rows of new art over the
-            // old picture) or redraws the old art. Ignore it for a short window; a real "previous"
-            // still goes through once the window passes.
+            // After a skip, Spotify can keep reporting the track we switched away from for seconds,
+            // interleaved with the new one. Acting on it cancels the new song or covers its art with
+            // the old cached art. Within 3 s: ignore outright. Within 20 s: act only once every
+            // answer has agreed for `returnConfirmHoldSeconds` (a real "previous" does; lag does not).
+            // A song not shown recently is never delayed.
             let now = Date()
-            recentlyReplaced = recentlyReplaced.filter { now.timeIntervalSince($0.value) < staleFlipBackWindowSeconds }
-            if recentlyReplaced[item.id] != nil {
-                return
+            recentlyReplaced = recentlyReplaced.filter { now.timeIntervalSince($0.value) < returnConfirmWindowSeconds }
+            if item.id == currentTrack?.id {
+                returnCandidateId = nil  // an answer for the current song breaks any "going back" run
+            } else if let replacedAt = recentlyReplaced[item.id] {
+                if now.timeIntervalSince(replacedAt) < staleFlipBackWindowSeconds {
+                    return
+                }
+                if returnCandidateId != item.id {
+                    returnCandidateId = item.id
+                    returnCandidateSince = now
+                    return
+                }
+                if let since = returnCandidateSince, now.timeIntervalSince(since) < returnConfirmHoldSeconds {
+                    return
+                }
+                returnCandidateId = nil
+                recentlyReplaced[item.id] = nil
+            } else {
+                returnCandidateId = nil
             }
             if let previous = currentTrack?.id, previous != item.id {
                 recentlyReplaced[previous] = now
@@ -575,6 +616,7 @@ final class SpotifyManager: ObservableObject {
             currentTrack = item
 
             if let inflight = artInFlightTrackId, inflight != item.id {
+                cancelPrefetch()
                 bleManager.cancelOngoingTransfer()
                 artSendTask?.cancel()
                 artSendTask = nil
@@ -603,6 +645,7 @@ final class SpotifyManager: ObservableObject {
                 // Either board confirmed this track, or we already know it has no art.
                 if bleManager.lastConfirmedTrackId == item.id || lastSentToDisplayArtURL == nil {
                     ensureAlbumArtPreview(trackId: item.id, artURLs: artURLs, bleManager: bleManager)
+                    schedulePrefetch(bleManager: bleManager, currentTrackId: item.id, currentAlbumId: item.album?.id)
                     return
                 }
             }
@@ -635,6 +678,7 @@ final class SpotifyManager: ObservableObject {
                 return
             }
 
+            cancelPrefetch()  // the real song always wins the link
             bleManager.cancelOngoingTransfer()
             artSendTask?.cancel()
             artSendTask = nil
@@ -698,6 +742,9 @@ final class SpotifyManager: ObservableObject {
                         self.artSendTask = nil
                         self.pollStatus = "Playing: \(self.currentTrack?.name ?? capturedName)"
                         await self.flushPendingResyncIfNeeded()
+                        // The current song is on the board: use the idle link for the next one.
+                        self.schedulePrefetch(bleManager: ble, currentTrackId: capturedId,
+                                              currentAlbumId: capturedAlbumId)
                     } else {
                         // Transfer finished for `capturedId` but UI already moved — still dedupe so we do not 1 Hz resend.
                         self.lastSentToDisplayTrackId = capturedId
@@ -830,6 +877,82 @@ final class SpotifyManager: ObservableObject {
             }
         }
         return out
+    }
+
+    // MARK: - Prefetch (BLE_PROTOCOL 1.8)
+
+    /// The current song a prefetch was last started for, so the 0.45 s poll doesn't re-read the queue.
+    private var prefetchAttemptedForTrackId: String?
+    private var prefetchGeneration: UInt64 = 0
+
+    private func cancelPrefetch() {
+        prefetchTask?.cancel()
+        prefetchTask = nil
+    }
+
+    /// Sends the next queued song's cover to the board's SD card (not drawn). Runs at most once per
+    /// current song, only when no real send is in flight. Failures are silent: prefetch is an
+    /// optimisation, the normal path still sends the cover when the song starts.
+    private func schedulePrefetch(bleManager: BLEManager, currentTrackId: String, currentAlbumId: String?) {
+        guard !prefetchUnavailable, prefetchTask == nil, artSendTask == nil,
+              prefetchAttemptedForTrackId != currentTrackId else { return }
+        // Locked / backgrounded: iOS keeps the app alive only on borrowed background time. Prefetch is
+        // optional, so skip it when little is left and let the next heartbeat (fresh budget) retry —
+        // the real song's send must never be starved. Not marked as attempted, so it does retry.
+        let app = UIApplication.shared
+        if app.applicationState != .active, app.backgroundTimeRemaining < 15 { return }
+        prefetchAttemptedForTrackId = currentTrackId
+        if prefetchedForReadyEpoch != bleManager.readyEpoch {
+            // New BLE session: the board may have been reflashed or its cache cleared.
+            prefetchedTrackIds.removeAll()
+            prefetchedForReadyEpoch = bleManager.readyEpoch
+        }
+        prefetchGeneration &+= 1
+        let myGen = prefetchGeneration
+        // Hold background time for the whole prefetch (1 s wait + queue read + transfer), taken now,
+        // synchronously: the poll that got us here ends its own background time when it returns, and
+        // a prefetch suspended mid-way would stall until the next wake-up.
+        bleManager.holdTransferBackgroundTime()
+        prefetchTask = Task { @MainActor [weak self] in
+            defer { bleManager.releaseTransferBackgroundTime() }
+            // Only clear the slot if it is still ours: a cancelled older prefetch finishing late must
+            // not orphan a newer one (it could then never be cancelled by a song change).
+            defer { if let self, self.prefetchGeneration == myGen { self.prefetchTask = nil } }
+            // Let the board finish saving the current cover, and let a quick follow-up skip win.
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self, !Task.isCancelled, self.artSendTask == nil else { return }
+            guard let queue = try? await self.fetchQueue(), !Task.isCancelled else { return }
+            // First upcoming song with art whose cover isn't already known to be on the board.
+            // Same album = same cache key as the current song, so it is already there.
+            guard let next = queue.first(where: { t in
+                t.id != currentTrackId && !self.prefetchedTrackIds.contains(t.id)
+                    && !(currentAlbumId != nil && t.album?.id == currentAlbumId)
+                    && !self.preferredArtURLs(from: t).isEmpty
+            }) else { return }
+            do {
+                _ = try await bleManager.prefetchTrack(imageURLs: Array(self.preferredArtURLs(from: next).prefix(2)),
+                                                       albumId: next.album?.id)
+                self.prefetchedTrackIds.insert(next.id)
+            } catch {
+                // Cancelled by a real song change, or a transfer hiccup: the song will be sent normally.
+            }
+        }
+    }
+
+    private func fetchQueue() async throws -> [Track] {
+        try await ensureAccessTokenFresh()
+        guard let token = accessToken else { throw SpotifyAPIError.noToken }
+        var req = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player/queue")!)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw SpotifyAPIError.badResponse }
+        if http.statusCode == 401 || http.statusCode == 403 {
+            // Token from before the queue scope was added. Off until the next sign-in.
+            prefetchUnavailable = true
+            return []
+        }
+        guard (200 ... 299).contains(http.statusCode) else { return [] }
+        return (try? JSONDecoder().decode(QueueResponse.self, from: data))?.queue ?? []
     }
 
     /// Downloads album art for the app preview if not already showing for this track.
@@ -1032,6 +1155,24 @@ struct CurrentlyPlayingResponse: Codable {
         case item
         case isPlaying = "is_playing"
         case timestamp
+    }
+}
+
+/// `GET /v1/me/player/queue`. Items can be podcast episodes, which don't decode as `Track`; those
+/// are skipped instead of failing the whole response.
+struct QueueResponse: Decodable {
+    let queue: [Track]
+
+    private struct Lossy: Decodable {
+        let track: Track?
+        init(from decoder: Decoder) throws { track = try? Track(from: decoder) }
+    }
+
+    enum CodingKeys: String, CodingKey { case queue }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        queue = (try c.decodeIfPresent([Lossy].self, forKey: .queue) ?? []).compactMap(\.track)
     }
 }
 

@@ -117,6 +117,10 @@ final class BLEManager: NSObject, ObservableObject {
     private let imagePayloadBytes = 115_200
     private let chunkSize = 512
     private let cacheMagic = UInt32(0xDEADBEEF)
+    /// BLE_PROTOCOL 1.8 prefetch: "is this cover on SD?" without drawing it.
+    private let cacheProbeMagic = UInt32(0xDEADBEE0)
+    /// BLE_PROTOCOL 1.8 prefetch: image header transition byte meaning "save to SD, don't draw".
+    private let storeOnlyTransition: UInt8 = 0xFE
     /// Must match `main.cpp` stats request magic.
     private let statsMagic = UInt32(0xC0FFEEE1)
 
@@ -193,8 +197,14 @@ final class BLEManager: NSObject, ObservableObject {
         central.scanForPeripherals(withServices: [serviceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
     }
 
-    /// Cache-only check (same 20-byte packet as Python).
+    /// Cache-only check (same 20-byte packet as Python). On a hit the board draws the cover.
     func checkCacheHit(cacheKey: Data) async throws -> Bool {
+        try await sendCacheQuery(magic: cacheMagic, cacheKey: cacheKey)
+    }
+
+    /// Normal check (`cacheMagic`, draws on a hit) or prefetch probe (`cacheProbeMagic`, never draws).
+    /// Both are answered with one byte on the Cache characteristic, so both count as an owed reply.
+    private func sendCacheQuery(magic: UInt32, cacheKey: Data) async throws -> Bool {
         try ensureGattReady()
         guard let p = peripheral, let c = cacheChar else { throw SpotifyDisplayError.notConnected }
 
@@ -202,7 +212,7 @@ final class BLEManager: NSObject, ObservableObject {
         cacheContinuation = nil
 
         var packet = Data()
-        withUnsafeBytes(of: cacheMagic.littleEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: magic.littleEndian) { packet.append(contentsOf: $0) }
         packet.append(cacheKey)
 
         cacheCheckGen &+= 1
@@ -496,7 +506,9 @@ final class BLEManager: NSObject, ObservableObject {
         cacheRenderConfirmed = false
     }
 
-    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64) async throws {
+    /// `storeOnly` (prefetch): the board saves the frame to SD without drawing it, and this call leaves
+    /// every piece of UI state (progress, status text, live phase) alone.
+    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64, storeOnly: Bool = false) async throws {
         try ensureTransferEpoch(epochAtStart)
         try ensureGattReady()
         guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
@@ -510,14 +522,16 @@ final class BLEManager: NSObject, ObservableObject {
         try ensureTransferEpoch(epochAtStart)
 
         var header = Data()
-        header.append(0xFF) // Always random transition on firmware
+        header.append(storeOnly ? storeOnlyTransition : 0xFF) // 0xFF = random transition on firmware
         withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         p.writeValue(header, for: img, type: .withResponse)
 
         try ensureTransferEpoch(epochAtStart)
 
-        isTransferring = true
-        transferProgress = 0
+        if !storeOnly {
+            isTransferring = true
+            transferProgress = 0
+        }
 
         let total = rgb565.count
         var offset = 0
@@ -538,7 +552,7 @@ final class BLEManager: NSObject, ObservableObject {
             let wtype: CBCharacteristicWriteType = useWithoutResponse ? .withoutResponse : .withResponse
             p.writeValue(chunk, for: img, type: wtype)
             offset = end
-            transferProgress = Double(offset) / Double(total)
+            if !storeOnly { transferProgress = Double(offset) / Double(total) }
             if !useWithoutResponse {
                 try await Task.sleep(nanoseconds: 1_000_000)
             }
@@ -604,6 +618,8 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
+        if storeOnly { return }
+
         isTransferring = false
         transferProgress = 0
         statusMessage = "Sent to display"
@@ -612,6 +628,47 @@ final class BLEManager: NSObject, ObservableObject {
         Task { @MainActor in
             try? await self.refreshSDCacheCount()
         }
+    }
+
+    enum PrefetchOutcome { case alreadyCached, stored, noArt }
+
+    /// Puts the cover of a song that is NOT playing yet on the board's SD card, so that when it starts
+    /// its cache check is a hit (~1.5 s instead of ~4 s). Never draws, never touches the preview art
+    /// or status UI. A real track change calls `cancelOngoingTransfer()`, which bumps the epoch and
+    /// aborts this at its next check; the board drops a partial frame on the next cache check.
+    func prefetchTrack(imageURLs: [String], albumId: String?) async throws -> PrefetchOutcome {
+        holdTransferBackgroundTime()
+        defer { releaseTransferBackgroundTime() }
+        let epochAtStart = transferEpoch
+        guard let primaryURL = imageURLs.first else { return .noArt }
+
+        if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
+        try ensureTransferEpoch(epochAtStart)
+
+        let cacheKey = String.cacheKeySource(albumId: albumId, imageURL: primaryURL).md5Digest
+        if try await sendCacheQuery(magic: cacheProbeMagic, cacheKey: cacheKey) { return .alreadyCached }
+        try ensureTransferEpoch(epochAtStart)
+
+        let download = Task { try await self.fetchAlbumArtData(urlCandidates: imageURLs) }
+        activeDownloadTask = download
+        let data: Data
+        do {
+            data = try await download.value
+        } catch {
+            if activeDownloadTask == download { activeDownloadTask = nil }
+            throw error
+        }
+        if activeDownloadTask == download { activeDownloadTask = nil }
+        try ensureTransferEpoch(epochAtStart)
+
+        let rgb565 = try await Task.detached(priority: .utility) {
+            try ImageProcessor.convertToRGB565(imageData: data)
+        }.value
+        try ensureTransferEpoch(epochAtStart)
+        guard rgb565.count == imagePayloadBytes else { throw SpotifyDisplayError.conversionFailed }
+
+        try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
+        return .stored
     }
 
     /// Ask ESP32 (firmware with stats magic) how many `.bin` files are in `/cache`.
@@ -972,10 +1029,16 @@ extension BLEManager: CBPeripheralDelegate {
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        // Copy the value NOW. `characteristic.value` is the characteristic's *latest* value: the
+        // board sends several Message notifies back-to-back (CACHE_HIT_MS, TRANSITION, CACHE_RENDERED,
+        // SUCCESS, plus HB every second), and reading it inside the Task below returned whichever
+        // arrived last. CACHE_RENDERED and SUCCESS were lost that way, causing bogus "render
+        // confirmation missing" re-sends and 8 s SUCCESS timeouts. Callbacks arrive in order on the
+        // main queue, so per-callback copies keep every message.
+        guard error == nil, let data = characteristic.value else { return }
+        let uuid = characteristic.uuid
         Task { @MainActor in
-            guard let data = characteristic.value, error == nil else { return }
-
-            switch characteristic.uuid {
+            switch uuid {
             case self.statusUUID:
                 if data.count == 1, data[0] == 0x01 { self.signalReady() }
 
