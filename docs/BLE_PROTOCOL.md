@@ -2,7 +2,33 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.7** (Board heartbeat `HB` so the iOS app keeps working in the background.)
+Version: **1.10** (New transition indices 28-51.)
+
+Changes in 1.10: header `transitionIndex` values 28-39 are new transitions (Corner Peel, Shatter, Cube Turn,
+Jelly Drop, Tile Spin, Infinite Zoom, RGB Split, Accordion, Ink Bleed, Crack Split, Sand Pile, Halftone), and
+40-51 are quick ones (Quick Iris, Diamond Iris, Heart Iris, Clock Sweep, Bow Tie, Wind, Polka Dots, Rain
+Columns, Wave Wipe, Venetian H, Spiral In, Luma Wipe). With `0xFF`, a fresh transfer picks only from the
+quick set; a cache hit picks from all. Valid indices now end at 51; `0xFE` (store-only) and `0xFF` (random) are unaffected. All earlier indices are
+unchanged.
+
+Changes in 1.9 (prefetch): the app can put the *next* queued song's cover on the board's SD card ahead
+of time, so that song's normal cache check is a hit. Two additions, both opt-in, nothing existing changes:
+- **Probe** — Cache characteristic write with magic `0xDEADBEE0` + 16-byte key. Answered with the same
+  1-byte Cache notify (`0x01` on SD / `0x00` not on SD) but the board **never loads or draws** and sends
+  no `CACHE_HIT_MS` / `TRANSITION` / `CACHE_RENDERED` / `SUCCESS` messages.
+- **Store-only transfer** — image header `transitionIndex` `0xFE`: the frame is received and saved to SD
+  under the key of the preceding cache check / probe, **never drawn**. ACK is Image notify `0x01` only (no
+  Message `SUCCESS`, which the iOS app also reads as a cache-hit render confirmation). Errors as usual.
+  A cache check during a store-only frame discards it like any partial frame. `0xFE` is no longer a
+  valid forced transition index (it never was a real one: indices end at 27, 51 since 1.10).
+The Python sender never sends either and is unaffected.
+
+Changes in 1.8: header `transitionIndex` values 17-27 are new transitions (Checker Cascade, Card Stack,
+Static Dissolve, Dither Fade, Push Left, Crossfade, Card Flip, Tile Flip Wave, Block Drop, Melt, Zoom Punch).
+Indices 5 (Slide), 10 (Curtain) and 16 (Zigzag) duplicated other transitions and are retired: random
+selection skips them, and if forced they draw Wipe Left, Vertical Split and Barn Doors. Other indices are
+unchanged. `0xFF` (random) is still what the iOS app sends. `TRANSITION:<name>` messages can carry the new names.
+
 
 Changes in 1.7: firmware notifies Message `HB` every ~1 s while connected (see **Heartbeat**). Clients that
 log or collect unknown messages must ignore it.
@@ -31,7 +57,7 @@ Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications aft
 
 **20 bytes**, little-endian:
 
-1. **Magic** `0xDEADBEEF` (4 bytes) — cache lookup.
+1. **Magic** `0xDEADBEEF` (4 bytes) — cache lookup (draws on a hit), or `0xDEADBEE0` — probe (1.9: answers only, never draws).
 2. **Key** (16 bytes) — MD5 digest of canonical identifier source (`album:<spotifyAlbumId>` preferred, fallback `url:<imageURL>`). App sends this hint; firmware owns filename/version semantics.
 
 **Alternative magic** `0xC0FFEEE1` + 16 bytes padding — SD cache stats; firmware responds with:
@@ -54,7 +80,7 @@ On a hit, the `0x01` reply is sent only **after** the SD load and the full trans
 
 1. **Header**:
    - Legacy: 4-byte little-endian `uint32` payload size (random transition).
-   - Current: 5-byte header: `transitionIndex (1 byte)` + payload size `uint32` LE (4 bytes). `0xFF` keeps random transition.
+   - Current: 5-byte header: `transitionIndex (1 byte)` + payload size `uint32` LE (4 bytes). `0xFF` keeps random transition. `0xFE` = store-only (1.9): save to SD, don't draw.
 2. **Body**: consecutive chunks of RGB565 LE. The **iOS app** applies Atkinson dither during quantization before sending; firmware draws nothing while the frame arrives (the previous picture stays up), then draws the whole frame with the header's transition and saves the same bytes to SD. The ESP32 does **not** re-dither.
 
 **Client cancel / new transfer:** If a client stops mid-image and later sends a new transfer, the first write must be a valid 4-byte or 5-byte header. While still receiving a partial frame, firmware treats a valid header (`115200` payload) as resync and discards the partial frame.

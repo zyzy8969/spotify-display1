@@ -46,7 +46,10 @@
 #define CIRCULAR_WIPE_MAX_RADIUS 170
 
 // Create display bus and display objects with higher SPI frequency
-Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, 1 /* MISO */, FSPI /* spi_num */, 80000000 /* freq 80MHz */);
+// 40 MHz: the ST7789's rated write clock is ~62.5 MHz, and 80 MHz garbled transfers (webcam +
+// serial recordings 2026-11-20: covers logged as drawn never appeared, or left one line / stray
+// squares). The ESP32-S3 SPI clock is 80 MHz / integer, so 40 is the fastest setting below 80.
+Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, 1 /* MISO */, FSPI /* spi_num */, 40000000 /* freq 40MHz */);
 // ST7789VW chip - using IPS=true (enable color inversion for correct colors)
 Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 0 /* rotation */, true /* IPS */, 240, 240, 0, 0);
 
@@ -61,6 +64,15 @@ int brightness = TFT_BRIGHTNESS_MAX;  // 100% brightness for maximum vibrancy
 //               A transfer abandoned by a skip therefore never touches the screen.
 static uint16_t* imageBuffer = nullptr;
 static uint16_t* rxBuffer = nullptr;
+// prevBuffer    = copy of the picture last drawn by a transition (the old cover), so frame-based
+//                 transitions can mix old and new. imageBuffer can't serve: a cache hit loads
+//                 the new cover straight into it.
+// composeBuffer = scratch frame those transitions build before pushing it to the panel.
+static uint16_t* prevBuffer = nullptr;
+static uint16_t* composeBuffer = nullptr;
+// False whenever a non-cover screen (startup / ready / Bluetooth) is up: the old frame is then
+// treated as black instead of a stale cover.
+static bool panelShowsImage = false;
 
 // ==================================================
 // BLUETOOTH LE CONFIGURATION
@@ -120,27 +132,76 @@ uint8_t transferCacheKey[16];
 bool cacheHit = false;
 uint8_t pendingTransition = 0xFF;  // 0xFF means random transition
 
-// Transition effects enum
+// Prefetch (BLE_PROTOCOL 1.8). The app sends the NEXT queued song's cover ahead of time:
+// - CACHE_PROBE_MAGIC on the Cache characteristic: "is this key on SD?" — answers 0x01/0x00 like a
+//   normal check but never loads or draws (a normal check draws on a hit).
+// - Image header transition byte TRANSITION_STORE_ONLY: receive and save to SD, never draw.
+#define CACHE_PROBE_MAGIC 0xDEADBEE0u
+#define TRANSITION_STORE_ONLY 0xFE
+volatile bool cacheProbeOnly = false;  // the pending cache check is a probe
+
+// Transition effects enum. Values are the BLE header's transitionIndex (docs/BLE_PROTOCOL.md),
+// so they are fixed: never renumber. Retired slots stay reserved and draw their twin when forced.
 enum TransitionType {
-  TRANSITION_WIPE_BOTTOM,     // Bottom to top
-  TRANSITION_WIPE_LEFT,       // Left to right
-  TRANSITION_WIPE_RIGHT,      // Right to left
-  TRANSITION_CIRCULAR,        // Expand from center
-  TRANSITION_CHECKERBOARD,    // Dissolve pattern
-  TRANSITION_SLIDE_REVEAL,    // Slide reveal
-  TRANSITION_DIAGONAL,        // Diagonal wipe
-  TRANSITION_DIAGONAL_INVERSE,  // Diagonal wipe (bottom-right to top-left)
-  TRANSITION_VENETIAN_V,      // Venetian blinds vertical
-  TRANSITION_FOUR_CORNER,     // Wipe from all 4 corners
-  TRANSITION_CURTAIN,         // Curtain open from center
-  TRANSITION_ZOOM_BLOCKS,     // Zoom from center outward
-  TRANSITION_HORIZONTAL_SPLIT, // Split from center horizontally
-  TRANSITION_VERTICAL_SPLIT,  // Split from center vertically
-  TRANSITION_BARN_DOORS,      // Barn doors open from center
-  TRANSITION_RANDOM_BLOCKS,   // Random block reveal
-  TRANSITION_ZIGZAG_SNAKE,    // Zigzag top/bottom reveal
-  TRANSITION_COUNT            // Total number of transitions
+  TRANSITION_WIPE_BOTTOM = 0,     // Bottom to top
+  TRANSITION_WIPE_LEFT = 1,       // Left to right
+  TRANSITION_WIPE_RIGHT = 2,      // Right to left
+  TRANSITION_CIRCULAR = 3,        // Expand from center
+  TRANSITION_CHECKERBOARD = 4,    // Dissolve pattern
+  TRANSITION_RETIRED_SLIDE = 5,   // Was "Slide": identical to Wipe Left
+  TRANSITION_DIAGONAL = 6,        // Diagonal wipe
+  TRANSITION_DIAGONAL_INVERSE = 7,  // Diagonal wipe (bottom-right to top-left)
+  TRANSITION_VENETIAN_V = 8,      // Venetian blinds vertical
+  TRANSITION_FOUR_CORNER = 9,     // Wipe from all 4 corners
+  TRANSITION_RETIRED_CURTAIN = 10, // Was "Curtain": identical to Vertical Split
+  TRANSITION_ZOOM_BLOCKS = 11,    // Zoom from center outward
+  TRANSITION_HORIZONTAL_SPLIT = 12, // Split from center horizontally
+  TRANSITION_VERTICAL_SPLIT = 13, // Split from center vertically
+  TRANSITION_BARN_DOORS = 14,     // Barn doors open from center
+  TRANSITION_RANDOM_BLOCKS = 15,  // Random block reveal
+  TRANSITION_RETIRED_ZIGZAG = 16, // Was "Zigzag": same picture as Barn Doors
+  TRANSITION_CHECKER_CASCADE = 17, // Checkerboard rippling diagonally
+  TRANSITION_CARD_STACK = 18,     // New cover slides over the old one from the right
+  TRANSITION_STATIC_DISSOLVE = 19, // Fine random dissolve
+  TRANSITION_DITHER_FADE = 20,    // Ordered (Bayer) dither fade
+  TRANSITION_PUSH_LEFT = 21,      // New cover pushes the old one out to the left
+  TRANSITION_CROSSFADE = 22,      // Smooth blend
+  TRANSITION_CARD_FLIP = 23,      // Whole cover flips like a card
+  TRANSITION_TILE_FLIP = 24,      // 6x6 tiles flip in a diagonal wave
+  TRANSITION_BLOCK_DROP = 25,     // 40 px blocks fall into place, bottom row first
+  TRANSITION_MELT = 26,           // Old cover drips down in columns
+  TRANSITION_ZOOM_PUNCH = 27,     // New cover zooms in with a small overshoot
+  TRANSITION_CORNER_PEEL = 28,  // Corner Peel
+  TRANSITION_SHATTER = 29,  // Shatter
+  TRANSITION_CUBE_TURN = 30,  // Cube Turn
+  TRANSITION_JELLY_DROP = 31,  // Jelly Drop
+  TRANSITION_TILE_SPIN = 32,  // Tile Spin
+  TRANSITION_INFINITE_ZOOM = 33,  // Infinite Zoom
+  TRANSITION_RGB_SPLIT = 34,  // RGB Split
+  TRANSITION_ACCORDION = 35,  // Accordion
+  TRANSITION_INK_BLEED = 36,  // Ink Bleed
+  TRANSITION_CRACK_SPLIT = 37,  // Crack Split
+  TRANSITION_SAND_PILE = 38,  // Sand Pile
+  TRANSITION_HALFTONE = 39,  // Halftone
+  TRANSITION_QUICK_IRIS = 40,  // Quick Iris (quick)
+  TRANSITION_DIAMOND_IRIS = 41,  // Diamond Iris (quick)
+  TRANSITION_HEART_IRIS = 42,  // Heart Iris (quick)
+  TRANSITION_CLOCK_SWEEP = 43,  // Clock Sweep (quick)
+  TRANSITION_BOW_TIE = 44,  // Bow Tie (quick)
+  TRANSITION_WIND = 45,  // Wind (quick)
+  TRANSITION_POLKA_DOTS = 46,  // Polka Dots (quick)
+  TRANSITION_RAIN_COLUMNS = 47,  // Rain Columns (quick)
+  TRANSITION_WAVE_WIPE = 48,  // Wave Wipe (quick)
+  TRANSITION_VENETIAN_H = 49,  // Venetian H (quick)
+  TRANSITION_SPIRAL_IN = 50,  // Spiral In (quick)
+  TRANSITION_LUMA_WIPE = 51,  // Luma Wipe (quick)
+  TRANSITION_COUNT                // Total number of slots (including retired)
 };
+
+static inline bool isRetiredTransition(TransitionType t) {
+  return t == TRANSITION_RETIRED_SLIDE || t == TRANSITION_RETIRED_CURTAIN ||
+         t == TRANSITION_RETIRED_ZIGZAG;
+}
 
 // Track last transition to avoid repeats
 static TransitionType lastTransition = TRANSITION_COUNT;  // Invalid value initially
@@ -163,7 +224,7 @@ void testFileOperations();
 void showTroubleshooting();
 bool isCached(uint8_t* cacheKey);
 bool loadFromCache(uint8_t* cacheKey);
-bool saveToCache(uint8_t* cacheKey);
+bool saveToCache(uint8_t* cacheKey, const uint16_t* src = nullptr);  // src defaults to imageBuffer
 String getCacheFileNameVersioned(const uint8_t* cacheKey, uint8_t version);
 bool parseCacheFilenameToKey(const String& path, uint8_t* outKey, uint8_t* outVersion);
 void buildCacheIndex();
@@ -219,6 +280,19 @@ inline uint32_t decodeLE32(const std::string& value) {
          | ((uint8_t)value[3] << 24);
 }
 
+// LE PHY negotiation result (BLE 5). Set on BTC_TASK, logged by loop().
+volatile bool phyUpdatePending = false;
+volatile uint8_t phyTx = 0, phyRx = 0, phyStatus = 0;
+
+static void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
+    if (event == ESP_GAP_BLE_PHY_UPDATE_COMPLETE_EVT) {
+        phyStatus = param->phy_update.status;
+        phyTx = param->phy_update.tx_phy;
+        phyRx = param->phy_update.rx_phy;
+        phyUpdatePending = true;
+    }
+}
+
 // Server callbacks - handle connection/disconnection events
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -247,6 +321,12 @@ class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
         pServer->updateConnParams(param->connect.remote_bda, 12, 12, 0, 400);
         Serial.println("BLE: Requested 15 ms connection interval");
+        // Ask for the LE 2M PHY (BLE 5; ESP32-S3 and iPhone 8+ support it): twice the radio bit
+        // rate, so the ~2.2 s 115 KB cover transfer should shrink. The phone may decline; the
+        // outcome is logged from loop() as "BLE: PHY tx=… rx=…". Also only queues a GAP request.
+        esp_ble_gap_set_prefered_phy(param->connect.remote_bda, 0,
+                                     ESP_BLE_GAP_PHY_2M_PREF_MASK, ESP_BLE_GAP_PHY_2M_PREF_MASK,
+                                     ESP_BLE_GAP_PHY_OPTIONS_NO_PREF);
     }
 
     void onDisconnect(BLEServer* pServer) {
@@ -283,13 +363,15 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
             return;
         }
 
-        if (magic != 0xDEADBEEF) {
+        if (magic != 0xDEADBEEF && magic != CACHE_PROBE_MAGIC) {
             Serial.printf("ERROR: Bad magic 0x%08X\n", magic);
             return;
         }
 
-        // Extract and store cache key (next 16 bytes)
+        // Extract and store cache key (next 16 bytes). A store-only transfer that follows a probe
+        // snapshots this key at its header, exactly like a normal miss → transfer.
         memcpy(currentCacheKey, value.data() + 4, 16);
+        cacheProbeOnly = (magic == CACHE_PROBE_MAGIC);
 
         // Set flag for loop() to process
         // CRITICAL: Don't do SD card/display work here - BTC_TASK stack is tiny!
@@ -548,21 +630,6 @@ void drawCheckerboardDissolve(uint16_t* buffer, int width, int height) {
   }
 }
 
-void drawSlideReveal(uint16_t* buffer, int width, int height) {
-  // Slide from left, revealing from right
-  for (int offset = width; offset >= 0; offset -= 4) {
-    for (int y = 0; y < height; y++) {
-      int startX = max(0, offset);
-      int drawWidth = width - startX;
-      if (drawWidth > 0) {
-        gfx->draw16bitRGBBitmap(startX, y, buffer + (y * width + startX),
-                                 drawWidth, 1);
-      }
-    }
-    delayMicroseconds(1000);  // ~500ms total (60 iterations)
-  }
-}
-
 void drawDiagonalWipe(uint16_t* buffer, int width, int height) {
   // Top-left to bottom-right diagonal wipe
   int maxDist = width + height;
@@ -634,28 +701,6 @@ void drawFourCornerWipe(uint16_t* buffer, int width, int height) {
         if (minDist >= dist && minDist < dist + 3) {  // Match step size
           gfx->drawPixel(x, y, buffer[y * width + x]);
         }
-      }
-    }
-    delayMicroseconds(TRANSITION_WIPE_DELAY_US);  // Optimized: 800→500μs
-  }
-}
-
-void drawCurtainOpen(uint16_t* buffer, int width, int height) {
-  int centerX = width / 2;
-
-  // Wipe from center outward
-  for (int offset = 0; offset <= centerX; offset += 3) {  // Optimized: 2→3px steps
-    for (int y = 0; y < height; y++) {
-      // Left side (wipe left)
-      int leftX = centerX - offset;
-      if (leftX >= 0 && leftX < width) {
-        gfx->draw16bitRGBBitmap(leftX, y, buffer + (y * width + leftX), min(3, centerX - leftX + 1), 1);
-      }
-
-      // Right side (wipe right)
-      int rightX = centerX + offset;
-      if (rightX >= 0 && rightX < width) {
-        gfx->draw16bitRGBBitmap(rightX, y, buffer + (y * width + rightX), min(3, width - rightX), 1);
       }
     }
     delayMicroseconds(TRANSITION_WIPE_DELAY_US);  // Optimized: 800→500μs
@@ -786,16 +831,623 @@ void drawZoomBlocks(uint16_t* buffer, int width, int height) {
   }
 }
 
-void drawZigzagSnake(uint16_t* buffer, int width, int height) {
-  for (int i = 0; i < height / 2; i++) {
-    // Draw from top
-    gfx->draw16bitRGBBitmap(0, i, buffer + (i * width), width, 1);
+// --------------------------------------------------
+// Checker Cascade: 8 px checkerboard whose tiles ripple in diagonally (draws only the new image).
+// --------------------------------------------------
+void drawCheckerCascade(uint16_t* buffer, int width, int height) {
+  const int cell = 8;
+  const int nx = width / cell, ny = height / cell;
+  const int steps = 30;
+  for (int s = 0; s < steps; s++) {
+    for (int ty = 0; ty < ny; ty++) {
+      for (int tx = 0; tx < nx; tx++) {
+        // Threshold 0..999: diagonal position (60%) plus checker parity (40%).
+        int thr = ((tx + ty) * 600) / (nx + ny) + (((tx + ty) & 1) ? 400 : 0);
+        int lo = (s * 1000) / steps, hi = ((s + 1) * 1000) / steps;
+        if (thr >= lo && thr < hi) drawBlockRows(buffer, tx * cell, ty * cell, cell, width, height);
+      }
+    }
+    delayMicroseconds(8000);
+  }
+}
 
-    // Draw from bottom
-    int bottomRow = height - 1 - i;
-    gfx->draw16bitRGBBitmap(0, bottomRow, buffer + (bottomRow * width), width, 1);
+// ==================================================
+// FRAME-COMPOSED TRANSITIONS
+// Each frame is built in composeBuffer from prevBuffer (old cover) and the new buffer, then
+// pushed whole. Display is fixed at 240x240 (IMAGE_SIZE), so these use DISPLAY_* directly.
+// ==================================================
 
-    delayMicroseconds(TRANSITION_WIPE_DELAY_US);
+static const int CW = DISPLAY_WIDTH, CH = DISPLAY_HEIGHT;
+
+static inline void pushComposedFrame() {
+  gfx->draw16bitRGBBitmap(0, 0, composeBuffer, CW, CH);
+}
+
+static inline float easeInOut(float t) {
+  return t < 0.5f ? 2.0f * t * t : 1.0f - (-2.0f * t + 2.0f) * (-2.0f * t + 2.0f) / 2.0f;
+}
+
+static inline float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+// Blend two RGB565 pixels; k in 0..32 (0 = a, 32 = b). Spreads G apart from R/B so all three
+// channels blend in one multiply.
+static inline uint16_t blend565(uint16_t a, uint16_t b, uint32_t k) {
+  uint32_t fa = (a | ((uint32_t)a << 16)) & 0x07E0F81F;
+  uint32_t fb = (b | ((uint32_t)b << 16)) & 0x07E0F81F;
+  uint32_t f = ((fa * (32 - k) + fb * k) >> 5) & 0x07E0F81F;
+  return (uint16_t)(f | (f >> 16));
+}
+
+static inline uint8_t cellHash(uint32_t x, uint32_t y) {
+  uint32_t h = x * 73856093u ^ y * 19349663u;
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  return (uint8_t)h;
+}
+
+static const uint8_t BAYER8[8][8] = {
+  { 0, 32,  8, 40,  2, 34, 10, 42}, {48, 16, 56, 24, 50, 18, 58, 26},
+  {12, 44,  4, 36, 14, 46,  6, 38}, {60, 28, 52, 20, 62, 30, 54, 22},
+  { 3, 35, 11, 43,  1, 33,  9, 41}, {51, 19, 59, 27, 49, 17, 57, 25},
+  {15, 47,  7, 39, 13, 45,  5, 37}, {63, 31, 55, 23, 61, 29, 53, 21}};
+
+// Card Stack: new cover slides in from the right over the old one, which stays put.
+void drawCardStack(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 26;
+  for (int f = 1; f <= frames; f++) {
+    int x0 = (int)((1.0f - easeInOut((float)f / frames)) * CW);
+    int w = CW - x0;
+    for (int y = 0; y < CH; y++) {
+      uint16_t* dst = composeBuffer + y * CW;
+      memcpy(dst, oldB + y * CW, x0 * 2);
+      memcpy(dst + x0, newB + y * CW, w * 2);
+      if (x0 >= 3) for (int x = x0 - 3; x < x0; x++) dst[x] = blend565(dst[x], 0, 12);  // edge shadow
+    }
+    pushComposedFrame();
+  }
+}
+
+// Static Dissolve (2 px random cells) and Dither Fade (8x8 Bayer): per-pixel threshold masks.
+static void drawMaskDissolve(const uint16_t* oldB, const uint16_t* newB, bool bayer) {
+  const int frames = 18;
+  for (int f = 1; f <= frames; f++) {
+    int level = (f * 256) / frames;  // pixels with threshold < level show the new image
+    for (int y = 0; y < CH; y++) {
+      const uint16_t* o = oldB + y * CW;
+      const uint16_t* n = newB + y * CW;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int thr = bayer ? BAYER8[y & 7][x & 7] * 4 : cellHash(x >> 1, y >> 1);
+        d[x] = thr < level ? n[x] : o[x];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Push Left: both covers move together, carousel style.
+void drawPushLeft(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 24;
+  for (int f = 1; f <= frames; f++) {
+    int o = (int)(easeInOut((float)f / frames) * CW);
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      memcpy(d, oldB + y * CW + o, (CW - o) * 2);
+      memcpy(d + (CW - o), newB + y * CW, o * 2);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Crossfade: smooth per-pixel blend.
+void drawCrossfade(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 16;
+  for (int f = 1; f <= frames; f++) {
+    uint32_t k = (uint32_t)(easeInOut((float)f / frames) * 32.0f + 0.5f);
+    for (int i = 0; i < CW * CH; i++) composeBuffer[i] = blend565(oldB[i], newB[i], k);
+    pushComposedFrame();
+  }
+}
+
+// Squash a w-wide region of src columns [sx, sx+sw) into dst columns [dx, dx+w) on one row.
+static inline void squashRow(uint16_t* dstRow, const uint16_t* srcRow, int sx, int sw, int dx, int w) {
+  for (int x = 0; x < w; x++) dstRow[dx + x] = srcRow[sx + (x * sw) / w];
+}
+
+// Card Flip: whole cover narrows to a line and widens again showing the new art.
+void drawCardFlip(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 24;
+  for (int f = 1; f <= frames; f++) {
+    float t = easeInOut((float)f / frames);
+    int w = max(1, (int)(CW * fabsf(cosf(PI * t))));
+    int x0 = (CW - w) / 2;
+    const uint16_t* src = t < 0.5f ? oldB : newB;
+    memset(composeBuffer, 0, IMAGE_SIZE);
+    for (int y = 0; y < CH; y++) squashRow(composeBuffer + y * CW, src + y * CW, 0, CW, x0, w);
+    pushComposedFrame();
+  }
+}
+
+// Tile Flip Wave: 6x6 grid of 40 px tiles, each flipping with a diagonal delay.
+void drawTileFlip(const uint16_t* oldB, const uint16_t* newB) {
+  const int n = 6, ts = CW / n, frames = 30;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memset(composeBuffer, 0, IMAGE_SIZE);
+    for (int ty = 0; ty < n; ty++) {
+      for (int tx = 0; tx < n; tx++) {
+        float lt = clamp01((t - (float)(tx + ty) / (2 * n - 2) * 0.55f) / 0.45f);
+        int w = max(1, (int)(ts * fabsf(cosf(PI * lt))));
+        const uint16_t* src = lt < 0.5f ? oldB : newB;
+        int dx = tx * ts + (ts - w) / 2;
+        for (int y = ty * ts; y < (ty + 1) * ts; y++)
+          squashRow(composeBuffer + y * CW, src + y * CW, tx * ts, ts, dx, w);
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Block Drop: 40 px blocks fall into place over the old cover, bottom row first.
+void drawBlockDrop(const uint16_t* oldB, const uint16_t* newB) {
+  const int n = 6, bs = CW / n, frames = 36;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memcpy(composeBuffer, oldB, IMAGE_SIZE);
+    for (int row = n - 1; row >= 0; row--) {
+      for (int bx = 0; bx < n; bx++) {
+        int order = (n - 1 - row) * n + (cellHash(bx, row) % n);
+        float lt = clamp01((t - (float)order / (n * n) * 0.75f) / 0.25f);
+        if (lt <= 0.0f) continue;
+        int target = row * bs;
+        int y = min(target, (int)(-bs + (target + bs) * lt * lt));
+        for (int r = 0; r < bs; r++) {
+          int dy = y + r;
+          if (dy < 0 || dy >= CH) continue;
+          memcpy(composeBuffer + dy * CW + bx * bs, newB + (target + r) * CW + bx * bs, bs * 2);
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Melt: old cover drips down in 4 px columns, revealing the new one underneath.
+void drawMelt(const uint16_t* oldB, const uint16_t* newB) {
+  const int col = 4, frames = 30;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memcpy(composeBuffer, newB, IMAGE_SIZE);
+    for (int x = 0; x < CW; x += col) {
+      float start = (cellHash(x, 7) / 255.0f) * 0.3f;
+      float lt = clamp01((t - start) / 0.7f);
+      int dy = (int)(lt * lt * CH);
+      for (int y = dy; y < CH; y++)
+        memcpy(composeBuffer + y * CW + x, oldB + (y - dy) * CW + x, col * 2);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Zoom Punch: new cover grows from the center over the old one with a small overshoot.
+void drawZoomPunch(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 26;
+  static int16_t srcX[DISPLAY_WIDTH];
+  for (int f = 1; f <= frames; f++) {
+    float u = (float)f / frames - 1.0f;
+    float e = 1.0f + 2.70158f * u * u * u + 1.70158f * u * u;  // easeOutBack
+    int s = max(2, (int)(e * CW));
+    int x0 = (CW - s) / 2, y0 = (CH - s) / 2;
+    memcpy(composeBuffer, oldB, IMAGE_SIZE);
+    int xa = max(0, x0), xb = min(CW, x0 + s);
+    for (int x = xa; x < xb; x++) srcX[x] = (int16_t)(((x - x0) * CW) / s);
+    for (int y = max(0, y0); y < min(CH, y0 + s); y++) {
+      const uint16_t* srow = newB + (((y - y0) * CH) / s) * CW;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = xa; x < xb; x++) d[x] = srow[srcX[x]];
+    }
+    pushComposedFrame();
+  }
+  gfx->draw16bitRGBBitmap(0, 0, (uint16_t*)newB, CW, CH);  // land exactly on the final frame
+}
+
+// ==================================================
+// TRANSITIONS, SET 3 (indices 28-39). Same compose pattern as above.
+// ==================================================
+
+static inline uint16_t shade565(uint16_t c, float f) {
+  int k = (int)(f * 256.0f);
+  if (k < 0) k = 0;
+  int r = (((c >> 11) & 31) * k) >> 8, g = (((c >> 5) & 63) * k) >> 8, b = ((c & 31) * k) >> 8;
+  if (r > 31) r = 31;
+  if (g > 63) g = 63;
+  if (b > 31) b = 31;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static inline float luma565(uint16_t c) {
+  return (((c >> 11) & 31) / 31.0f) * 0.30f + (((c >> 5) & 63) / 63.0f) * 0.59f + ((c & 31) / 31.0f) * 0.11f;
+}
+
+static inline int clampPx(int v) { return v < 0 ? 0 : (v > 239 ? 239 : v); }
+
+// Nearest-neighbor scale of a full 240x240 src into the rect (dx, dy, dw, dh) of composeBuffer.
+static void blitScaled(const uint16_t* src, float dx, float dy, float dw, float dh) {
+  static int16_t sxTab[DISPLAY_WIDTH];
+  if (dw < 1.0f || dh < 1.0f) return;
+  int x0 = max(0, (int)ceilf(dx)), x1 = min(CW, (int)ceilf(dx + dw));
+  int y0 = max(0, (int)ceilf(dy)), y1 = min(CH, (int)ceilf(dy + dh));
+  for (int x = x0; x < x1; x++) sxTab[x] = (int16_t)clampPx((int)((x - dx) * CW / dw));
+  for (int y = y0; y < y1; y++) {
+    const uint16_t* srow = src + clampPx((int)((y - dy) * CH / dh)) * CW;
+    uint16_t* d = composeBuffer + y * CW;
+    for (int x = x0; x < x1; x++) d[x] = srow[sxTab[x]];
+  }
+}
+
+// Corner Peel: old cover peels from the bottom-right corner; pale paper back, shadow on the crease.
+void drawCornerPeel(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 28;
+  for (int f = 1; f <= frames; f++) {
+    // Fold position in q = x + y units (0..478).
+    int Fq = (int)((359.4f * (1.0f - easeInOut((float)f / frames)) - 10.0f) * 1.41421f);
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int q = x + y, i = y * CW + x;
+        if (q > Fq) {
+          uint16_t c = newB[i];
+          if (q < Fq + 22) c = shade565(c, 0.5f + 0.5f * (q - Fq) / 22.0f);
+          d[x] = c;
+        } else {
+          int k = Fq - q, sx = x + k, sy = y + k;  // reflection across the fold line
+          if (sx < CW && sy < CH) {
+            uint16_t c = blend565(oldB[sy * CW + sx], 0xFFFF, 18);
+            if (k < 8) c = shade565(c, 0.75f + k / 32.0f);
+            d[x] = c;
+          } else {
+            d[x] = oldB[i];
+          }
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Shatter: the old cover breaks into 72 glass shards that crack, then tumble off the screen.
+struct Shard { float ax, ay, bx, by, cx2, cy2; float cx, cy, delay, dx, rot, area; };
+static Shard shards[72];
+static bool shardsReady = false;
+
+static void initShards() {
+  float vx[7][7], vy[7][7];
+  for (int j = 0; j <= 6; j++)
+    for (int i = 0; i <= 6; i++) {
+      bool edge = i == 0 || j == 0 || i == 6 || j == 6;
+      vx[j][i] = i * 40 + (edge ? 0 : (cellHash(j * 31 + i, 1) / 255.0f - 0.5f) * 22.0f);
+      vy[j][i] = j * 40 + (edge ? 0 : (cellHash(j * 17 + i, 2) / 255.0f - 0.5f) * 22.0f);
+    }
+  int k = 0;
+  for (int j = 0; j < 6; j++)
+    for (int i = 0; i < 6; i++)
+      for (int h = 0; h < 2; h++) {
+        Shard& s = shards[k];
+        s.ax = vx[j][i]; s.ay = vy[j][i];
+        if (h == 0) { s.bx = vx[j][i + 1]; s.by = vy[j][i + 1]; s.cx2 = vx[j + 1][i + 1]; s.cy2 = vy[j + 1][i + 1]; }
+        else        { s.bx = vx[j + 1][i + 1]; s.by = vy[j + 1][i + 1]; s.cx2 = vx[j + 1][i]; s.cy2 = vy[j + 1][i]; }
+        s.cx = (s.ax + s.bx + s.cx2) / 3.0f; s.cy = (s.ay + s.by + s.cy2) / 3.0f;
+        s.delay = hypotf(s.cx - 120, s.cy - 120) / 170.0f * 0.4f + cellHash(k, 77) / 255.0f * 0.12f;
+        s.dx = (cellHash(k, 3) / 255.0f - 0.5f) * 90.0f;
+        s.rot = (cellHash(k, 9) / 255.0f - 0.5f) * 3.0f;
+        s.area = (s.bx - s.ax) * (s.cy2 - s.ay) - (s.by - s.ay) * (s.cx2 - s.ax);
+        k++;
+      }
+  shardsReady = true;
+}
+
+void drawShatter(const uint16_t* oldB, const uint16_t* newB) {
+  if (!shardsReady) initShards();
+  const int frames = 32;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memcpy(composeBuffer, newB, IMAGE_SIZE);
+    for (int k = 0; k < 72; k++) {
+      const Shard& s = shards[k];
+      float lt = clamp01((t - s.delay) / 0.5f);
+      float ox = s.dx * lt, oy = lt * lt * 330.0f, th = s.rot * lt;
+      float cs = cosf(th), sn = sinf(th);
+      bool cracks = t > s.delay - 0.18f;
+      // Bounding box of the moved shard (corners rotated around its centroid, then offset).
+      float px[3] = {s.ax, s.bx, s.cx2}, py[3] = {s.ay, s.by, s.cy2};
+      float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+      for (int v = 0; v < 3; v++) {
+        float rx = s.cx + cs * (px[v] - s.cx) - sn * (py[v] - s.cy) + ox;
+        float ry = s.cy + sn * (px[v] - s.cx) + cs * (py[v] - s.cy) + oy;
+        minX = fminf(minX, rx); maxX = fmaxf(maxX, rx); minY = fminf(minY, ry); maxY = fmaxf(maxY, ry);
+      }
+      int x0 = max(0, (int)minX), x1 = min(CW - 1, (int)maxX + 1);
+      int y0 = max(0, (int)minY), y1 = min(CH - 1, (int)maxY + 1);
+      if (x0 > x1 || y0 > y1) continue;
+      for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+          // Map the screen pixel back into the unmoved shard.
+          float rx = x + 0.5f - s.cx - ox, ry = y + 0.5f - s.cy - oy;
+          float sx = s.cx + cs * rx + sn * ry, sy = s.cy - sn * rx + cs * ry;
+          float w0 = ((s.bx - s.ax) * (sy - s.ay) - (s.by - s.ay) * (sx - s.ax)) / s.area;
+          float w1 = ((s.cx2 - s.bx) * (sy - s.by) - (s.cy2 - s.by) * (sx - s.bx)) / s.area;
+          float w2 = 1.0f - w0 - w1;
+          if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+          uint16_t c = oldB[clampPx((int)sy) * CW + clampPx((int)sx)];
+          if (cracks && fminf(w0, fminf(w1, w2)) < 0.035f) c = blend565(c, 0xFFFF, lt > 0 ? 14 : 24);
+          composeBuffer[y * CW + x] = c;
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Cube Turn: both covers on the faces of a cube turning 90 degrees, with perspective and shading.
+void drawCubeTurn(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 26;
+  for (int f = 1; f <= frames; f++) {
+    float th = easeInOut((float)f / frames) * (PI / 2), sn = sinf(th), cs = cosf(th);
+    float wa = CW * cs;
+    memset(composeBuffer, 0, IMAGE_SIZE);
+    for (int x = 0; x < CW; x++) {
+      const uint16_t* D; float u, h, sh;
+      if (x < wa) { D = oldB; u = x / wa; h = 1.0f - 0.18f * sn * (1.0f - u); sh = 1.0f - 0.55f * sn; }
+      else { D = newB; u = (x - wa) / fmaxf(1.0f, CW - wa); h = 1.0f - 0.18f * cs * u; sh = 1.0f - 0.55f * cs; }
+      int sx = clampPx((int)(u * CW));
+      for (int y = 0; y < CH; y++) {
+        float sy = (y - 120) / h + 120;
+        if (sy < 0 || sy >= CH) continue;
+        composeBuffer[y * CW + x] = shade565(D[(int)sy * CW + sx], sh);
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Jelly Drop: new cover falls in, squashes on impact and wobbles until it settles.
+void drawJellyDrop(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 34;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memcpy(composeBuffer, oldB, IMAGE_SIZE);
+    if (t < 0.4f) {
+      float a = t / 0.4f;
+      blitScaled(newB, 0, -CH * (1.0f - a * a), CW, CH);
+    } else {
+      float u = (t - 0.4f) / 0.6f, s = 1.0f - 0.28f * expf(-4.0f * u) * cosf(u * 20.0f), w = CW / s;
+      blitScaled(newB, (CW - w) / 2, CH - CH * s, w, CH * s);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Tile Spin: 36 tiles each spin half a turn and shrink as they go, spiraling out from the center.
+void drawTileSpin(const uint16_t* oldB, const uint16_t* newB) {
+  static int8_t order[36];
+  static bool orderReady = false;
+  if (!orderReady) {
+    float key[36];
+    for (int i = 0; i < 36; i++) {
+      float x = i % 6 - 2.5f, y = i / 6 - 2.5f;
+      key[i] = fmaxf(fabsf(x), fabsf(y)) + atan2f(y, x) / (2 * PI);
+      order[i] = i;
+    }
+    for (int i = 1; i < 36; i++)
+      for (int j = i; j > 0 && key[order[j]] < key[order[j - 1]]; j--) {
+        int8_t tmp = order[j]; order[j] = order[j - 1]; order[j - 1] = tmp;
+      }
+    orderReady = true;
+  }
+  const int frames = 32;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memset(composeBuffer, 0, IMAGE_SIZE);
+    for (int r = 0; r < 36; r++) {
+      int tile = order[r], tx = tile % 6, ty = tile / 6;
+      float lt = clamp01((t - r / 36.0f * 0.6f) / 0.4f), e = easeInOut(lt);
+      bool firstHalf = lt < 0.5f;
+      float a = firstHalf ? e * PI : (e - 1.0f) * PI, sc = 1.0f - 0.4f * sinf(PI * lt);
+      const uint16_t* src = firstHalf ? oldB : newB;
+      float ccx = tx * 40 + 20, ccy = ty * 40 + 20, cs = cosf(a), sn = sinf(a), ext = 20 * sc * 1.4143f;
+      int x0 = max(0, (int)(ccx - ext)), x1 = min(CW - 1, (int)(ccx + ext));
+      int y0 = max(0, (int)(ccy - ext)), y1 = min(CH - 1, (int)(ccy + ext));
+      for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) {
+          float dx = x + 0.5f - ccx, dy = y + 0.5f - ccy;
+          float lx = (cs * dx + sn * dy) / sc, ly = (-sn * dx + cs * dy) / sc;
+          if (lx < -20 || lx >= 20 || ly < -20 || ly >= 20) continue;
+          composeBuffer[y * CW + x] = src[(int)(ccy + ly) * CW + (int)(ccx + lx)];
+        }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Infinite Zoom: new cover appears as a small framed picture inside the old one; the camera dives in.
+void drawInfiniteZoom(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 30;
+  for (int f = 1; f <= frames; f++) {
+    float z = easeInOut((float)f / frames), k = powf(6.0f, z), sa = CW * k, sb = 40.0f * k;
+    blitScaled(oldB, 120 - sa / 2, 120 - sa / 2, sa, sa);
+    if (z < 0.97f) {  // white picture frame, 2 px
+      int f0 = max(0, (int)(120 - sb / 2 - 2)), f1 = min(CW, (int)(120 + sb / 2 + 2));
+      for (int y = f0; y < f1; y++)
+        for (int x = f0; x < f1; x++) composeBuffer[y * CW + x] = 0xFFFF;
+    }
+    blitScaled(newB, 120 - sb / 2, 120 - sb / 2, sb, sb);
+    pushComposedFrame();
+  }
+}
+
+// RGB Split: red, green and blue channels fly apart, then snap together on the new cover.
+void drawRgbSplit(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 22;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    int off = (int)(sinf(PI * t) * 22.0f);
+    const uint16_t* D = t < 0.5f ? oldB : newB;
+    for (int y = 0; y < CH; y++) {
+      const uint16_t* row = D + y * CW;
+      const uint16_t* grow = D + clampPx(y + off / 2) * CW;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++)
+        d[x] = (row[clampPx(x - off)] & 0xF800) | (grow[x] & 0x07E0) | (row[clampPx(x + off)] & 0x001F);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Accordion: old cover folds into 8 shaded pleats that squeeze into the right edge.
+void drawAccordion(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 24, n = 8, pw = CW / n;
+  for (int f = 1; f <= frames; f++) {
+    float e = easeInOut((float)f / frames), w = pw * (1.0f - e);
+    memcpy(composeBuffer, newB, IMAGE_SIZE);
+    if (w >= 0.5f) {
+      for (int i = 0; i < n; i++) {
+        int dx0 = (int)roundf(CW - (n - i) * w), dx1 = (int)roundf(CW - (n - i - 1) * w), dw = dx1 - dx0;
+        if (dw <= 0) continue;
+        float sh = 1.0f - ((i & 1) ? 0.45f : 0.08f) * e;
+        for (int y = 0; y < CH; y++) {
+          const uint16_t* srow = oldB + y * CW + i * pw;
+          uint16_t* d = composeBuffer + y * CW;
+          for (int x = 0; x < dw; x++) d[dx0 + x] = shade565(srow[(x * pw) / dw], sh);
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Ink Bleed: six ink blots soak outward with ragged edges until they merge.
+static uint8_t* inkMask = nullptr;
+
+static bool initInkMask() {
+  if (inkMask) return true;
+  inkMask = (uint8_t*)ps_malloc(CW * CH);
+  if (!inkMask) return false;
+  float sx[6], sy[6], sr[6];
+  for (int i = 0; i < 6; i++) {
+    sx[i] = 30 + cellHash(i * 11 + 1, 4) / 255.0f * 180;
+    sy[i] = 30 + cellHash(i * 13 + 2, 5) / 255.0f * 180;
+    sr[i] = 0.7f + cellHash(i * 5 + 9, 6) / 255.0f * 0.6f;
+  }
+  static float tmp[DISPLAY_WIDTH];
+  float mx = 1.0f;
+  // Two passes: find the max, then quantize to 0..250.
+  for (int pass = 0; pass < 2; pass++)
+    for (int y = 0; y < CH; y++) {
+      for (int x = 0; x < CW; x++) {
+        float d = 1e9f;
+        for (int i = 0; i < 6; i++) d = fminf(d, hypotf(x - sx[i], y - sy[i]) / sr[i]);
+        d += (sinf(x * 0.11f + y * 0.07f) + sinf(x * 0.23f - y * 0.19f) + sinf((x + y) * 0.31f)) * 7.0f
+             + cellHash(x, y) / 255.0f * 6.0f;
+        tmp[x] = d;
+        if (pass == 0 && d > mx) mx = d;
+      }
+      if (pass == 1)
+        for (int x = 0; x < CW; x++) inkMask[y * CW + x] = (uint8_t)(fmaxf(0, tmp[x]) / mx * 250.0f);
+    }
+  return true;
+}
+
+void drawInkBleed(const uint16_t* oldB, const uint16_t* newB) {
+  if (!initInkMask()) { drawCrossfade(oldB, newB); return; }
+  const int frames = 28;
+  for (int f = 1; f <= frames; f++) {
+    int lv = (int)(easeInOut((float)f / frames) * 262.0f);
+    for (int i = 0; i < CW * CH; i++) {
+      int v = inkMask[i];
+      composeBuffer[i] = v < lv ? (v > lv - 7 ? 0 : newB[i]) : oldB[i];
+    }
+    pushComposedFrame();
+  }
+}
+
+// Crack Split: a jagged crack runs down the cover, then the halves slide apart.
+void drawCrackSplit(const uint16_t* oldB, const uint16_t* newB) {
+  static int16_t crack[DISPLAY_HEIGHT];
+  int cx = 120;
+  for (int y = 0; y < CH; y++) {  // a new random crack every time
+    cx += random(-4, 5);
+    cx = max(70, min(170, cx));
+    crack[y] = cx;
+  }
+  const int crackFrames = 10, splitFrames = 22;
+  for (int f = 1; f <= crackFrames; f++) {
+    int ly = (f * CH) / crackFrames;
+    memcpy(composeBuffer, oldB, IMAGE_SIZE);
+    for (int y = 0; y < ly; y++)
+      for (int x = crack[y] - 1; x <= crack[y] + 1; x++) composeBuffer[y * CW + x] = 0xFFFF;
+    pushComposedFrame();
+  }
+  for (int f = 1; f <= splitFrames; f++) {
+    int off = (int)(easeInOut((float)f / splitFrames) * 135.0f);
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int l = x + off, r = x - off;
+        d[x] = l < crack[y] ? oldB[y * CW + l] : (r >= crack[y] && r < CW) ? oldB[y * CW + r] : newB[y * CW + x];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Sand Pile: the new cover pours down as grains and piles up from the bottom row.
+void drawSandPile(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 36;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memcpy(composeBuffer, oldB, IMAGE_SIZE);
+    for (int y = CH - 1; y >= 0; y--) {
+      float rowLand = (CH - 1 - y) / (float)CH * 0.72f + 0.06f;
+      for (int x = 0; x < CW; x++) {
+        float tl = rowLand + cellHash(x, y) / 255.0f * 0.08f, ts = tl - 0.2f;
+        if (t < ts) continue;
+        int i = y * CW + x;
+        if (t >= tl) { composeBuffer[i] = newB[i]; continue; }
+        float u = (t - ts) / 0.2f;
+        int py = (int)(-8 + (y + 8) * u * u);
+        if (py >= 0) composeBuffer[py * CW + x] = newB[i];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Halftone: old cover breaks into newsprint dots that shrink away; new cover dots grow back.
+void drawHalftone(const uint16_t* oldB, const uint16_t* newB) {
+  static float lumOld[900], lumNew[900];
+  for (int c = 0; c < 900; c++) {
+    int cx = (c % 30) * 8, cy = (c / 30) * 8;
+    float so = 0, sn = 0;
+    for (int y = 0; y < 8; y++)
+      for (int x = 0; x < 8; x++) {
+        so += luma565(oldB[(cy + y) * CW + cx + x]);
+        sn += luma565(newB[(cy + y) * CW + cx + x]);
+      }
+    lumOld[c] = so / 64; lumNew[c] = sn / 64;
+  }
+  const int frames = 28;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    bool firstHalf = t < 0.5f;
+    float k = firstHalf ? t * 2 : (1 - t) * 2;
+    const uint16_t* D = firstHalf ? oldB : newB;
+    const float* L = firstHalf ? lumOld : lumNew;
+    for (int y = 0; y < CH; y++)
+      for (int x = 0; x < CW; x++) {
+        int c = (y >> 3) * 30 + (x >> 3);
+        float dx = (x & 7) - 3.5f, dy = (y & 7) - 3.5f, R = (1 - k) * 7.5f * (0.35f + 0.65f * L[c]);
+        composeBuffer[y * CW + x] = dx * dx + dy * dy < R * R ? D[y * CW + x] : 0;
+      }
+    pushComposedFrame();
   }
 }
 
@@ -825,6 +1477,85 @@ void drawImageLineByLine(uint16_t* buffer, int16_t x, int16_t y, int16_t width, 
 // ==================================================
 
 // Helper function to get transition name as string
+// ==================================================
+// QUICK TRANSITIONS (indices 40-51): one threshold byte per pixel, revealed over QUICK_FRAMES frames.
+// Each map is built once on first use (57.6 KB PSRAM each). Per frame it is one compare per pixel
+// plus the full-frame push, so each runs in roughly QUICK_FRAMES x ~13 ms.
+// ==================================================
+
+#define QUICK_FRAMES 10
+static uint8_t* quickMaps[12] = {nullptr};
+
+static float quickThreshold(int id, int x, int y) {
+  float dx = x + 0.5f - 120, dy = y + 0.5f - 120, r = sqrtf(dx * dx + dy * dy);
+  float ang = atan2f(dx, -dy); if (ang < 0) ang += 2 * PI;  // 0 at 12 o'clock, clockwise
+  switch (id) {
+    case 0: return r;                                            // Quick Iris
+    case 1: return fabsf(dx) + fabsf(dy);                        // Diamond Iris
+    case 2: {                                                    // Heart Iris
+      float u = dx / 120 * 1.25f, v = -dy / 120 * 1.25f + 0.15f, lo = 0, hi = 3;
+      for (int i = 0; i < 16; i++) {
+        float s = (lo + hi) / 2, a = u / s, b = v / s, q = a * a + b * b - 1;
+        if (q * q * q - a * a * b * b * b <= 0) hi = s; else lo = s;
+      }
+      return hi;
+    }
+    case 3: return ang;                                          // Clock Sweep
+    case 4: return (120 - fabsf(dx)) + fabsf(dy) * 0.6f;         // Bow Tie
+    case 5: return (CW - x) * 0.6f + cellHash(y >> 1, 11) * 0.4f; // Wind (rows blow in from the right)
+    case 6: {                                                    // Polka Dots, left to right
+      float cx = (x / 24) * 24 + 12, cy = (y / 24) * 24 + 12;
+      return x * 0.5f + hypotf(x + 0.5f - cx, y + 0.5f - cy) * 6.0f;
+    }
+    case 7: return y * 0.55f + cellHash(x >> 3, 12) * 0.52f;     // Rain Columns
+    case 8: return x * 0.8f + 48 * (0.5f + 0.5f * sinf(y / 240.0f * 4 * PI));  // Wave Wipe
+    case 9: return (y % 20) * 9.0f + (y / 20) * 5.0f;            // Venetian H
+    case 10: {                                                   // Spiral In (8 px rings)
+      int ring = min(min(x, y), min(CW - 1 - x, CH - 1 - y)) / 8;
+      return ring + ang / (2 * PI);
+    }
+    default: return 0;                                           // 11 = Luma Wipe (per image)
+  }
+}
+
+static uint8_t* getQuickMap(int id) {
+  if (quickMaps[id]) return quickMaps[id];
+  uint8_t* m = (uint8_t*)ps_malloc(CW * CH);
+  if (!m) return nullptr;
+  float mn = 1e9f, mx = -1e9f;  // two passes: range, then quantize to 0..250
+  for (int y = 0; y < CH; y++)
+    for (int x = 0; x < CW; x++) {
+      float v = quickThreshold(id, x, y);
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+  float span = (mx - mn) > 0 ? (mx - mn) : 1;
+  for (int y = 0; y < CH; y++)
+    for (int x = 0; x < CW; x++)
+      m[y * CW + x] = (uint8_t)((quickThreshold(id, x, y) - mn) / span * 250.0f);
+  quickMaps[id] = m;
+  return m;
+}
+
+void drawQuickMask(int id, const uint16_t* oldB, const uint16_t* newB) {
+  static uint8_t* lumaMap = nullptr;
+  const uint8_t* m;
+  if (id == 11) {  // Luma Wipe: dark parts of the new cover arrive first, highlights last
+    if (!lumaMap) lumaMap = (uint8_t*)ps_malloc(CW * CH);
+    if (!lumaMap) { drawPushLeft(oldB, newB); return; }
+    for (int i = 0; i < CW * CH; i++) lumaMap[i] = (uint8_t)(luma565(newB[i]) * 250.0f);
+    m = lumaMap;
+  } else {
+    m = getQuickMap(id);
+    if (!m) { drawPushLeft(oldB, newB); return; }
+  }
+  for (int f = 1; f <= QUICK_FRAMES; f++) {
+    int level = (f * 256) / QUICK_FRAMES;
+    for (int i = 0; i < CW * CH; i++) composeBuffer[i] = m[i] < level ? newB[i] : oldB[i];
+    pushComposedFrame();
+  }
+}
+
 String getTransitionName(TransitionType transition) {
   switch(transition) {
     case TRANSITION_WIPE_BOTTOM: return "Wipe Up";
@@ -832,123 +1563,200 @@ String getTransitionName(TransitionType transition) {
     case TRANSITION_WIPE_RIGHT: return "Wipe Left";
     case TRANSITION_CIRCULAR: return "Circular";
     case TRANSITION_CHECKERBOARD: return "Checkerboard";
-    case TRANSITION_SLIDE_REVEAL: return "Slide";
     case TRANSITION_DIAGONAL: return "Diagonal";
     case TRANSITION_DIAGONAL_INVERSE: return "Diagonal Inverse";
     case TRANSITION_VENETIAN_V: return "Venetian V";
     case TRANSITION_FOUR_CORNER: return "Four Corner";
-    case TRANSITION_CURTAIN: return "Curtain";
     case TRANSITION_ZOOM_BLOCKS: return "Zoom Blocks";
     case TRANSITION_HORIZONTAL_SPLIT: return "Horizontal Split";
     case TRANSITION_VERTICAL_SPLIT: return "Vertical Split";
     case TRANSITION_BARN_DOORS: return "Barn Doors";
     case TRANSITION_RANDOM_BLOCKS: return "Random Blocks";
-    case TRANSITION_ZIGZAG_SNAKE: return "Zigzag";
+    case TRANSITION_CHECKER_CASCADE: return "Checker Cascade";
+    case TRANSITION_CARD_STACK: return "Card Stack";
+    case TRANSITION_STATIC_DISSOLVE: return "Static Dissolve";
+    case TRANSITION_DITHER_FADE: return "Dither Fade";
+    case TRANSITION_PUSH_LEFT: return "Push Left";
+    case TRANSITION_CROSSFADE: return "Crossfade";
+    case TRANSITION_CARD_FLIP: return "Card Flip";
+    case TRANSITION_TILE_FLIP: return "Tile Flip Wave";
+    case TRANSITION_BLOCK_DROP: return "Block Drop";
+    case TRANSITION_MELT: return "Melt";
+    case TRANSITION_ZOOM_PUNCH: return "Zoom Punch";
+    case TRANSITION_CORNER_PEEL: return "Corner Peel";
+    case TRANSITION_SHATTER: return "Shatter";
+    case TRANSITION_CUBE_TURN: return "Cube Turn";
+    case TRANSITION_JELLY_DROP: return "Jelly Drop";
+    case TRANSITION_TILE_SPIN: return "Tile Spin";
+    case TRANSITION_INFINITE_ZOOM: return "Infinite Zoom";
+    case TRANSITION_RGB_SPLIT: return "RGB Split";
+    case TRANSITION_ACCORDION: return "Accordion";
+    case TRANSITION_INK_BLEED: return "Ink Bleed";
+    case TRANSITION_CRACK_SPLIT: return "Crack Split";
+    case TRANSITION_SAND_PILE: return "Sand Pile";
+    case TRANSITION_HALFTONE: return "Halftone";
+    case TRANSITION_QUICK_IRIS: return "Quick Iris";
+    case TRANSITION_DIAMOND_IRIS: return "Diamond Iris";
+    case TRANSITION_HEART_IRIS: return "Heart Iris";
+    case TRANSITION_CLOCK_SWEEP: return "Clock Sweep";
+    case TRANSITION_BOW_TIE: return "Bow Tie";
+    case TRANSITION_WIND: return "Wind";
+    case TRANSITION_POLKA_DOTS: return "Polka Dots";
+    case TRANSITION_RAIN_COLUMNS: return "Rain Columns";
+    case TRANSITION_WAVE_WIPE: return "Wave Wipe";
+    case TRANSITION_VENETIAN_H: return "Venetian H";
+    case TRANSITION_SPIRAL_IN: return "Spiral In";
+    case TRANSITION_LUMA_WIPE: return "Luma Wipe";
     default: return "Unknown";
   }
 }
 
-String drawImageWithRandomTransition(uint16_t* buffer, int width, int height) {
-  // Pick random transition (avoid repeating the last one)
-  TransitionType transition;
-  do {
-    transition = (TransitionType)random(0, TRANSITION_COUNT);
-  } while (transition == lastTransition && TRANSITION_COUNT > 1);
-
-  lastTransition = transition;  // Remember for next time
-
-  String transitionName = getTransitionName(transition);
-  Serial.printf("Using transition: %s\n", transitionName.c_str());
-
-  switch(transition) {
-    case TRANSITION_WIPE_BOTTOM:
-      drawWipeBottomToTop(buffer, width, height);
-      break;
-    case TRANSITION_WIPE_LEFT:
-      drawWipeLeftToRight(buffer, width, height);
-      break;
-    case TRANSITION_WIPE_RIGHT:
-      drawWipeRightToLeft(buffer, width, height);
-      break;
-    case TRANSITION_CIRCULAR:
-      drawCircularWipe(buffer, width, height);
-      break;
-    case TRANSITION_CHECKERBOARD:
-      drawCheckerboardDissolve(buffer, width, height);
-      break;
-    case TRANSITION_SLIDE_REVEAL:
-      drawSlideReveal(buffer, width, height);
-      break;
-    case TRANSITION_DIAGONAL:
-      drawDiagonalWipe(buffer, width, height);
-      break;
-    case TRANSITION_DIAGONAL_INVERSE:
-      drawDiagonalWipeInverse(buffer, width, height);
-      break;
-    case TRANSITION_VENETIAN_V:
-      drawVenetianBlindsV(buffer, width, height);
-      break;
-    case TRANSITION_FOUR_CORNER:
-      drawFourCornerWipe(buffer, width, height);
-      break;
-    case TRANSITION_CURTAIN:
-      drawCurtainOpen(buffer, width, height);
-      break;
-    case TRANSITION_ZOOM_BLOCKS:
-      drawZoomBlocks(buffer, width, height);
-      break;
-    case TRANSITION_HORIZONTAL_SPLIT:
-      drawHorizontalSplit(buffer, width, height);
-      break;
-    case TRANSITION_VERTICAL_SPLIT:
-      drawVerticalSplit(buffer, width, height);
-      break;
-    case TRANSITION_BARN_DOORS:
-      drawBarnDoors(buffer, width, height);
-      break;
-    case TRANSITION_RANDOM_BLOCKS:
-      drawRandomBlocks(buffer, width, height);
-      break;
-    case TRANSITION_ZIGZAG_SNAKE:
-      drawZigzagSnake(buffer, width, height);
-      break;
+// A retired slot that is forced by index draws the transition it duplicated.
+static TransitionType resolveRetired(TransitionType t) {
+  switch (t) {
+    case TRANSITION_RETIRED_SLIDE: return TRANSITION_WIPE_RIGHT;
+    case TRANSITION_RETIRED_CURTAIN: return TRANSITION_VERTICAL_SPLIT;
+    case TRANSITION_RETIRED_ZIGZAG: return TRANSITION_BARN_DOORS;
+    default: return t;
   }
-
-  Serial.println("Transition complete!");
-  return transitionName;
 }
 
-String drawImageWithTransitionChoice(uint16_t* buffer, int width, int height, uint8_t transitionChoice) {
-  if (transitionChoice == 0xFF || transitionChoice >= (uint8_t)TRANSITION_COUNT) {
-    return drawImageWithRandomTransition(buffer, width, height);
-  }
-
-  TransitionType forced = (TransitionType)transitionChoice;
-  String transitionName = getTransitionName(forced);
-  Serial.printf("Using forced transition: %s (%u)\n", transitionName.c_str(), (unsigned)transitionChoice);
-  lastTransition = forced;
-
-  switch(forced) {
+// Draw `buffer` (the new cover) with transition `t`. Frame-composed transitions read the old
+// cover from prevBuffer. Afterwards prevBuffer holds the new cover for the next transition.
+static void runTransition(TransitionType t, uint16_t* buffer, int width, int height) {
+  const bool canCompose = prevBuffer && composeBuffer;
+  if (!canCompose && t >= TRANSITION_CARD_STACK) t = TRANSITION_WIPE_BOTTOM;
+  if (canCompose && !panelShowsImage) memset(prevBuffer, 0, IMAGE_SIZE);  // old = black, not a stale cover
+  const uint16_t* oldB = prevBuffer;
+  // Resync the panel's drawing rectangle. Arduino_ST7789 skips CASET/RASET when the window equals
+  // the last one it sent; if one of those commands was ever garbled on the wire, every later
+  // same-sized draw went to the wrong rectangle (whole covers missing, single lines) until a
+  // differently-sized draw happened. A 1x1 write here makes the next draw resend both. The pixel is
+  // the new cover's own (0,0), which the transition paints anyway.
+  gfx->drawPixel(0, 0, buffer[0]);
+  switch (t) {
     case TRANSITION_WIPE_BOTTOM: drawWipeBottomToTop(buffer, width, height); break;
     case TRANSITION_WIPE_LEFT: drawWipeLeftToRight(buffer, width, height); break;
     case TRANSITION_WIPE_RIGHT: drawWipeRightToLeft(buffer, width, height); break;
     case TRANSITION_CIRCULAR: drawCircularWipe(buffer, width, height); break;
     case TRANSITION_CHECKERBOARD: drawCheckerboardDissolve(buffer, width, height); break;
-    case TRANSITION_SLIDE_REVEAL: drawSlideReveal(buffer, width, height); break;
     case TRANSITION_DIAGONAL: drawDiagonalWipe(buffer, width, height); break;
     case TRANSITION_DIAGONAL_INVERSE: drawDiagonalWipeInverse(buffer, width, height); break;
     case TRANSITION_VENETIAN_V: drawVenetianBlindsV(buffer, width, height); break;
     case TRANSITION_FOUR_CORNER: drawFourCornerWipe(buffer, width, height); break;
-    case TRANSITION_CURTAIN: drawCurtainOpen(buffer, width, height); break;
     case TRANSITION_ZOOM_BLOCKS: drawZoomBlocks(buffer, width, height); break;
     case TRANSITION_HORIZONTAL_SPLIT: drawHorizontalSplit(buffer, width, height); break;
     case TRANSITION_VERTICAL_SPLIT: drawVerticalSplit(buffer, width, height); break;
     case TRANSITION_BARN_DOORS: drawBarnDoors(buffer, width, height); break;
     case TRANSITION_RANDOM_BLOCKS: drawRandomBlocks(buffer, width, height); break;
-    case TRANSITION_ZIGZAG_SNAKE: drawZigzagSnake(buffer, width, height); break;
+    case TRANSITION_CHECKER_CASCADE: drawCheckerCascade(buffer, width, height); break;
+    case TRANSITION_CARD_STACK: drawCardStack(oldB, buffer); break;
+    case TRANSITION_STATIC_DISSOLVE: drawMaskDissolve(oldB, buffer, false); break;
+    case TRANSITION_DITHER_FADE: drawMaskDissolve(oldB, buffer, true); break;
+    case TRANSITION_PUSH_LEFT: drawPushLeft(oldB, buffer); break;
+    case TRANSITION_CROSSFADE: drawCrossfade(oldB, buffer); break;
+    case TRANSITION_CARD_FLIP: drawCardFlip(oldB, buffer); break;
+    case TRANSITION_TILE_FLIP: drawTileFlip(oldB, buffer); break;
+    case TRANSITION_BLOCK_DROP: drawBlockDrop(oldB, buffer); break;
+    case TRANSITION_MELT: drawMelt(oldB, buffer); break;
+    case TRANSITION_ZOOM_PUNCH: drawZoomPunch(oldB, buffer); break;
+    case TRANSITION_CORNER_PEEL: drawCornerPeel(oldB, buffer); break;
+    case TRANSITION_SHATTER: drawShatter(oldB, buffer); break;
+    case TRANSITION_CUBE_TURN: drawCubeTurn(oldB, buffer); break;
+    case TRANSITION_JELLY_DROP: drawJellyDrop(oldB, buffer); break;
+    case TRANSITION_TILE_SPIN: drawTileSpin(oldB, buffer); break;
+    case TRANSITION_INFINITE_ZOOM: drawInfiniteZoom(oldB, buffer); break;
+    case TRANSITION_RGB_SPLIT: drawRgbSplit(oldB, buffer); break;
+    case TRANSITION_ACCORDION: drawAccordion(oldB, buffer); break;
+    case TRANSITION_INK_BLEED: drawInkBleed(oldB, buffer); break;
+    case TRANSITION_CRACK_SPLIT: drawCrackSplit(oldB, buffer); break;
+    case TRANSITION_SAND_PILE: drawSandPile(oldB, buffer); break;
+    case TRANSITION_HALFTONE: drawHalftone(oldB, buffer); break;
+    case TRANSITION_QUICK_IRIS: drawQuickMask(0, oldB, buffer); break;
+    case TRANSITION_DIAMOND_IRIS: drawQuickMask(1, oldB, buffer); break;
+    case TRANSITION_HEART_IRIS: drawQuickMask(2, oldB, buffer); break;
+    case TRANSITION_CLOCK_SWEEP: drawQuickMask(3, oldB, buffer); break;
+    case TRANSITION_BOW_TIE: drawQuickMask(4, oldB, buffer); break;
+    case TRANSITION_WIND: drawQuickMask(5, oldB, buffer); break;
+    case TRANSITION_POLKA_DOTS: drawQuickMask(6, oldB, buffer); break;
+    case TRANSITION_RAIN_COLUMNS: drawQuickMask(7, oldB, buffer); break;
+    case TRANSITION_WAVE_WIPE: drawQuickMask(8, oldB, buffer); break;
+    case TRANSITION_VENETIAN_H: drawQuickMask(9, oldB, buffer); break;
+    case TRANSITION_SPIRAL_IN: drawQuickMask(10, oldB, buffer); break;
+    case TRANSITION_LUMA_WIPE: drawQuickMask(11, oldB, buffer); break;
     default: drawWipeBottomToTop(buffer, width, height); break;
   }
+  // Every frame-composed transition ends on the exact new frame.
+  if (canCompose && t >= TRANSITION_CARD_STACK) gfx->draw16bitRGBBitmap(0, 0, buffer, width, height);
+  if (canCompose) memcpy(prevBuffer, buffer, IMAGE_SIZE);
+  panelShowsImage = true;
   Serial.println("Transition complete!");
+}
+
+String drawImageWithRandomTransition(uint16_t* buffer, int width, int height) {
+  // Pick a random live transition (skip retired slots and the last one used)
+  TransitionType transition;
+  do {
+    transition = (TransitionType)random(0, TRANSITION_COUNT);
+  } while (isRetiredTransition(transition) || transition == lastTransition);
+
+  lastTransition = transition;
+  String transitionName = getTransitionName(transition);
+  Serial.printf("Using transition: %s\n", transitionName.c_str());
+  runTransition(transition, buffer, width, height);
+  return transitionName;
+}
+
+// New songs have already waited ~2-3 s for their BLE transfer, so they get only the fast transitions
+// (measured draw time in brackets). Cache hits keep the full set.
+static const TransitionType QUICK_TRANSITIONS[] = {
+  TRANSITION_RANDOM_BLOCKS,   // ~130 ms
+  TRANSITION_WIPE_BOTTOM,     // ~160 ms ("Wipe Up")
+  TRANSITION_VENETIAN_V,      // ~160 ms
+  TRANSITION_CHECKERBOARD,    // ~240 ms
+  TRANSITION_ZOOM_BLOCKS,     // ~255 ms
+  TRANSITION_VERTICAL_SPLIT,  // ~315 ms
+  // Threshold-map quick set: 10 composed frames each, estimated ~130-160 ms (not yet measured).
+  TRANSITION_QUICK_IRIS,
+  TRANSITION_DIAMOND_IRIS,
+  TRANSITION_HEART_IRIS,
+  TRANSITION_CLOCK_SWEEP,
+  TRANSITION_BOW_TIE,
+  TRANSITION_WIND,
+  TRANSITION_POLKA_DOTS,
+  TRANSITION_RAIN_COLUMNS,
+  TRANSITION_WAVE_WIPE,
+  TRANSITION_VENETIAN_H,
+  TRANSITION_SPIRAL_IN,
+  TRANSITION_LUMA_WIPE,
+};
+
+String drawImageWithQuickTransition(uint16_t* buffer, int width, int height) {
+  const int n = sizeof(QUICK_TRANSITIONS) / sizeof(QUICK_TRANSITIONS[0]);
+  TransitionType transition;
+  do {
+    transition = QUICK_TRANSITIONS[random(0, n)];
+  } while (transition == lastTransition);
+  lastTransition = transition;
+  String transitionName = getTransitionName(transition);
+  Serial.printf("Using transition: %s (quick, new song)\n", transitionName.c_str());
+  runTransition(transition, buffer, width, height);
+  return transitionName;
+}
+
+// `quick`: when no transition is forced, pick from QUICK_TRANSITIONS (fresh transfers).
+String drawImageWithTransitionChoice(uint16_t* buffer, int width, int height, uint8_t transitionChoice,
+                                     bool quick = false) {
+  if (transitionChoice == 0xFF || transitionChoice >= (uint8_t)TRANSITION_COUNT) {
+    return quick ? drawImageWithQuickTransition(buffer, width, height)
+                 : drawImageWithRandomTransition(buffer, width, height);
+  }
+
+  TransitionType forced = resolveRetired((TransitionType)transitionChoice);
+  String transitionName = getTransitionName(forced);
+  Serial.printf("Using forced transition: %s (%u)\n", transitionName.c_str(), (unsigned)transitionChoice);
+  lastTransition = forced;
+  runTransition(forced, buffer, width, height);
   return transitionName;
 }
 
@@ -957,6 +1765,7 @@ String drawImageWithTransitionChoice(uint16_t* buffer, int width, int height, ui
 // ==================================================
 
 void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor) {
+    panelShowsImage = false;
     gfx->fillScreen(WHITE);
 
     // Show "Bluetooth connected?" with "Bluetooth" in blue - LARGER & CENTERED
@@ -981,6 +1790,7 @@ void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor) {
 }
 
 void resetToWaitingScreen() {
+    panelShowsImage = false;
     showingStartupScreen = true;
     pulseIsWhite = false;
     lastPulseUpdate = millis();
@@ -989,6 +1799,7 @@ void resetToWaitingScreen() {
 
 // Connected, nothing played yet.
 void showReadyScreen() {
+    panelShowsImage = false;
     gfx->fillScreen(WHITE);
     gfx->setTextSize(3);
     gfx->setTextColor(BLACK);
@@ -1013,6 +1824,10 @@ void setupBLE() {
     // Initialize BLE device
     BLEDevice::init("Spotify Display");
     Serial.println("BLE Device initialized: 'Spotify Display'");
+    // Prefer LE 2M for every connection; onConnect also asks per connection. PHY changes are
+    // reported through the GAP handler (runs on BTC_TASK: only copies values, loop() logs them).
+    esp_ble_gap_set_prefered_default_phy(ESP_BLE_GAP_PHY_2M_PREF_MASK, ESP_BLE_GAP_PHY_2M_PREF_MASK);
+    BLEDevice::setCustomGapHandler(onGapEvent);
 
     // Create BLE server
     pServer = BLEDevice::createServer();
@@ -1266,6 +2081,12 @@ void setup() {
   }
 
   rxBuffer = psramFound() ? (uint16_t*)ps_malloc(IMAGE_SIZE) : (uint16_t*)malloc(IMAGE_SIZE);
+  // Frame-composed transitions only; without them those transitions fall back to Wipe Up.
+  if (psramFound()) {
+    prevBuffer = (uint16_t*)ps_malloc(IMAGE_SIZE);
+    composeBuffer = (uint16_t*)ps_malloc(IMAGE_SIZE);
+  }
+  Serial.printf("Compose buffers: %s\n", (prevBuffer && composeBuffer) ? "ok" : "MISSING (frame transitions disabled)");
 
   if (!imageBuffer || !rxBuffer) {
     Serial.println("FATAL: Cannot allocate image buffers");
@@ -1506,7 +2327,8 @@ bool loadFromCache(uint8_t* cacheKey) {
 }
 
 // Save image to SD card cache
-bool saveToCache(uint8_t* cacheKey) {
+bool saveToCache(uint8_t* cacheKey, const uint16_t* src) {
+  if (!src) src = imageBuffer;
   String filename = getCacheFileNameVersioned(cacheKey, CACHE_KEY_VERSION);
   String tmpFilename = filename + ".tmp";
 
@@ -1518,8 +2340,8 @@ bool saveToCache(uint8_t* cacheKey) {
     return false;
   }
 
-  size_t bytesWritten = file.write((uint8_t*)imageBuffer, IMAGE_SIZE);
-  uint32_t crc = computeCRC32((uint8_t*)imageBuffer, IMAGE_SIZE);
+  size_t bytesWritten = file.write((const uint8_t*)src, IMAGE_SIZE);
+  uint32_t crc = computeCRC32((const uint8_t*)src, IMAGE_SIZE);
   uint8_t crcLE[4] = {
     (uint8_t)(crc & 0xFF),
     (uint8_t)((crc >> 8) & 0xFF),
@@ -1635,6 +2457,12 @@ void loop() {
     }
   }
 
+  if (phyUpdatePending) {
+    phyUpdatePending = false;
+    // 1 = LE 1M, 2 = LE 2M, 3 = Coded
+    Serial.printf("BLE: PHY tx=%uM rx=%uM (status %u)\n", (unsigned)phyTx, (unsigned)phyRx, (unsigned)phyStatus);
+  }
+
   // BLE stats: number of /cache/*.bin files — sent to the phone app only (never drawn on this display)
   if (statsRequestPending) {
     statsRequestPending = false;
@@ -1676,7 +2504,18 @@ void loop() {
       expectedSize = 0;
       imageTransferComplete = false;
       completedImageBytes = 0;
+      pendingTransition = 0xFF;  // drop a cut-off prefetch's store-only marker
     }
+
+    if (cacheProbeOnly) {
+      // Prefetch probe: answer only. Never load or draw — the screen keeps the current song.
+      cacheProbeOnly = false;
+      bool have = isCached(currentCacheKey);
+      Serial.printf("BLE: Prefetch probe — %s\n", have ? "already cached" : "not cached");
+      uint8_t response = have ? 0x01 : 0x00;
+      pCacheChar->setValue(&response, 1);
+      pCacheChar->notify();
+    } else {
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
@@ -1747,6 +2586,7 @@ void loop() {
       pCacheChar->setValue(&response, 1);
       pCacheChar->notify();
     }
+    }  // not a probe
   }
 
   // Handle image transfer complete (triggered by lightweight callback)
@@ -1758,6 +2598,21 @@ void loop() {
 
     Serial.println("Processing image transfer completion...");
 
+    if (pendingTransition == TRANSITION_STORE_ONLY) {
+      // Prefetched cover for a song that isn't playing yet: save it from rxBuffer, leave the
+      // panel and imageBuffer alone. When that song starts, its cache check is a hit.
+      pendingTransition = 0xFF;
+      unsigned long saveStart = millis();
+      saveToCache(transferCacheKey, rxBuffer);
+      Serial.printf("BLE: Prefetch stored (not drawn), save %lums\n", millis() - saveStart);
+      // ACK on the Image characteristic only. No Message "SUCCESS": that string also confirms a
+      // cache-hit render in the app, and a late one could be credited to the next real song.
+      uint8_t success = 0x01;
+      pImageChar->setValue(&success, 1);
+      pImageChar->notify();
+      completedImageBytes = 0;
+    } else {
+
     // Do NOT notify the client until display/save finish — otherwise the phone
     // can start the next BLE image while we still mutate imageBuffer (race → half frames / retries).
     // RGB565 is already Atkinson-dithered on the phone before BLE send; no dithering here.
@@ -1767,7 +2622,8 @@ void loop() {
     showingStartupScreen = false;
 
     unsigned long displayStart = millis();
-    String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, pendingTransition);
+    String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                                          pendingTransition, /*quick=*/true);
     unsigned long displayTime = millis() - displayStart;
 
     unsigned long saveStart = millis();
@@ -1787,6 +2643,7 @@ void loop() {
     pMsgChar->notify();
 
     completedImageBytes = 0;
+    }  // not store-only
   }
 
   // Handle BLE connection state changes

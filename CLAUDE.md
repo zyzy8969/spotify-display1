@@ -8,7 +8,8 @@ Spotify Display (`zyzy8969/spotify-display1`) — a digital keychain that shows 
 listening as album art. Three cooperating parts:
 
 - **ESP32-S3 firmware** (`src/main.cpp`, C++/Arduino via PlatformIO) — BLE GATT peripheral,
-  SD-card album-art cache, 240x240 ST7789 LCD, 17 animated transitions.
+  SD-card album-art cache, 240x240 ST7789 LCD, 49 animated transitions (frame-composed ones use
+  two extra PSRAM buffers, `prevBuffer`/`composeBuffer`).
 - **iOS app** (`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/`, Swift/SwiftUI) — the active
   client: Spotify PKCE auth, ~1 Hz now-playing poll, art download, RGB565 conversion, BLE send.
 - **Python tools** (`python/`) — archived prototype sender/color-tuning scripts. Not the active
@@ -166,7 +167,8 @@ Changes here need on-device stress testing (rapid skip, disconnect mid-transfer)
   `CACHE_RENDERED` message rather than showing optimistic cache-hit UI.
 - `SpotifyManager` skip/resync sequencing and in-flight cancellation. Polls overlap and can
   answer out of order; `pollOnce` drops any answer older than one already applied (`pollSeq`)
-  and ignores every recently replaced track for 3 s (`recentlyReplaced`). It also drops answers
+  and ignores every recently replaced track for 3 s (`recentlyReplaced`); going back to a track
+  replaced within 20 s needs 1.5 s of agreeing answers (`returnCandidateId`). It also drops answers
   whose Spotify `timestamp` is older than the newest seen (a lagging Spotify server; accepted after
   5 s so a real device switch still goes through). Without these, an old answer re-sends the
   previous song right after the new one is drawn.
@@ -190,5 +192,9 @@ Ask for it before implementing the redesign rather than inferring the spec.
 ## Hardware pins (do not change without asking)
 
 LCD: BL 20, RST 42, DC 38, CS 39, MOSI 41, SCLK 40. SD: CS 17, MISO 16, MOSI 18, CLK 21.
-Display 240x240, frame size 115,200 bytes. Board needs PSRAM (`qio_opi`, 16 MB flash,
+Display 240x240, frame size 115,200 bytes. **Display SPI runs at 40 MHz — do not raise it.** 80 MHz
+(above the ST7789's ~62.5 MHz rating) garbled transfers: covers logged as drawn never appeared, single
+lines, stray squares (webcam-verified 2026-11-20). The S3's SPI clock is 80 MHz / integer, so there is
+nothing between 40 and 80. `runTransition()` also resyncs the panel window with a 1x1 write first,
+because Arduino_ST7789 caches CASET/RASET and one garbled command used to stick for several songs. Board needs PSRAM (`qio_opi`, 16 MB flash,
 `huge_app.csv` partitions). `resources/` holds ST7789 gamma tuning references.
