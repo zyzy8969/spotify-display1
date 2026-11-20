@@ -105,7 +105,10 @@ work into a callback — it overflows the stack and crashes the board.
 `loop()` is the single owner of ordered state transitions, in this sequence: pending stats →
 pending clear-cache → pending cache check (which first *resets* a partial `RECEIVING_DATA`
 frame so SD load cannot race progressive draw) → progressive line draw of newly arrived bytes →
-transfer-complete (final rows, SD save, then ACK) → connect/disconnect UI. Disconnect recovery
+transfer-complete (final rows, SD save, then ACK) → connect/disconnect UI. Exception: a cache
+check waits one iteration while `imageTransferComplete` is pending, so a finished frame is drawn and
+saved (under `transferCacheKey`, snapshotted at its header) before a hit can load over
+`imageBuffer`. Disconnect recovery
 and waiting-screen reset were deliberately consolidated into this one path to stop duplicate
 resets; keep them there.
 
@@ -154,8 +157,10 @@ Changes here need on-device stress testing (rapid skip, disconnect mid-transfer)
   `CACHE_RENDERED` message rather than showing optimistic cache-hit UI.
 - `SpotifyManager` skip/resync sequencing and in-flight cancellation.
 - `src/main.cpp` partial-frame and transition sequencing during rapid track changes.
-- An intermittent skip-render artifact (previous image flashes after skip/reconnect) is open
-  with root cause still unresolved: cache-status handling vs transfer/render sequencing.
+- Skip-render artifact: root cause found 2026-11-19 — cache replies carry no song id, so after a
+  skip the old song's late reply was matched to the new song. The app now never sends a cache check
+  while the board still owes a reply (`BLEManager.cacheReplyOwed` / `imageAckOwed`). Fix awaiting
+  hardware verification; keep that invariant when touching the cache/transfer path.
 
 ## Project tracking
 

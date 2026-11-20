@@ -48,21 +48,32 @@ Severity order. `[fw]` firmware, `[app]` iOS, `[both]` crosses the boundary.
   channel, so every BLE brightness write hit a nonexistent channel. Fixed with a named
   `TFT_BL_PWM_CHANNEL`. **Also needed an app-side fix**: `UserDefaults.integer(forKey:)` returns 0
   when unset, so a fresh install pushed brightness 0 and would have blacked out the screen once the
-  firmware started obeying it. Branch `fix/brightness-ledc-channel`. Compiles; **not yet flashed**.
+  firmware started obeying it. Branch `fix/brightness-ledc-channel`. **Brightness confirmed working
+  on hardware 2026-11-19.** Needed `platform = espressif32@6.5.0` (core 2.0.14): core 3.x removed
+  `ledcSetup`/`ledcAttachPin`.
+- [x] **Skip matched the old song's cache reply to the new song** `[app]` — the skip-render
+  artifact. Skipping cancelled the app's wait but not the board's reply, and replies carry no song
+  id, so A's late "hit" was taken as B's answer: "cache hit 0.1s" for a song never drawn or sent,
+  and "draws one line and stops". Fix: `BLEManager` tracks replies the board still owes
+  (`cacheReplyOwed`, `imageAckOwed`) and `processTrack` waits them out (max 8 s) before asking about
+  the next song. App-only, no protocol change. Cleaner alternative still open: echo the cache key in
+  every reply (protocol change, needs sign-off).
+- [x] **Frame buffer overwritten mid-draw** `[fw]` — `loop()` handled a cache check before finishing
+  a just-completed transfer, so a hit could load over `imageBuffer` before it was saved, and the save
+  used `currentCacheKey` (already the next song's). Fix: the cache check now waits a loop iteration
+  while `imageTransferComplete` is pending, and frames are saved under `transferCacheKey`, snapshotted
+  at the image header. Note the app fix above already stops our app from triggering this.
+- [x] **`awaitWriteWindow` lost wakeup** `[app]` — now re-checks every 100 ms, never overwrites a
+  parked waiter, and exits when the transfer epoch changes (cancel also wakes it).
+- [x] **Stale timeout kills healthy transfers** `[app]` — the SUCCESS timeout task now has a
+  generation guard, and an exiting old task no longer nils out the newer task's handle.
+- [x] **Token refresh race** `[app]` — refreshes are single-flight (`tokenRefreshTask`), so
+  concurrent callers share one request and one rotated token.
+- [x] **Random pixels at boot** `[fw]` — panel RAM was visible with the backlight on during SD init;
+  `setup()` now clears to black right after `gfx->begin()`.
 
-### Blocking bugs
-- [ ] **Frame buffer overwritten mid-draw** `[both]` — firmware clears `imageState` in the BLE
-  callback before `loop()` has drawn/saved, so a fast skip can overwrite `imageBuffer` during the
-  previous frame's draw and SD write. Produces the skip-render artifact **and can poison the cache**
-  with a half-and-half frame whose CRC passes. Prime suspect for the long-standing artifact.
-- [ ] **`awaitWriteWindow` lost wakeup** `[app]` — `peripheralIsReady` hops to the main actor, so
-  the wakeup can land while the continuation is nil and be lost; also overwrites any stored
-  continuation, leaking it. Causes stalled transfers that fail on timeout.
-- [ ] **Stale timeout kills healthy transfers** `[app]` — the SUCCESS timeout task has no
-  generation guard, unlike the cache/clear/ready paths. Can fire against a newer transfer.
-- [ ] **Token refresh race** `[app]` — two concurrent refreshes can use the same refresh token;
-  Spotify rotates them, so the loser gets `invalid_grant` and the Keychain is overwritten by
-  whichever finishes last. Most likely at BLE reconnect → looks like a random sign-out.
+All six above: firmware compiles locally; app compiles only in the cloud build. **Not yet verified on
+hardware** — see the skip stress test in `docs/VALIDATION_CHECKLIST.md`.
 
 ### Image quality (do as ONE pass, with before/after photos — not with the brightness flash)
 - [ ] **Quantiser truncates instead of rounding** `[app]` — `Int(UInt16(oldR) >> 3)` biases error
