@@ -108,6 +108,10 @@ ImageState imageState = WAITING_FOR_SIZE;
 uint32_t expectedSize = 0;
 uint32_t receivedBytes = 0;
 uint8_t currentCacheKey[16];
+// Key of the frame being received, snapshotted when its header arrives. A later cache check
+// overwrites currentCacheKey, so saving with currentCacheKey could file this frame's pixels
+// under the next song's key (a cache entry with a valid CRC but the wrong picture).
+uint8_t transferCacheKey[16];
 bool cacheHit = false;
 uint8_t pendingTransition = 0xFF;  // 0xFF means random transition
 
@@ -309,6 +313,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             }
 
             Serial.printf("BLE: Expecting %d bytes\n", expectedSize);
+            memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
             receivedBytes = 0;
             lastDrawnBytes = 0;  // keep progressive draw in sync with new frame (top-first)
             imageState = RECEIVING_DATA;
@@ -329,6 +334,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             }
             if (isResyncHeader && resyncSize == IMAGE_SIZE) {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
+                memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
                 receivedBytes = 0;
                 lastDrawnBytes = 0;
                 // Prevent a stale completion from a prior partial frame from firing in loop().
@@ -1092,6 +1098,9 @@ void setup() {
 
   // Initialize Arduino_GFX display
   gfx->begin();
+  // Panel RAM powers up with random contents and the backlight is already on; clear it now so
+  // leftover pixels are not visible during the ~1s of SD init before the "Hiii" screen.
+  gfx->fillScreen(BLACK);
 
   // Configure MADCTL register (0x36) for RGB/BGR color order
   // Using 0x00: RGB mode (matches RGB565 format from Python)
@@ -1614,7 +1623,10 @@ void loop() {
 
   // Handle cache check (triggered by lightweight callback)
   // This runs in main task with large stack - safe for SD card/display ops
-  if (cacheCheckPending) {
+  // A finished transfer still waiting for its final draw + SD save owns imageBuffer: a cache hit
+  // here would load another image over it before it is saved. Leave the check pending; the
+  // completion block below runs this iteration and the check runs on the next one.
+  if (cacheCheckPending && !imageTransferComplete) {
     cacheCheckPending = false;
 
     Serial.println("Processing cache check request...");
@@ -1751,7 +1763,7 @@ void loop() {
     }
 
     unsigned long saveStart = millis();
-    saveToCache(currentCacheKey);
+    saveToCache(transferCacheKey);
     unsigned long saveTime = millis() - saveStart;
 
     Serial.printf("⚡ Processing: progressive draw complete, save %lums\n", saveTime);
