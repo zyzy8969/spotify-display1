@@ -308,7 +308,7 @@ async def connect_to_display(address):
         message = data.decode('utf-8', errors='ignore')
         if message:
             if message == "HB":
-                pass  # Board heartbeat every ~2 s (BLE protocol 1.7); wakes the iOS app, ignore here.
+                pass  # Board heartbeat every ~1 s (BLE protocol 1.7); wakes the iOS app, ignore here.
             elif message == "SUCCESS":
                 ctx.transfer_complete_event.set()
             elif message.startswith("TRANSITION:"):

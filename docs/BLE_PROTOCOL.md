@@ -4,7 +4,7 @@
 
 Version: **1.7** (Board heartbeat `HB` so the iOS app keeps working in the background.)
 
-Changes in 1.7: firmware notifies Message `HB` every ~2 s while connected (see **Heartbeat**). Clients that
+Changes in 1.7: firmware notifies Message `HB` every ~1 s while connected (see **Heartbeat**). Clients that
 log or collect unknown messages must ignore it.
 
 ## Peripheral
@@ -72,14 +72,14 @@ The iOS app treats both Message `ERROR:*` and Image `0x02` as an immediate failu
 
 ## Heartbeat (1.7)
 
-While a client is connected, firmware notifies UTF-8 `HB` on **Message** every **2 s**
+While a client is connected, firmware notifies UTF-8 `HB` on **Message** every **1 s**
 (`HEARTBEAT_INTERVAL_MS` in `src/main.cpp`), from `loop()`, so it pauses while `loop()` is busy with a
 cache-hit transition or SD save.
 
 Why: iOS suspends a backgrounded app about 30 s after it leaves the foreground, which stops its Spotify
 poll. With the `bluetooth-central` background mode, each notify on a subscribed characteristic wakes the
 app briefly. The iOS app polls Spotify once per `HB` (skipped when its foreground poll ran in the last
-1.5 s), so the display keeps up with song changes while the phone is locked, ~2 s behind at worst.
+0.8 s), so the display keeps up with song changes while the phone is locked, ~1 s behind at worst.
 
 `HB` carries no state. Clients must not treat it as `READY`, `SUCCESS`, or a reply to any request.
 

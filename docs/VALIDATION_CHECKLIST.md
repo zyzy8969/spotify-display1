@@ -16,7 +16,7 @@ Last updated: 2026-04-15
 
 - Heartbeat (protocol 1.7): with the display connected, lock the phone, wait 2+ minutes, then skip
   tracks from the lock screen or Control Center.
-- Expected: display follows each skip within ~2–3 s while the phone stays locked, and keeps doing so
+- Expected: display follows each skip within ~1–2 s while the phone stays locked, and keeps doing so
   after 10+ minutes locked. Serial monitor shows no errors; app shows no spurious sign-out on unlock.
 - Also try with the app swiped to background (not killed) instead of locked. Note: force-quitting the
   app from the app switcher stops it entirely; iOS does not relaunch force-quit apps for Bluetooth.

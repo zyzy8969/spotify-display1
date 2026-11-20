@@ -198,7 +198,7 @@ unsigned long lastPulseUpdate = 0;
 // Background wake-up for the iOS app (BLE_PROTOCOL 1.7). iOS suspends the app ~30 s after it
 // leaves the foreground, but a notify on a subscribed characteristic wakes it briefly. Each "HB"
 // lets the app poll Spotify once, so the display keeps up while the phone is locked.
-#define HEARTBEAT_INTERVAL_MS 2000
+#define HEARTBEAT_INTERVAL_MS 1000
 unsigned long lastHeartbeatMs = 0;
 const unsigned long pulseUpdateInterval = 500; // Toggle every 500ms
 bool pulseIsWhite = false; // Toggle between red and white

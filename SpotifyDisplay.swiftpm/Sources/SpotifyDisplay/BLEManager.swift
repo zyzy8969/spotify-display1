@@ -40,7 +40,7 @@ final class BLEManager: NSObject, ObservableObject {
     /// Called on MainActor when GATT is fully ready after (re)connect. SpotifyManager registers this for instant resync.
     var onReadyCallback: (() -> Void)?
 
-    /// Called on MainActor for each board heartbeat (`HB` message, every ~2 s while connected).
+    /// Called on MainActor for each board heartbeat (`HB` message, every ~1 s while connected).
     /// iOS wakes the suspended app for each notify, so this is the background poll trigger.
     var onHeartbeat: (() -> Void)?
 
