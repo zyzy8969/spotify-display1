@@ -26,13 +26,22 @@ swift_files = [
     "AppDelegate.swift",
     "BLEManager.swift",
     "ContentView.swift",
+    "CrayonShapes.swift",
     "Extensions.swift",
     "ImageProcessor.swift",
     "KeychainHelper.swift",
     "Models.swift",
+    "NowPlayingView.swift",
+    "SettingsView.swift",
+    "SignedOutView.swift",
     "SpotifyAuthPresenter.swift",
     "SpotifyDisplayApp.swift",
     "SpotifyManager.swift",
+    "StatsView.swift",
+    "Theme.swift",
+    "ThemeComponents.swift",
+    "ThemeCopy.swift",
+    "ThemeTypography.swift",
 ]
 
 file_refs = {}

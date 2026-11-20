@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
-   LastUpgradeVersion = "2640"
+   LastUpgradeVersion = "1500"
    version = "1.7">
    <BuildAction
       parallelizeBuildables = "YES"
@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "25954AFF473B4F999CCBCD6E"
+               BlueprintIdentifier = "281C79F0523C473D8E4EC62D"
                BuildableName = "SpotifyDisplay.app"
                BlueprintName = "SpotifyDisplay"
                ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
@@ -28,6 +28,8 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
+      <Testables>
+      </Testables>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
@@ -43,7 +45,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "25954AFF473B4F999CCBCD6E"
+            BlueprintIdentifier = "281C79F0523C473D8E4EC62D"
             BuildableName = "SpotifyDisplay.app"
             BlueprintName = "SpotifyDisplay"
             ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
@@ -60,7 +62,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "25954AFF473B4F999CCBCD6E"
+            BlueprintIdentifier = "281C79F0523C473D8E4EC62D"
             BuildableName = "SpotifyDisplay.app"
             BlueprintName = "SpotifyDisplay"
             ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
