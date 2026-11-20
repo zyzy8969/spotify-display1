@@ -1091,7 +1091,10 @@ void setup() {
   pinMode(TFT_BL, OUTPUT);
   ledcSetup(TFT_BL_PWM_CHANNEL, 5000, 8);   // 5kHz, 8-bit duty (0-255)
   ledcAttachPin(TFT_BL, TFT_BL_PWM_CHANNEL);
-  ledcWrite(TFT_BL_PWM_CHANNEL, 50);        // Low brightness during init
+  // Backlight OFF until the panel has been cleared: panel RAM powers up with random pixels, and
+  // with the light on they show for the ~0.3 s of reset + init below. (Driving the pin also stops
+  // it floating high, which is what the old "white screen" fix was for.)
+  ledcWrite(TFT_BL_PWM_CHANNEL, 0);
 
   // Hardware reset sequence
   pinMode(TFT_RST, OUTPUT);
@@ -1104,9 +1107,9 @@ void setup() {
 
   // Initialize Arduino_GFX display
   gfx->begin();
-  // Panel RAM powers up with random contents and the backlight is already on; clear it now so
-  // leftover pixels are not visible during the ~1s of SD init before the "Hiii" screen.
+  // Clear the random power-up contents, then turn the light on (low during the ~1 s of SD init).
   gfx->fillScreen(BLACK);
+  ledcWrite(TFT_BL_PWM_CHANNEL, 50);
 
   // Configure MADCTL register (0x36) for RGB/BGR color order
   // Using 0x00: RGB mode (matches RGB565 format from Python)
