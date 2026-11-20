@@ -93,24 +93,32 @@ hardware** — see the skip stress test in `docs/VALIDATION_CHECKLIST.md`.
 - [ ] No serpentine scan `[app]` — error always diffuses one direction; faint worming in gradients.
 
 ### UI / accessibility (see report §10, reviewed against Apple HIG)
-- [ ] **Connection state is colour-only and invisible to VoiceOver** `[app]` — `StatusDot` uses
-  green vs dim white with identical label text. Needs a shape difference + `.accessibilityLabel`.
-- [ ] **The spec's live strip inherits the same gap** — fix in the spec before building.
-- [ ] **Decide: drop the Appearance picker** — HIG says avoid app-specific appearance settings, but
-  explicitly allows permanently-dark for media-viewing apps. Recommend staying dark; it also avoids
-  converting every hard-coded `.white.opacity()` to semantic colours.
-- [ ] Fixed 11 pt debug type ignores Dynamic Type `[app]`.
-- [ ] Six accent colours with no system `[app]` — the monochrome spec removes this entirely.
-- [ ] Sign-in screen gives no reason for signing in `[app]`.
-- [ ] Album art resizes mid-download `[app]` — greedy `GeometryReader` + siblings appearing.
-- [ ] **Mirror the board's draw state in the app preview** `[app]` — show exactly what the display
-  shows at that instant. Fresh sends are exact for free: rows drawn = `bytesSent / 480`, mask the
-  preview to that height, and keep the *previous* cover visible below the scan line because that is
-  what the firmware leaves there. Cache hits need the app to stop sending `0xFF` (random) in the
-  5-byte header and pick the transition itself — the protocol already carries a transition index,
-  it is just unused (`BLEManager.sendRGB565`) — then run the same animation locally on its own
-  clock. No protocol change needed; the field already exists.
-- [ ] Blanket `.ignoresSafeArea()` pushes the bottom bar under the home indicator `[app]`.
+Fixed in code on `feat/themes-ui` (three themes from the Design canvas). **Not compiled locally, not
+yet verified on a device** — see `docs/VALIDATION_CHECKLIST.md` › "iOS UI (themes)".
+- [x] **Connection state is colour-only and invisible to VoiceOver** `[app]` — dots are now filled
+  (connected) vs hollow ring (not connected) and each has an `.accessibilityLabel`.
+- [x] **The live strip inherits the same gap** — cached vs fresh is a filled dot vs hollow ring at
+  the strip's start as well as colour; the strip has an accessibility label and value.
+- [x] **Appearance picker** — replaced by a *theme* picker (Crayon / Quiet / Serif); each theme sets
+  its own colour scheme. There is no separate light/dark/system switch.
+- [x] Fixed 11 pt debug type ignores Dynamic Type `[app]` — now `.caption2` monospaced; every other
+  text uses `Font.custom(_:size:relativeTo:)` or UIFontMetrics scaling.
+- [x] Six accent colours with no system `[app]` — one colour per meaning per theme (Spotify, display
+  / cached, fresh send), all in `Theme.swift` with contrast figures.
+- [x] Sign-in screen gives no reason for signing in `[app]` — signed-out screen explains it and says
+  the password stays with Spotify.
+- [x] Album art resizes mid-download `[app]` — art side depends only on the safe-area size; transient
+  status no longer sits above the art.
+- [ ] **Mirror the board's draw state in the app preview** `[app]` — *fresh sends done*: the preview
+  masks the new cover to `transferProgress` (= rows drawn) with the previous cover below the scan line.
+  *Cache hits still open*: they need the app to stop sending `0xFF` (random) in the 5-byte header and
+  pick the transition itself — the protocol already carries a transition index, it is just unused
+  (`BLEManager.sendRGB565`) — then run the same animation locally. That is a `BLEManager` behaviour
+  change, so it was left for a separate, approved step.
+- [x] Blanket `.ignoresSafeArea()` pushes the bottom bar under the home indicator `[app]` — only the
+  background ignores safe areas now.
+- [ ] Increase Contrast has no dedicated palette `[app]` — every theme already passes AA without it;
+  a higher-contrast variant per theme is a possible follow-up.
 
 ### Auth hardening (report §11 — PKCE itself is correctly built)
 - [ ] `restoreSession()` reports "Session expired" for network failures `[app]`.
