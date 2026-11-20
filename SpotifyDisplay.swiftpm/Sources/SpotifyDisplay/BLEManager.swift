@@ -133,14 +133,35 @@ final class BLEManager: NSObject, ObservableObject {
         )
     }
 
-    private func beginTransferBackgroundTaskIfNeeded() {
+    /// Background time is counted, not on/off. On a skip the cancelled `processTrack` exits while the
+    /// next one is already running; with a single on/off task the old one's exit ended the new
+    /// one's background time, iOS suspended the app mid-transfer, and the board was left with a few
+    /// rows of the new song over the old picture. Every `hold` needs exactly one `release`.
+    private var transferBackgroundHolds = 0
+
+    /// Keeps the app running in the background until the matching `releaseTransferBackgroundTime()`.
+    /// `SpotifyManager` takes one *before* launching a send task, so there is no gap between its own
+    /// poll's background time ending and `processTrack` starting.
+    func holdTransferBackgroundTime() {
+        transferBackgroundHolds += 1
         guard transferBackgroundTaskID == .invalid else { return }
         transferBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "BLESpotifyArtTransfer") { [weak self] in
-            Task { @MainActor in self?.endTransferBackgroundTaskIfNeeded() }
+            // iOS is out of patience: end now regardless of holds (it kills the app otherwise).
+            Task { @MainActor in
+                guard let self else { return }
+                self.transferBackgroundHolds = 0
+                self.endTransferBackgroundTask()
+            }
         }
     }
 
-    private func endTransferBackgroundTaskIfNeeded() {
+    func releaseTransferBackgroundTime() {
+        guard transferBackgroundHolds > 0 else { return }
+        transferBackgroundHolds -= 1
+        if transferBackgroundHolds == 0 { endTransferBackgroundTask() }
+    }
+
+    private func endTransferBackgroundTask() {
         guard transferBackgroundTaskID != .invalid else { return }
         UIApplication.shared.endBackgroundTask(transferBackgroundTaskID)
         transferBackgroundTaskID = .invalid
@@ -294,8 +315,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// Parallel download + cache check (like desktop script), then send on miss.
     /// `imageURLs` is ordered by preference; only the first two are attempted.
     func processTrack(imageURLs: [String], albumId: String?, trackId: String) async throws {
-        beginTransferBackgroundTaskIfNeeded()
-        defer { endTransferBackgroundTaskIfNeeded() }
+        holdTransferBackgroundTime()
+        defer { releaseTransferBackgroundTime() }
         setLivePhase("cache check + downloading…")
         boardAckStatus = "Sending…"
 

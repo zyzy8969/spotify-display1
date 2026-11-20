@@ -198,6 +198,11 @@ volatile uint32_t rxFrameSeq = 0;
 uint32_t drawnFrameSeq = 0;
 uint32_t lastDrawnBytes = 0;     // bytes of the current rx frame already drawn (loop-owned)
 bool partialOnScreen = false;    // rows of an unfinished rx frame are on the panel
+// Last header/chunk arrival (set by the image callback). If iOS suspends the app mid-transfer the
+// chunks just stop; after RX_STALL_RESTORE_MS loop() puts the last complete picture back instead of
+// leaving a strip of the new song on screen. The frame is kept, so if the app resumes it finishes.
+volatile unsigned long lastRxChunkMs = 0;
+#define RX_STALL_RESTORE_MS 2000
 
 // Rainbow text animation state
 int currentRainbowIndex = 0;
@@ -344,6 +349,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
             receivedBytes = 0;
             rxFrameSeq++;  // loop() restarts progressive draw at row 0 for this frame
+            lastRxChunkMs = millis();
             imageState = RECEIVING_DATA;
 
         } else if (imageState == RECEIVING_DATA) {
@@ -387,6 +393,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             // that holds the last complete picture, which loop() may be reading for a transition.
             memcpy((uint8_t*)rxBuffer + receivedBytes, value.data(), chunkSize);
             receivedBytes += chunkSize;
+            lastRxChunkMs = millis();
 
             // Log progress (every 10KB or final)
             if (receivedBytes % 10240 == 0 || receivedBytes == expectedSize) {
@@ -1811,6 +1818,18 @@ void loop() {
 
       lastDrawnBytes = completedLines * bytesPerLine;
       partialOnScreen = true;
+    }
+  }
+
+  // Transfer stalled with part of the new song on screen (typically: iOS suspended the app).
+  // Show the last complete picture again. lastDrawnBytes = 0 so that, if chunks resume, the
+  // progressive draw repaints every received row from the top rather than continuing mid-image.
+  if (imageState == RECEIVING_DATA && partialOnScreen) {
+    unsigned long lastChunk = lastRxChunkMs;  // read before millis(): no unsigned underflow
+    if (millis() - lastChunk > RX_STALL_RESTORE_MS) {
+      Serial.println("BLE: transfer stalled — restoring last picture until data resumes");
+      restoreFrontImage();
+      lastDrawnBytes = 0;
     }
   }
 

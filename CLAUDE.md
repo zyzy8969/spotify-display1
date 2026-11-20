@@ -119,7 +119,8 @@ Two PSRAM frame buffers: BLE chunks land only in `rxBuffer` (progressive draw re
 `imageBuffer` is the last *complete* picture (SD load/save, transitions). On completion `loop()`
 copies rx → image. When a skip abandons a partly drawn frame (`rxFrameSeq` bump or cache-check
 reset), `restoreFrontImage()` redraws `imageBuffer` so no half frame stays on screen.
-`lastDrawnBytes` is written only by `loop()`.
+`lastDrawnBytes` is written only by `loop()`. If chunks stop for 2 s mid-frame (iOS suspended the
+app), `loop()` restores the last picture but keeps the frame; resumed chunks repaint from row 0.
 
 Cache: 16-byte MD5 key from the app, stored as `/cache/v1_<key>.bin` with a CRC32 trailer.
 An in-memory index (`cacheIndex`, up to 1024 entries) is built at startup to avoid SD scans.
@@ -144,7 +145,9 @@ dithering happens app-side.)
   `processTrack` (cache probe → transfer), write-without-response queueing via
   `peripheralIsReadyToSendWriteWithoutResponse`, a `readyEpoch` guard that invalidates
   in-flight transfers across reconnects, a 32 s post-chunk SUCCESS timeout, and
-  `UIApplication.beginBackgroundTask` around the whole `processTrack` scope.
+  counted background time (`holdTransferBackgroundTime`/`releaseTransferBackgroundTime`):
+  `SpotifyManager` takes a hold *before* launching a send and `processTrack` takes its own, so an
+  overlapping cancelled send can't end the live one's background time.
 - `SpotifyManager` — PKCE auth (no client secret; redirect `spotifydisplay://callback`),
   proactive token refresh, ~1 Hz currently-playing poll with HTTP 429 `Retry-After` cooldown,
   per-track failure cooldown plus global backoff after display errors, and

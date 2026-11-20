@@ -294,9 +294,13 @@ final class SpotifyManager: ObservableObject {
         startNetworkMonitor()
 
         // Direct callback from BLE — fires even when background poll loop is suspended by iOS.
-        bleManager.onReadyCallback = { [weak self] in
+        bleManager.onReadyCallback = { [weak self, weak bleManager] in
             guard let self else { return }
             Task { @MainActor in
+                // Mark this epoch handled so the monitor loop's epoch check below does not run a
+                // second resync for the same connect (that one got queued behind the first
+                // transfer and re-sent the same song after it finished).
+                if let bleManager { self.lastObservedBleReadyEpoch = bleManager.readyEpoch }
                 await self.requestResync(reason: "ble-ready-callback", immediatePoll: true)
             }
         }
@@ -358,7 +362,13 @@ final class SpotifyManager: ObservableObject {
         case .active:
             let gap = Date().timeIntervalSince(lastSceneBackgroundAt ?? .distantPast)
             Task { @MainActor in
-                await requestResync(reason: "scene-active-gap-\(Int(gap))", immediatePoll: gap > 1.0)
+                // Just poll: returning to the app does not change what the board shows. A forced
+                // resync here was queued behind any running transfer, then wiped the dedupe and
+                // re-sent the song that had just finished drawing (visible double redraw).
+                // A BLE reconnect still resends, via readyEpoch.
+                if gap > 1.0, let ble = monitoredBle {
+                    await pollOnce(bleManager: ble)
+                }
             }
         default:
             break
@@ -416,7 +426,10 @@ final class SpotifyManager: ObservableObject {
                 self.networkIsReachable = reachable
                 if reachable && !wasReachable {
                     self.pollStatus = "Network restored — resuming"
-                    await self.requestResync(reason: "network-restored", immediatePoll: true)
+                    // Poll only (see scenePhaseDidChange): the board's picture did not change.
+                    if let ble = self.monitoredBle {
+                        await self.pollOnce(bleManager: ble)
+                    }
                 } else if !reachable {
                     self.pollStatus = "Offline — waiting for network"
                 }
@@ -613,16 +626,25 @@ final class SpotifyManager: ObservableObject {
             let capturedId = item.id
             let capturedURL = artURL
             let capturedName = item.name
+            // The album id must come from the song being sent, not from `currentTrack` when the task
+            // runs: after a skip that is the next song, and the old art would be cached under the
+            // new album's key (that album would then load the wrong picture from SD).
+            let capturedAlbumId = item.album?.id
             let ble = bleManager
             artInFlightTrackId = capturedId
             artSendGeneration &+= 1
             let myGeneration = artSendGeneration
+            // Take background time now, synchronously. The heartbeat poll that got us here ends its
+            // own background time as soon as pollOnce returns, before this task would start; iOS
+            // could suspend the app in that gap and freeze the transfer after a few rows.
+            ble.holdTransferBackgroundTime()
             artSendTask = Task { @MainActor [weak self] in
+                defer { ble.releaseTransferBackgroundTime() }
                 guard let self else { return }
                 do {
                     try await ble.processTrack(
                         imageURLs: Array(artURLs.prefix(2)),
-                        albumId: self.currentTrack?.album?.id,
+                        albumId: capturedAlbumId,
                         trackId: capturedId
                     )
                     guard self.artSendGeneration == myGeneration else { return }
