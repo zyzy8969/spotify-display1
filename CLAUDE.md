@@ -115,6 +115,12 @@ resets; keep them there.
 Transfer state machine: `WAITING_FOR_SIZE` → `RECEIVING_DATA` → `COMPLETE`. A valid header
 arriving mid-frame is treated as a client resync and discards the partial frame.
 
+Two PSRAM frame buffers: BLE chunks land only in `rxBuffer` (progressive draw reads it);
+`imageBuffer` is the last *complete* picture (SD load/save, transitions). On completion `loop()`
+copies rx → image. When a skip abandons a partly drawn frame (`rxFrameSeq` bump or cache-check
+reset), `restoreFrontImage()` redraws `imageBuffer` so no half frame stays on screen.
+`lastDrawnBytes` is written only by `loop()`.
+
 Cache: 16-byte MD5 key from the app, stored as `/cache/v1_<key>.bin` with a CRC32 trailer.
 An in-memory index (`cacheIndex`, up to 1024 entries) is built at startup to avoid SD scans.
 Writes are temp-write-then-rename; CRC mismatch deletes the file and reports a miss so the
@@ -155,7 +161,10 @@ Changes here need on-device stress testing (rapid skip, disconnect mid-transfer)
 
 - `BLEManager` cache-hit confirmation timing — the app must wait for the authoritative
   `CACHE_RENDERED` message rather than showing optimistic cache-hit UI.
-- `SpotifyManager` skip/resync sequencing and in-flight cancellation.
+- `SpotifyManager` skip/resync sequencing and in-flight cancellation. Polls overlap and can
+  answer out of order; `pollOnce` drops any answer older than one already applied (`pollSeq`)
+  and ignores every recently replaced track for 1.5 s (`recentlyReplaced`). Without that, an old
+  answer re-sends the previous song right after the new one is drawn.
 - `src/main.cpp` partial-frame and transition sequencing during rapid track changes.
 - Skip-render artifact: root cause found 2026-11-19 — cache replies carry no song id, so after a
   skip the old song's late reply was matched to the new song. The app now never sends a cache check

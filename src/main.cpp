@@ -54,8 +54,14 @@ Arduino_GFX *gfx = new Arduino_ST7789(bus, TFT_RST, 0 /* rotation */, true /* IP
 // ST7789VW spec: 250 cd/m² typical luminance, 800:1 contrast ratio
 int brightness = TFT_BRIGHTNESS_MAX;  // 100% brightness for maximum vibrancy
 
-// Pre-allocated image buffer (prevents heap fragmentation)
+// Pre-allocated image buffers (prevents heap fragmentation), both in PSRAM.
+// imageBuffer = the last COMPLETE picture: what SD load/save and transitions use, and what the
+//               panel shows once no frame is mid-receive.
+// rxBuffer    = where BLE chunks land. A transfer abandoned by a skip only ever dirties rxBuffer,
+//               so the last complete picture is still there to put back on screen.
 static uint16_t* imageBuffer = nullptr;
+static uint16_t* rxBuffer = nullptr;
+bool frontImageValid = false;  // imageBuffer holds the picture last fully drawn on the panel
 
 // ==================================================
 // BLUETOOTH LE CONFIGURATION
@@ -183,8 +189,15 @@ volatile bool cacheCheckPending = false;
 volatile bool statsRequestPending = false;
 volatile bool clearCachePending = false;
 volatile bool imageTransferComplete = false;
-volatile uint32_t lastDrawnBytes = 0;  // Track how many bytes we've drawn so far
 volatile uint32_t completedImageBytes = 0;  // Snapshot bytes received at completion
+// Bumped by the image callback each time a frame starts (header) or dies (receive error).
+// loop() compares it with drawnFrameSeq to notice a new/abandoned frame. Only loop() writes
+// lastDrawnBytes: when the callback also reset it, loop() could overwrite that reset with the
+// old frame's row count and skip the top rows of the new picture.
+volatile uint32_t rxFrameSeq = 0;
+uint32_t drawnFrameSeq = 0;
+uint32_t lastDrawnBytes = 0;     // bytes of the current rx frame already drawn (loop-owned)
+bool partialOnScreen = false;    // rows of an unfinished rx frame are on the panel
 
 // Rainbow text animation state
 int currentRainbowIndex = 0;
@@ -324,14 +337,13 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                               expectedSize, IMAGE_SIZE);
                 notifyImageTransferRejected("ERROR: Size mismatch");
                 imageState = WAITING_FOR_SIZE;  // Reset
-                lastDrawnBytes = 0;
                 return;
             }
 
             Serial.printf("BLE: Expecting %d bytes\n", expectedSize);
             memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
             receivedBytes = 0;
-            lastDrawnBytes = 0;  // keep progressive draw in sync with new frame (top-first)
+            rxFrameSeq++;  // loop() restarts progressive draw at row 0 for this frame
             imageState = RECEIVING_DATA;
 
         } else if (imageState == RECEIVING_DATA) {
@@ -352,7 +364,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
                 memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
                 receivedBytes = 0;
-                lastDrawnBytes = 0;
+                rxFrameSeq++;  // loop() puts the last complete picture back, then redraws from row 0
                 // Prevent a stale completion from a prior partial frame from firing in loop().
                 imageTransferComplete = false;
                 completedImageBytes = 0;
@@ -367,12 +379,13 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 notifyImageTransferRejected("ERROR: Buffer overflow");
                 imageState = WAITING_FOR_SIZE;  // Reset
                 receivedBytes = 0;
-                lastDrawnBytes = 0;
+                rxFrameSeq++;  // frame died: loop() removes its half-drawn rows
                 return;
             }
 
-            // Copy chunk to image buffer (memcpy is fast, safe in callback)
-            memcpy((uint8_t*)imageBuffer + receivedBytes, value.data(), chunkSize);
+            // Copy chunk to the receive buffer (memcpy is fast, safe in callback). Never imageBuffer:
+            // that holds the last complete picture, which loop() may be reading for a transition.
+            memcpy((uint8_t*)rxBuffer + receivedBytes, value.data(), chunkSize);
             receivedBytes += chunkSize;
 
             // Log progress (every 10KB or final)
@@ -983,7 +996,34 @@ void resetToWaitingScreen() {
     showingStartupScreen = true;
     pulseIsWhite = false;
     lastPulseUpdate = millis();
+    frontImageValid = false;
     showBluetoothConnectionScreen(BLACK, RED);
+}
+
+// Connected, nothing played yet.
+void showReadyScreen() {
+    gfx->fillScreen(WHITE);
+    gfx->setTextSize(3);
+    gfx->setTextColor(BLACK);
+    gfx->setCursor(39, 80);  // Centered: "Play some" = 9 chars
+    gfx->print("Play some");
+    gfx->setCursor(48, 110);  // Centered: "music on" = 8 chars
+    gfx->print("music on");
+    gfx->setCursor(48, 140);  // Centered: "Spotify!" = 8 chars
+    gfx->setTextColor(SPOTIFY_GREEN);
+    gfx->print("Spotify!");
+}
+
+// A transfer was abandoned (skip) after some of its rows were drawn. Put back what was on the
+// panel before it, so a skip never leaves new-song rows over the old picture.
+void restoreFrontImage() {
+    if (frontImageValid) {
+        gfx->draw16bitRGBBitmap(0, 0, imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    } else {
+        showReadyScreen();
+    }
+    partialOnScreen = false;
+    Serial.println("Display: abandoned frame removed, last complete picture restored");
 }
 
 // ==================================================
@@ -1250,12 +1290,14 @@ void setup() {
     Serial.println("WARNING: Allocating image buffer from heap (no PSRAM)");
   }
 
-  if (!imageBuffer) {
-    Serial.println("FATAL: Cannot allocate image buffer");
+  rxBuffer = psramFound() ? (uint16_t*)ps_malloc(IMAGE_SIZE) : (uint16_t*)malloc(IMAGE_SIZE);
+
+  if (!imageBuffer || !rxBuffer) {
+    Serial.println("FATAL: Cannot allocate image buffers");
     Serial.flush();
     while(1) delay(1000); // Halt system - cannot continue without buffer
   }
-  Serial.printf("Image buffer allocated: %d bytes (free heap: %d)\n", IMAGE_SIZE, ESP.getFreeHeap());
+  Serial.printf("Image buffers allocated: 2 x %d bytes (free heap: %d)\n", IMAGE_SIZE, ESP.getFreeHeap());
   Serial.flush();
 
   // Initialize Bluetooth LE server
@@ -1640,6 +1682,16 @@ void loop() {
     Serial.println("BLE: CACHE_CLEARED");
   }
 
+  // A new image header (or a receive error) started/ended a frame since we last drew. Restart
+  // progressive draw at row 0, and if the frame we were drawing never completed, take its rows
+  // back off the panel. A completed frame clears partialOnScreen below, so this is skip-only.
+  uint32_t seqNow = rxFrameSeq;
+  if (seqNow != drawnFrameSeq) {
+    drawnFrameSeq = seqNow;
+    lastDrawnBytes = 0;
+    if (partialOnScreen) restoreFrontImage();
+  }
+
   // Handle cache check (triggered by lightweight callback)
   // This runs in main task with large stack - safe for SD card/display ops
   // A finished transfer still waiting for its final draw + SD save owns imageBuffer: a cache hit
@@ -1661,6 +1713,8 @@ void loop() {
       imageTransferComplete = false;
       completedImageBytes = 0;
     }
+    // The abandoned frame's rows would otherwise stay on screen until the next picture covers them.
+    if (partialOnScreen) restoreFrontImage();
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
@@ -1683,6 +1737,7 @@ void loop() {
         // Draw image with random transition
         unsigned long displayStart = millis();
         String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, pendingTransition);
+        frontImageValid = true;
         unsigned long displayTime = millis() - displayStart;
 
         unsigned long totalTime = millis() - totalStartTime;
@@ -1714,6 +1769,8 @@ void loop() {
         pMsgChar->notify();
       } else {
         Serial.println("ERROR: Cache load failed — reporting miss so the client sends fresh");
+        // The failed read left imageBuffer half-overwritten; it no longer matches the panel.
+        frontImageValid = false;
         // The client is waiting on the Cache characteristic, not the Image one; without this
         // reply it times out instead of falling back to a normal transfer.
         uint8_t response = 0x00;
@@ -1749,10 +1806,11 @@ void loop() {
 
       // Draw the new lines (without dithering for speed)
       for (uint32_t line = drawnLines; line < completedLines; line++) {
-        gfx->draw16bitRGBBitmap(0, line, imageBuffer + (line * DISPLAY_WIDTH), DISPLAY_WIDTH, 1);
+        gfx->draw16bitRGBBitmap(0, line, rxBuffer + (line * DISPLAY_WIDTH), DISPLAY_WIDTH, 1);
       }
 
       lastDrawnBytes = completedLines * bytesPerLine;
+      partialOnScreen = true;
     }
   }
 
@@ -1776,10 +1834,17 @@ void loop() {
     uint32_t drawnLines = lastDrawnBytes / bytesPerLine;
     if (completedLines > drawnLines) {
       for (uint32_t line = drawnLines; line < completedLines; line++) {
-        gfx->draw16bitRGBBitmap(0, line, imageBuffer + (line * DISPLAY_WIDTH), DISPLAY_WIDTH, 1);
+        gfx->draw16bitRGBBitmap(0, line, rxBuffer + (line * DISPLAY_WIDTH), DISPLAY_WIDTH, 1);
       }
       lastDrawnBytes = completedLines * bytesPerLine;
     }
+    showingStartupScreen = false;
+
+    // The frame is whole: it becomes the last complete picture (what a later skip restores, and
+    // what saveToCache writes).
+    memcpy(imageBuffer, rxBuffer, IMAGE_SIZE);
+    frontImageValid = true;
+    partialOnScreen = false;
 
     unsigned long saveStart = millis();
     saveToCache(transferCacheKey);
@@ -1820,16 +1885,9 @@ void loop() {
     showBluetoothConnectionScreen(GREEN, BLACK);
 
     // Clear and show ready message - LARGER & CENTERED
-    gfx->fillScreen(WHITE);
-    gfx->setTextSize(3);
-    gfx->setTextColor(BLACK);
-    gfx->setCursor(39, 80);  // Centered: "Play some" = 9 chars
-    gfx->print("Play some");
-    gfx->setCursor(48, 110);  // Centered: "music on" = 8 chars
-    gfx->print("music on");
-    gfx->setCursor(48, 140);  // Centered: "Spotify!" = 8 chars
-    gfx->setTextColor(SPOTIFY_GREEN);
-    gfx->print("Spotify!");
+    frontImageValid = false;
+    partialOnScreen = false;
+    showReadyScreen();
 
     uint16_t mtu = pServer->getPeerMTU(pServer->getConnId());
     Serial.printf("BLE: Negotiated MTU = %d bytes\n", mtu);

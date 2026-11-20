@@ -29,10 +29,17 @@ final class SpotifyManager: ObservableObject {
     private var lastSentToDisplayArtURL: String?
     private var lastObservedBleReadyEpoch: UInt64 = 0
     private var lastSceneBackgroundAt: Date?
-    /// Track that was on the display when we last switched songs, and when (see stale flip-back guard in `pollOnce`).
-    private var replacedTrackId: String?
-    private var replacedAt: Date?
+    /// Every track we switched away from in the last `staleFlipBackWindowSeconds`, and when
+    /// (see stale flip-back guard in `pollOnce`). Several, not one: on rapid skips A→B→C, Spotify
+    /// can briefly report B *or* A again, and either would cancel C's transfer and redraw old art.
+    private var recentlyReplaced: [String: Date] = [:]
     private let staleFlipBackWindowSeconds: TimeInterval = 1.5
+
+    /// Polls overlap (0.45 s loop, board-heartbeat poll, 250 ms polls after an in-app skip), and
+    /// their answers can arrive out of order. An answer older than one already applied describes
+    /// playback from before it — usually the song just skipped — so it is dropped.
+    private var pollSeq: UInt64 = 0
+    private var lastAppliedPollSeq: UInt64 = 0
 
     private weak var monitoredBle: BLEManager?
     private var artSendTask: Task<Void, Never>?
@@ -470,9 +477,14 @@ final class SpotifyManager: ObservableObject {
             rateLimitedUntil = nil
         }
 
+        pollSeq &+= 1
+        let mySeq = pollSeq
+
         do {
             pollStatus = "Polling Spotify…"
             let state = try await fetchCurrentlyPlayingWithRefresh()
+            guard mySeq > lastAppliedPollSeq else { return }
+            lastAppliedPollSeq = mySeq
             lastError = nil
 
             guard let item = state.item else {
@@ -516,10 +528,13 @@ final class SpotifyManager: ObservableObject {
             // Acting on it cancels the new song's transfer mid-draw (stray rows of new art over the
             // old picture) or redraws the old art. Ignore it for a short window; a real "previous"
             // still goes through once the window passes.
-            if let replaced = replacedTrackId, item.id == replaced, let at = replacedAt,
-               Date().timeIntervalSince(at) < staleFlipBackWindowSeconds
-            {
+            let now = Date()
+            recentlyReplaced = recentlyReplaced.filter { now.timeIntervalSince($0.value) < staleFlipBackWindowSeconds }
+            if recentlyReplaced[item.id] != nil {
                 return
+            }
+            if let previous = currentTrack?.id, previous != item.id {
+                recentlyReplaced[previous] = now
             }
 
             pollStatus = "Playing: \(item.name)"
@@ -591,9 +606,8 @@ final class SpotifyManager: ObservableObject {
             artSendTask?.cancel()
             artSendTask = nil
 
-            if let shown = lastSentToDisplayTrackId, shown != item.id {
-                replacedTrackId = shown
-                replacedAt = Date()
+            if let shown = lastSentToDisplayTrackId, shown != item.id, recentlyReplaced[shown] == nil {
+                recentlyReplaced[shown] = Date()
             }
 
             let capturedId = item.id
