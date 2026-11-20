@@ -37,6 +37,11 @@
 
 // Performance and timing constants
 #define TFT_BRIGHTNESS_MAX 200
+// LEDC PWM channel driving the backlight. NOT a GPIO: on Arduino-ESP32 core 2.x
+// ledcWrite()/ledcSetup() take a CHANNEL (0-7 on the S3), while ledcAttachPin()
+// binds that channel to the TFT_BL pin. Passing the pin number to ledcWrite()
+// silently targets a nonexistent channel and the backlight never changes.
+#define TFT_BL_PWM_CHANNEL 0
 #define TRANSITION_WIPE_DELAY_US 500
 #define CIRCULAR_WIPE_MAX_RADIUS 170
 
@@ -103,6 +108,10 @@ ImageState imageState = WAITING_FOR_SIZE;
 uint32_t expectedSize = 0;
 uint32_t receivedBytes = 0;
 uint8_t currentCacheKey[16];
+// Key of the frame being received, snapshotted when its header arrives. A later cache check
+// overwrites currentCacheKey, so saving with currentCacheKey could file this frame's pixels
+// under the next song's key (a cache entry with a valid CRC but the wrong picture).
+uint8_t transferCacheKey[16];
 bool cacheHit = false;
 uint8_t pendingTransition = 0xFF;  // 0xFF means random transition
 
@@ -185,6 +194,12 @@ bool showingStartupScreen = true;
 
 // Pulsing "no" animation state
 unsigned long lastPulseUpdate = 0;
+
+// Background wake-up for the iOS app (BLE_PROTOCOL 1.7). iOS suspends the app ~30 s after it
+// leaves the foreground, but a notify on a subscribed characteristic wakes it briefly. Each "HB"
+// lets the app poll Spotify once, so the display keeps up while the phone is locked.
+#define HEARTBEAT_INTERVAL_MS 1000
+unsigned long lastHeartbeatMs = 0;
 const unsigned long pulseUpdateInterval = 500; // Toggle every 500ms
 bool pulseIsWhite = false; // Toggle between red and white
 
@@ -218,6 +233,16 @@ class MyServerCallbacks: public BLEServerCallbacks {
         pMsgChar->notify();
         Serial.println("BLE: Sent READY signal");
         // Display drawing is deferred to loop() — BTC_TASK stack is tiny.
+    }
+
+    // Ask the phone for a 15 ms connection interval (iOS default is ~30 ms). Image transfer
+    // throughput scales with connection events: ~28 KB/s at 30 ms → one 115 KB cover took ~3.7 s,
+    // so quick skips cut transfers off before they finished. 15 ms min = max is within Apple's
+    // accessory guidelines; iOS may still pick its own value. Units: 1.25 ms (interval), 10 ms (timeout).
+    // Lightweight (queues a GAP request) — safe on the small BTC_TASK stack.
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
+        pServer->updateConnParams(param->connect.remote_bda, 12, 12, 0, 400);
+        Serial.println("BLE: Requested 15 ms connection interval");
     }
 
     void onDisconnect(BLEServer* pServer) {
@@ -304,6 +329,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             }
 
             Serial.printf("BLE: Expecting %d bytes\n", expectedSize);
+            memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
             receivedBytes = 0;
             lastDrawnBytes = 0;  // keep progressive draw in sync with new frame (top-first)
             imageState = RECEIVING_DATA;
@@ -324,6 +350,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             }
             if (isResyncHeader && resyncSize == IMAGE_SIZE) {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
+                memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
                 receivedBytes = 0;
                 lastDrawnBytes = 0;
                 // Prevent a stale completion from a prior partial frame from firing in loop().
@@ -382,7 +409,7 @@ class BrightnessCallbacks: public BLECharacteristicCallbacks {
             return;
         }
         brightness = (uint8_t)value[0];
-        ledcWrite(TFT_BL, brightness);
+        ledcWrite(TFT_BL_PWM_CHANNEL, brightness);
         Serial.printf("BLE: Brightness set to %d\n", brightness);
     }
 };
@@ -1072,9 +1099,12 @@ void setup() {
 
   // FIXED: Initialize backlight BEFORE display (prevents white screen)
   pinMode(TFT_BL, OUTPUT);
-  ledcSetup(0, 5000, 8);        // Setup PWM: channel 0, 5kHz, 8-bit
-  ledcAttachPin(TFT_BL, 0);
-  ledcWrite(0, 50);              // Start at low brightness (20%) during init
+  ledcSetup(TFT_BL_PWM_CHANNEL, 5000, 8);   // 5kHz, 8-bit duty (0-255)
+  ledcAttachPin(TFT_BL, TFT_BL_PWM_CHANNEL);
+  // Backlight OFF until the panel has been cleared: panel RAM powers up with random pixels, and
+  // with the light on they show for the ~0.3 s of reset + init below. (Driving the pin also stops
+  // it floating high, which is what the old "white screen" fix was for.)
+  ledcWrite(TFT_BL_PWM_CHANNEL, 0);
 
   // Hardware reset sequence
   pinMode(TFT_RST, OUTPUT);
@@ -1087,6 +1117,9 @@ void setup() {
 
   // Initialize Arduino_GFX display
   gfx->begin();
+  // Clear the random power-up contents, then turn the light on (low during the ~1 s of SD init).
+  gfx->fillScreen(BLACK);
+  ledcWrite(TFT_BL_PWM_CHANNEL, 50);
 
   // Configure MADCTL register (0x36) for RGB/BGR color order
   // Using 0x00: RGB mode (matches RGB565 format from Python)
@@ -1107,7 +1140,7 @@ void setup() {
   bus->endWrite();
 
   // Increase backlight to normal brightness after init complete
-  ledcWrite(0, brightness);
+  ledcWrite(TFT_BL_PWM_CHANNEL, brightness);
 
   // Initialize SD card for caching
   // Try default SPI first, then FSPI, then HSPI
@@ -1609,7 +1642,10 @@ void loop() {
 
   // Handle cache check (triggered by lightweight callback)
   // This runs in main task with large stack - safe for SD card/display ops
-  if (cacheCheckPending) {
+  // A finished transfer still waiting for its final draw + SD save owns imageBuffer: a cache hit
+  // here would load another image over it before it is saved. Leave the check pending; the
+  // completion block below runs this iteration and the check runs on the next one.
+  if (cacheCheckPending && !imageTransferComplete) {
     cacheCheckPending = false;
 
     Serial.println("Processing cache check request...");
@@ -1746,7 +1782,7 @@ void loop() {
     }
 
     unsigned long saveStart = millis();
-    saveToCache(currentCacheKey);
+    saveToCache(transferCacheKey);
     unsigned long saveTime = millis() - saveStart;
 
     Serial.printf("⚡ Processing: progressive draw complete, save %lums\n", saveTime);
@@ -1801,6 +1837,12 @@ void loop() {
       Serial.println("WARNING: Low MTU (" + String(mtu) + "); transfers will be slower.");
     }
     Serial.println("BLE: Client connected, ready for data");
+  }
+
+  if (deviceConnected && millis() - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatMs = millis();
+    pMsgChar->setValue("HB");
+    pMsgChar->notify();
   }
 
   // Small delay to prevent tight loop

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AuthenticationServices
 import CryptoKit
 import Network
@@ -28,6 +29,10 @@ final class SpotifyManager: ObservableObject {
     private var lastSentToDisplayArtURL: String?
     private var lastObservedBleReadyEpoch: UInt64 = 0
     private var lastSceneBackgroundAt: Date?
+    /// Track that was on the display when we last switched songs, and when (see stale flip-back guard in `pollOnce`).
+    private var replacedTrackId: String?
+    private var replacedAt: Date?
+    private let staleFlipBackWindowSeconds: TimeInterval = 1.5
 
     private weak var monitoredBle: BLEManager?
     private var artSendTask: Task<Void, Never>?
@@ -244,13 +249,20 @@ final class SpotifyManager: ObservableObject {
                     await pollOnce(bleManager: ble)
                 }
             } else {
-                // Cancel any in-flight transfer so resync proceeds immediately
-                // instead of being deferred by the transferPipelineBusy guard.
-                monitoredBle?.cancelOngoingTransfer()
-                artSendTask?.cancel()
-                artSendTask = nil
-                artInFlightTrackId = nil
-                await requestResync(reason: endpoint, immediatePoll: true)
+                // Next/previous: do NOT cancel or force a resync here. Spotify's currently-playing
+                // endpoint keeps reporting the old track for a moment after /next, so the old forced
+                // resync re-sent the OLD song and the next poll cancelled it mid-draw (half-drawn
+                // frames, stray rows). Poll quickly until the track id changes instead; the normal
+                // poll path then cancels in-flight work and sends the new song exactly once.
+                // ("previous" more than ~3 s into a song restarts it: the id never changes, nothing to send.)
+                let before = currentTrack?.id
+                if let ble = monitoredBle {
+                    for _ in 0 ..< 8 {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        await pollOnce(bleManager: ble)
+                        if currentTrack?.id != before { break }
+                    }
+                }
             }
         } catch {
             lastError = error.localizedDescription
@@ -279,6 +291,14 @@ final class SpotifyManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 await self.requestResync(reason: "ble-ready-callback", immediatePoll: true)
+            }
+        }
+
+        // Board heartbeat: the only thing that runs this app once iOS suspends it in the background.
+        bleManager.onHeartbeat = { [weak self, weak bleManager] in
+            guard let self, let bleManager else { return }
+            Task { @MainActor in
+                await self.handleBoardHeartbeat(bleManager: bleManager)
             }
         }
 
@@ -405,7 +425,38 @@ final class SpotifyManager: ObservableObject {
         networkMonitorStarted = false
     }
 
+    /// When the last `pollOnce` started; heartbeats skip polling if the foreground loop is keeping up.
+    private var lastPollStartedAt: Date?
+    private var heartbeatPollInFlight = false
+
+    /// One Spotify poll per board heartbeat (~1 s). In the foreground the 0.45 s loop already polls, so
+    /// this is skipped; in the background that loop is suspended and this is what keeps the display current.
+    /// A background task covers the poll itself; `processTrack` takes its own for any transfer it starts.
+    private func handleBoardHeartbeat(bleManager: BLEManager) async {
+        guard !heartbeatPollInFlight else { return }
+        if let last = lastPollStartedAt, Date().timeIntervalSince(last) < 0.8 { return }
+        guard networkIsReachable else { return }
+        heartbeatPollInFlight = true
+        heartbeatBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "SpotifyHeartbeatPoll") { [weak self] in
+            Task { @MainActor in self?.endHeartbeatBackgroundTask() }
+        }
+        defer {
+            heartbeatPollInFlight = false
+            endHeartbeatBackgroundTask()
+        }
+        await pollOnce(bleManager: bleManager)
+    }
+
+    private var heartbeatBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+
+    private func endHeartbeatBackgroundTask() {
+        guard heartbeatBackgroundTaskID != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(heartbeatBackgroundTaskID)
+        heartbeatBackgroundTaskID = .invalid
+    }
+
     private func pollOnce(bleManager: BLEManager) async {
+        lastPollStartedAt = Date()
         guard isAuthenticated else {
             pollStatus = "Not authenticated"
             return
@@ -458,6 +509,16 @@ final class SpotifyManager: ObservableObject {
                 if !pauseArtURLs.isEmpty {
                     ensureAlbumArtPreview(trackId: item.id, artURLs: pauseArtURLs, bleManager: bleManager)
                 }
+                return
+            }
+
+            // Right after a skip, Spotify can briefly report the track we just switched away from.
+            // Acting on it cancels the new song's transfer mid-draw (stray rows of new art over the
+            // old picture) or redraws the old art. Ignore it for a short window; a real "previous"
+            // still goes through once the window passes.
+            if let replaced = replacedTrackId, item.id == replaced, let at = replacedAt,
+               Date().timeIntervalSince(at) < staleFlipBackWindowSeconds
+            {
                 return
             }
 
@@ -529,6 +590,11 @@ final class SpotifyManager: ObservableObject {
             bleManager.cancelOngoingTransfer()
             artSendTask?.cancel()
             artSendTask = nil
+
+            if let shown = lastSentToDisplayTrackId, shown != item.id {
+                replacedTrackId = shown
+                replacedAt = Date()
+            }
 
             let capturedId = item.id
             let capturedURL = artURL
@@ -820,7 +886,24 @@ final class SpotifyManager: ObservableObject {
         }
     }
 
+    /// In-flight refresh shared by every caller. Spotify rotates refresh tokens, so two concurrent
+    /// refreshes with the same token make the loser fail with `invalid_grant` (looks like a random
+    /// sign-out, typically at BLE reconnect when resync and the poll loop both refresh).
+    private var tokenRefreshTask: Task<Void, Error>?
+
     private func refreshAccessToken(clientId: String, refreshToken: String) async throws {
+        if let inFlight = tokenRefreshTask {
+            return try await inFlight.value
+        }
+        let task = Task { @MainActor in
+            try await self.performTokenRefresh(clientId: clientId, refreshToken: refreshToken)
+        }
+        tokenRefreshTask = task
+        defer { tokenRefreshTask = nil }
+        try await task.value
+    }
+
+    private func performTokenRefresh(clientId: String, refreshToken: String) async throws {
         var req = URLRequest(url: URL(string: "https://accounts.spotify.com/api/token")!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")

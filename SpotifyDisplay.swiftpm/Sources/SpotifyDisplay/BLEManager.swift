@@ -16,7 +16,17 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var sdCacheCountLoading = false
     /// Increments whenever GATT is fully ready after (re)connect; consumers can use this as a sync session token.
     @Published private(set) var readyEpoch: UInt64 = 0
-    @Published var brightness: UInt8 = UInt8(clamping: UserDefaults.standard.integer(forKey: "ble_brightness"))
+    /// Backlight level used when the user has never moved the slider.
+    static let defaultBrightness: UInt8 = 200
+    /// Persisted backlight level. `integer(forKey:)` cannot tell "never set" from a stored 0,
+    /// so read the object first — otherwise a fresh install pushes 0 on connect and the display
+    /// goes dark (harmless only while the firmware's LEDC channel bug swallowed the write).
+    @Published var brightness: UInt8 = {
+        guard let stored = UserDefaults.standard.object(forKey: "ble_brightness") as? Int else {
+            return BLEManager.defaultBrightness
+        }
+        return UInt8(clamping: stored)
+    }()
     @Published private(set) var transferLog: [TransferLogEntry] = []
     @Published private(set) var currentLivePhase: String? = "idle"
     /// Shows "Cache hit" / "Sent to display" / nil on main screen.
@@ -29,6 +39,10 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// Called on MainActor when GATT is fully ready after (re)connect. SpotifyManager registers this for instant resync.
     var onReadyCallback: (() -> Void)?
+
+    /// Called on MainActor for each board heartbeat (`HB` message, every ~1 s while connected).
+    /// iOS wakes the suspended app for each notify, so this is the background poll trigger.
+    var onHeartbeat: (() -> Void)?
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -53,6 +67,19 @@ final class BLEManager: NSObject, ObservableObject {
     private var readyCheckGen: UInt64 = 0
     private var cacheRenderGen: UInt64 = 0
     private var clearCheckGen: UInt64 = 0
+    private var transferTimeoutGen: UInt64 = 0
+    private var writeDrainGen: UInt64 = 0
+    private var boardIdleGen: UInt64 = 0
+
+    /// Replies the board still owes for requests this app sent, even after the app stopped waiting
+    /// (a skip cancels the app's wait, not the board's work). The firmware keeps one cache-check flag
+    /// and one key, and its replies carry no song id, so a check sent while one is owed gets the old
+    /// song's answer matched to the new song. `processTrack` waits these out before asking again.
+    private var cacheReplyOwed = false
+    private var imageAckOwed = false
+    private var boardIdleWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Cap on waiting for an owed reply: a cache hit replies only after its transition finishes.
+    private let boardIdleTimeoutNs: UInt64 = 8_000_000_000
 
     private var sawReady = false
     /// Ensures `readyEpoch` increments at most once per BLE connection even if characteristics discovery runs more than once.
@@ -120,6 +147,7 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func cancelImageSuccessTimeoutTask() {
+        transferTimeoutGen &+= 1
         let t = imageSuccessTimeoutTask
         imageSuccessTimeoutTask = nil
         t?.cancel()
@@ -168,8 +196,35 @@ final class BLEManager: NSObject, ObservableObject {
                 self.cacheContinuation = nil
                 pending.resume(throwing: SpotifyDisplayError.bleTimeout)
             }
+            self.cacheReplyOwed = true
             p.writeValue(packet, for: c, type: .withResponse)
         }
+    }
+
+    /// Waits until the board has answered every cache check and finished every image this app sent,
+    /// or until `boardIdleTimeoutNs` passes (then assumes the reply was lost and stops waiting).
+    private func waitForBoardIdle() async {
+        guard cacheReplyOwed || imageAckOwed else { return }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            boardIdleWaiters.append(c)
+            boardIdleGen &+= 1
+            let myGen = boardIdleGen
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: self.boardIdleTimeoutNs)
+                guard self.boardIdleGen == myGen, !self.boardIdleWaiters.isEmpty else { return }
+                self.cacheReplyOwed = false
+                self.imageAckOwed = false
+                self.resumeBoardIdleWaitersIfIdle()
+            }
+        }
+    }
+
+    private func resumeBoardIdleWaitersIfIdle() {
+        guard !cacheReplyOwed, !imageAckOwed, !boardIdleWaiters.isEmpty else { return }
+        let waiters = boardIdleWaiters
+        boardIdleWaiters.removeAll()
+        boardIdleGen &+= 1
+        for w in waiters { w.resume() }
     }
 
     /// Aborts in-flight album download and BLE chunk loop. Next `processTrack` uses a fresh epoch; send a new image header on the next transfer so the ESP32 can resync if the previous send was partial.
@@ -186,6 +241,10 @@ final class BLEManager: NSObject, ObservableObject {
         cacheRenderContinuation = nil
         awaitingCacheRenderConfirm = false
         cacheRenderConfirmed = false
+        // Wake a chunk loop parked on the write window so it sees the new epoch and exits.
+        writeDrainContinuation?.resume()
+        writeDrainContinuation = nil
+        // Deliberately NOT clearing cacheReplyOwed / imageAckOwed: the board still sends those replies.
         if isTransferring {
             isTransferring = false
             transferProgress = 0
@@ -249,6 +308,19 @@ final class BLEManager: NSObject, ObservableObject {
         let downloadStart = CFAbsoluteTimeGetCurrent()
         let download = Task { try await self.fetchAlbumArtData(urlCandidates: imageURLs) }
         activeDownloadTask = download
+
+        // After a skip the board may still owe the previous song's cache reply or image ACK.
+        // Asking now would get that old answer back as this song's; wait it out (download keeps going).
+        if cacheReplyOwed || imageAckOwed {
+            setLivePhase("waiting for display…")
+            await waitForBoardIdle()
+        }
+        do {
+            try ensureTransferEpoch(epochAtStart)
+        } catch {
+            download.cancel()
+            throw error
+        }
 
         let cacheCheckStart = CFAbsoluteTimeGetCurrent()
         setLivePhase("cache check + downloading…")
@@ -437,7 +509,7 @@ final class BLEManager: NSObject, ObservableObject {
         while offset < total {
             try ensureTransferEpoch(epochAtStart)
             if useWithoutResponse {
-                await awaitWriteWindow(peripheral: p)
+                await awaitWriteWindow(peripheral: p, epochAtStart: epochAtStart)
             }
             try ensureTransferEpoch(epochAtStart)
             let end = min(offset + writeChunkSize, total)
@@ -453,6 +525,9 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
+        // Every byte is queued: the board will draw, save and ACK this frame even if we skip now.
+        imageAckOwed = true
+
         // #region agent log
         AgentDebugLog.ingest(
             hypothesisId: "H1",
@@ -465,15 +540,21 @@ final class BLEManager: NSObject, ObservableObject {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.transferContinuation = cont
             self.cancelImageSuccessTimeoutTask()
+            self.transferTimeoutGen &+= 1
+            let myGen = self.transferTimeoutGen
             self.imageSuccessTimeoutTask = Task { @MainActor in
-                defer { self.imageSuccessTimeoutTask = nil }
+                // Only clear the slot if it is still ours: a cancelled older task exiting here used to
+                // nil out the newer task, which then could not be cancelled and fired against a later transfer.
+                defer {
+                    if self.transferTimeoutGen == myGen { self.imageSuccessTimeoutTask = nil }
+                }
                 do {
                     // Firmware ACK after progressive draw + SD save; typically <2s.
                     try await Task.sleep(nanoseconds: 8_000_000_000)
                 } catch {
                     return
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self.transferTimeoutGen == myGen else { return }
                 if let c = self.transferContinuation {
                     // #region agent log
                     AgentDebugLog.ingest(
@@ -576,16 +657,33 @@ final class BLEManager: NSObject, ObservableObject {
         clearContinuation = nil
         writeDrainContinuation?.resume()
         writeDrainContinuation = nil
+        // Disconnected: the board's pending replies will never arrive.
+        cacheReplyOwed = false
+        imageAckOwed = false
+        resumeBoardIdleWaitersIfIdle()
         if isTransferring {
             isTransferring = false
             transferProgress = 0
         }
     }
 
-    private func awaitWriteWindow(peripheral: CBPeripheral) async {
-        while !peripheral.canSendWriteWithoutResponse {
+    /// Parks the chunk loop until CoreBluetooth can take another write-without-response.
+    /// `peripheralIsReady` arrives via a main-actor hop, so it can land before the continuation is
+    /// installed and be lost; the 100 ms re-check bounds that stall. Exits when the epoch changes.
+    private func awaitWriteWindow(peripheral: CBPeripheral, epochAtStart: UInt64) async {
+        while !peripheral.canSendWriteWithoutResponse, epochAtStart == transferEpoch {
             await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                // Never overwrite a parked waiter (that leaks it and hangs its task forever).
+                self.writeDrainContinuation?.resume()
                 self.writeDrainContinuation = c
+                self.writeDrainGen &+= 1
+                let myGen = self.writeDrainGen
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    guard self.writeDrainGen == myGen, let pending = self.writeDrainContinuation else { return }
+                    self.writeDrainContinuation = nil
+                    pending.resume()
+                }
             }
         }
     }
@@ -614,7 +712,17 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func handleMessage(_ text: String) {
+        if text == "HB" {
+            onHeartbeat?()
+            return
+        }
         if text == "READY" { signalReady() }
+
+        // Firmware ERROR: replies reject the frame and reset its receive state; no ACK will follow.
+        if text.hasPrefix("ERROR:") {
+            imageAckOwed = false
+            resumeBoardIdleWaitersIfIdle()
+        }
 
         if text == "SUCCESS", awaitingImageComplete {
             if let c = transferContinuation {
@@ -851,12 +959,21 @@ extension BLEManager: CBPeripheralDelegate {
                 if data.count == 1, data[0] == 0x01 { self.signalReady() }
 
             case self.cacheUUID:
-                if data.count == 1, let c = self.cacheContinuation {
+                guard data.count == 1 else { break }
+                // Only one check is ever owed (processTrack waits before asking again), so this reply
+                // belongs to the pending continuation, or to a check the app already gave up on.
+                self.cacheReplyOwed = false
+                if let c = self.cacheContinuation {
                     self.cacheContinuation = nil
                     c.resume(returning: data[0] == 0x01)
                 }
+                self.resumeBoardIdleWaitersIfIdle()
 
             case self.imageUUID:
+                if data.count == 1, data[0] == 0x01 || data[0] == 0x02 {
+                    self.imageAckOwed = false
+                    self.resumeBoardIdleWaitersIfIdle()
+                }
                 if data.count == 1, self.awaitingImageComplete, let c = self.transferContinuation {
                     switch data[0] {
                     case 0x01:
