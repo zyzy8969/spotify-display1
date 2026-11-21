@@ -1912,7 +1912,7 @@ void setup() {
   Serial.setRxBufferSize(16384);  // 16KB buffer for fast reception at 921600 baud
   Serial.begin(921600);
   Serial.setTimeout(3000);  // 3 second timeout (115KB @ 921600 baud ≈ 2.5s + safety margin)
-  delay(1000);
+  // No startup wait for the serial monitor: it cost a full second of boot every power-on.
 
   // PSRAM Initialization and check
   Serial.println("\n========================================");
@@ -1948,7 +1948,7 @@ void setup() {
   // Initialize Arduino_GFX display
   gfx->begin();
   // Clear the random power-up contents, then turn the light on (low during the ~1 s of SD init).
-  gfx->fillScreen(BLACK);
+  gfx->fillScreen(WHITE);
   ledcWrite(TFT_BL_PWM_CHANNEL, 50);
 
   // Configure MADCTL register (0x36) for RGB/BGR color order
@@ -2048,29 +2048,6 @@ void setup() {
   Serial.println("========================================\n");
   Serial.flush();
 
-  // Show "Hiii" alone first with fade-in effect
-  gfx->fillScreen(WHITE);
-  gfx->setTextSize(3);
-  gfx->setCursor(75, 100);  // Centered vertically
-
-  // Fade in from light gray to black
-  for(int fadeVal = 255; fadeVal >= 0; fadeVal -= 15) {
-    uint16_t color = RGB565(fadeVal, fadeVal, fadeVal);
-    gfx->setTextColor(color, WHITE);  // Text color with background to overwrite previous
-    gfx->setCursor(75, 100);
-    gfx->print("Hiii");
-    delay(50);
-  }
-
-  // Display "Hiii" for 2 seconds
-  delay(2000);
-
-  // Show "Bluetooth connected?" screen (waiting for script)
-  showBluetoothConnectionScreen(BLACK, RED);
-
-  // Brief delay for USB CDC stability (handles Python DTR reset)
-  delay(500);
-
   // Pre-allocate image buffer ONCE from PSRAM to prevent heap fragmentation
   if (psramFound()) {
     imageBuffer = (uint16_t*)ps_malloc(IMAGE_SIZE);  // Allocate from PSRAM
@@ -2096,8 +2073,28 @@ void setup() {
   Serial.printf("Image buffers allocated: 2 x %d bytes (free heap: %d)\n", IMAGE_SIZE, ESP.getFreeHeap());
   Serial.flush();
 
-  // Initialize Bluetooth LE server
+  // Start BLE first so the phone can find the board while the greeting plays.
   setupBLE();
+
+  // Greeting: "Hiii" centered (size 3 = 18x24 px per char), quick fade-in, short hold.
+  gfx->fillScreen(WHITE);
+  gfx->setTextSize(3);
+  const int16_t hiX = (240 - 4 * 18) / 2, hiY = (240 - 24) / 2;
+  for (int fadeVal = 224; fadeVal >= 0; fadeVal -= 32) {
+    gfx->setTextColor(RGB565(fadeVal, fadeVal, fadeVal), WHITE);
+    gfx->setCursor(hiX, hiY);
+    gfx->print("Hiii");
+    delay(25);
+  }
+  gfx->setTextColor(BLACK, WHITE);
+  gfx->setCursor(hiX, hiY);
+  gfx->print("Hiii");
+  delay(1500);
+
+  // If the phone already connected during the greeting, loop() draws the connected UI;
+  // otherwise show the waiting screen.
+  showBluetoothConnectionScreen(BLACK, RED);
+
 
   Serial.println("SETUP COMPLETE - BLE MODE ACTIVE.");
   Serial.flush();
@@ -2214,20 +2211,20 @@ void buildCacheIndex() {
     if (root) root.close();
     return;
   }
+  // getNextFileName() reads the directory entry without opening each file. openNextFile() opened
+  // every cache file and took ~45 ms apiece (337 files = 15 s of boot).
   for (;;) {
-    File f = root.openNextFile();
-    if (!f) break;
-    if (!f.isDirectory()) {
-      String name = String(f.name());
-      uint8_t key[16];
-      uint8_t version = 0;
-      if (parseCacheFilenameToKey(name, key, &version) && (version == 0 || version == CACHE_KEY_VERSION)) {
-        if (!cacheIndexInsert(key)) {
-          Serial.println("WARN: Cache index full; fallback to SD.exists for extra files");
-        }
+    bool isDir = false;
+    String name = root.getNextFileName(&isDir);
+    if (name.length() == 0) break;
+    if (isDir) continue;
+    uint8_t key[16];
+    uint8_t version = 0;
+    if (parseCacheFilenameToKey(name, key, &version) && (version == 0 || version == CACHE_KEY_VERSION)) {
+      if (!cacheIndexInsert(key)) {
+        Serial.println("WARN: Cache index full; fallback to SD.exists for extra files");
       }
     }
-    f.close();
   }
   root.close();
 }
