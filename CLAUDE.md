@@ -159,6 +159,10 @@ dithering happens app-side.)
   `NowPlayingView` (now playing + sending state, live strip, playback controls),
   `SignedOutView`, `SettingsView` (incl. theme picker), `StatsView` (transfer log + live
   details, shown when "show stats" is on). Views only *read* manager state.
+- `BoardTransitions` — a Swift port of every firmware transition (`runTransition` in
+  `src/main.cpp`), rendered on a 240x240 buffer so the app's cover plays the same frames as the
+  keychain. **Changing, adding or retiring a firmware transition means changing it here too**
+  (`BoardTransition` raw values = firmware `TransitionType`, names = `getTransitionName()`).
 - Theme system — `Theme` (token struct per theme, exposed as `\.theme` in the environment),
   `ThemeTypography` (text roles → fonts scaled with Dynamic Type), `ThemeCopy` (wording per
   theme), `CrayonShapes` (seeded wobble shapes and icons; wobble 0 = crisp for Quiet/Serif),

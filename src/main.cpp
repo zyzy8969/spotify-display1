@@ -2625,6 +2625,10 @@ void loop() {
     String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                                           pendingTransition, /*quick=*/true);
     unsigned long displayTime = millis() - displayStart;
+    // The header's transition belongs to this frame only. Without this reset every later cache
+    // hit reused it (the app picks fresh-send transitions, so hits would all look the same).
+    // Safe here: the client sends no new header until this frame's ACK below.
+    pendingTransition = 0xFF;
 
     unsigned long saveStart = millis();
     saveToCache(transferCacheKey);

@@ -111,11 +111,12 @@ yet verified on a device** — see `docs/VALIDATION_CHECKLIST.md` › "iOS UI (t
   status no longer sits above the art.
 - [ ] **Mirror the board's draw state in the app preview** `[app]` — the firmware now draws a fresh
   frame only when it is whole (7046add), so the app keeps the old cover during a send and swaps to the
-  new one when the board ACKs; a failed send leaves both on the old cover. *Still open*: the app
-  crossfades rather than playing the board's actual transition. Matching it needs the app to stop
-  sending `0xFF` (random) in the 5-byte header and pick the transition itself — the field already
-  exists, it is just unused (`BLEManager.sendRGB565`) — then run the same animation locally. That is
-  a `BLEManager` behaviour change, so it was left for a separate, approved step.
+  new one when the board ACKs; a failed send leaves both on the old cover. *Transitions done in code
+  (feat/app-transition-mirror)*: `BoardTransitions.swift` ports all 49 firmware transitions; the app
+  picks each fresh send's transition (protocol 1.11) and plays the same frames, and plays a cache hit's
+  transition from its `TRANSITION:` name. *Still open*: timings are estimates (tune from the serial
+  `draw <ms>ms` line), and a cache hit's name only arrives after the board finished, so the app plays
+  hits slightly late. Not verified on a device.
 - [x] Blanket `.ignoresSafeArea()` pushes the bottom bar under the home indicator `[app]` — only the
   background ignores safe areas now.
 - [ ] Increase Contrast has no dedicated palette `[app]` — every theme already passes AA without it;

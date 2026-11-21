@@ -36,6 +36,9 @@ final class BLEManager: NSObject, ObservableObject {
     /// Bumped per `processTrack` call, so an older call unwinding after a skip cannot reset the
     /// newer call's `sendStage` or overwrite its preview art.
     private var sendStageGen: UInt64 = 0
+    /// Transition the app chose for the current fresh send (sent in the image header), so the
+    /// preview can play the same one. Set before `sendStage` turns `.preparingFresh`.
+    @Published private(set) var freshTransition: BoardTransition?
     /// Shows "Cache hit" / "Sent to display" / nil on main screen.
     @Published private(set) var lastTransferResult: String?
     /// Human-readable board confirmation for latest transfer stage.
@@ -434,6 +437,10 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
+        // The app picks the transition (instead of 0xFF = board's random) so its preview can play
+        // the same one. Firmware resets it after this frame, so cache hits stay random.
+        let transition = BoardTransition.randomQuick(excluding: freshTransition)
+        freshTransition = transition
         // Set before the art so the preview sees "fresh send coming" when the new cover lands.
         sendStage = .preparingFresh
         currentAlbumArt = data
@@ -455,7 +462,7 @@ final class BLEManager: NSObject, ObservableObject {
 
         let uploadStart = CFAbsoluteTimeGetCurrent()
         setLivePhase("sending BLE…")
-        try await sendRGB565(rgb565, epochAtStart: epochAtStart)
+        try await sendRGB565(rgb565, epochAtStart: epochAtStart, transition: transition.rawValue)
         let uploadMs = ms(since: uploadStart)
         setLivePhase("sent \(secondsLabel(fromMs: uploadMs))")
 
@@ -465,7 +472,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
         appendLog(TransferLogEntry(
-            cacheHit: false, transitionName: nil, cacheCheckMs: cacheCheckMs,
+            cacheHit: false, transitionName: transition.name, cacheCheckMs: cacheCheckMs,
             downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,
             totalMs: totalMs, outcome: "ok"
         ))
@@ -524,7 +531,13 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// `storeOnly` (prefetch): the board saves the frame to SD without drawing it, and this call leaves
     /// every piece of UI state (progress, status text, live phase) alone.
-    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64, storeOnly: Bool = false) async throws {
+    /// `transition`: firmware `TransitionType` index for a drawn frame, or 0xFF for the board's pick.
+    func sendRGB565(
+        _ rgb565: Data,
+        epochAtStart: UInt64,
+        storeOnly: Bool = false,
+        transition: UInt8 = 0xFF
+    ) async throws {
         try ensureTransferEpoch(epochAtStart)
         try ensureGattReady()
         guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
@@ -538,7 +551,7 @@ final class BLEManager: NSObject, ObservableObject {
         try ensureTransferEpoch(epochAtStart)
 
         var header = Data()
-        header.append(storeOnly ? storeOnlyTransition : 0xFF) // 0xFF = random transition on firmware
+        header.append(storeOnly ? storeOnlyTransition : transition) // 0xFF = board picks
         withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         p.writeValue(header, for: img, type: .withResponse)
 

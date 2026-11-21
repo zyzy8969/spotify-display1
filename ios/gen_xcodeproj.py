@@ -25,6 +25,7 @@ TGT_REL = uid()
 swift_files = [
     "AppDelegate.swift",
     "BLEManager.swift",
+    "BoardTransitions.swift",
     "ContentView.swift",
     "CrayonShapes.swift",
     "Extensions.swift",

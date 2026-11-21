@@ -2,7 +2,14 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.10** (New transition indices 28-51.)
+Version: **1.11** (The app chooses fresh-send transitions; the choice lasts one frame.)
+
+Changes in 1.11: the iOS app now sends a real `transitionIndex` for every drawn fresh transfer (a random
+pick from the firmware's quick set, never the same twice in a row) instead of `0xFF`, so it can play the
+same transition on its own screen. The firmware now resets the header's transition to `0xFF` once that
+frame is drawn; before, it stuck, so every later cache hit reused the last header's transition. Cache hits
+are still the board's random pick, reported by `TRANSITION:<name>`. Store-only (`0xFE`) and the wire
+format are unchanged; the Python sender is unaffected.
 
 Changes in 1.10: header `transitionIndex` values 28-39 are new transitions (Corner Peel, Shatter, Cube Turn,
 Jelly Drop, Tile Spin, Infinite Zoom, RGB Split, Accordion, Ink Bleed, Crack Split, Sand Pile, Halftone), and
@@ -83,7 +90,7 @@ On a hit, the `0x01` reply is sent only **after** the SD load and the full trans
 
 1. **Header**:
    - Legacy: 4-byte little-endian `uint32` payload size (random transition).
-   - Current: 5-byte header: `transitionIndex (1 byte)` + payload size `uint32` LE (4 bytes). `0xFF` keeps random transition. `0xFE` = store-only (1.9): save to SD, don't draw.
+   - Current: 5-byte header: `transitionIndex (1 byte)` + payload size `uint32` LE (4 bytes). `0xFF` keeps random transition. `0xFE` = store-only (1.9): save to SD, don't draw. The index applies to that frame only (1.11): the firmware resets it to `0xFF` after drawing.
 2. **Body**: consecutive chunks of RGB565 LE. The **iOS app** applies Atkinson dither during quantization before sending; firmware draws nothing while the frame arrives (the previous picture stays up), then draws the whole frame with the header's transition and saves the same bytes to SD. The ESP32 does **not** re-dither.
 
 **Client cancel / new transfer:** If a client stops mid-image and later sends a new transfer, the first write must be a valid 4-byte or 5-byte header. While still receiving a partial frame, firmware treats a valid header (`115200` payload) as resync and discards the partial frame.

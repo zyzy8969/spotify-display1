@@ -76,10 +76,14 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
 - Art does not jump: skip to a song that is *not* cached and watch a fresh send. The cover must
   stay the same size and position from first byte to ACK, and while the error line or the
   "sending 62%" footer appears and disappears.
-- Preview matches the keychain: during a fresh send the app keeps the previous cover while the
-  strip fills, then crossfades to the new one at the moment the keychain shows it (both change
-  together, within about a second). On a cache hit the app's cover changes as the keychain's
-  transition finishes. With Reduce Motion on, the app cuts instead of crossfading.
+- Preview plays the keychain's transition: during a fresh send the app keeps the previous cover
+  while the strip fills, then plays the *same* transition as the keychain, starting together
+  (within a few tenths of a second). Watch several new songs: the name in Stats › recent transfers
+  should match what both screens did. On a cache hit the app plays the board's transition right
+  after the keychain finishes it. Spot-check odd ones when they come up (Shatter, Cube Turn, Card
+  Flip, Melt, Ink Bleed, Heart Iris): same shape and direction on both screens. If the app runs
+  noticeably faster or slower, note the serial `⚡ Processing: <name> draw <ms>ms` value for it.
+  With Reduce Motion on, the app cuts instead.
 - Strip: after a cache hit it shows a filled dot and a solid line; after a fresh send a hollow
   ring; while sending a growing line; while preparing a dashed line.
 - Dynamic Type: Settings > Accessibility > Display & Text Size > Larger Text, largest size. Every

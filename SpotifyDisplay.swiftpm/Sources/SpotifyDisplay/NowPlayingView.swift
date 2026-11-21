@@ -47,6 +47,15 @@ struct NowPlayingScreen: View {
     /// Newest transfer-log entry when the pending send began; a newer non-cache entry at the end
     /// of the send means it succeeded.
     @State private var pendingSinceLogID: UUID?
+    /// The old cover, kept up while a transition's frames are being computed.
+    @State private var heldImage: UIImage?
+    /// The board-transition frame on screen right now (nil when no transition is playing).
+    @State private var transitionFrame: CGImage?
+    /// Bumped per cover change so an older transition stops playing.
+    @State private var transitionToken = 0
+    /// Cache-hit log entry already animated, so a later art refresh doesn't replay it.
+    @State private var animatedLogID: UUID?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
@@ -64,12 +73,63 @@ struct NowPlayingScreen: View {
             // During a fresh send the stage handler below picks the art up; anything else
             // (a confirmed cache hit, the paused preview) is already what the display shows.
             guard bleManager.sendStage != .preparingFresh else { return }
-            shownImage = Self.decode(newData)
             pendingImage = nil
+            show(Self.decode(newData), with: cacheHitTransition())
+        }
+        // The board starts its transition as soon as the last byte lands, so start ours when
+        // every byte has been handed to Bluetooth rather than waiting for the ACK (which only
+        // comes after the board has finished drawing and saving).
+        .onChange(of: bleManager.transferProgress) { progress in
+            guard progress >= 1, bleManager.sendStage == .preparingFresh, let pending = pendingImage else { return }
+            pendingImage = nil
+            show(pending, with: bleManager.freshTransition)
         }
         // `sendStage` returns to idle on every exit from processTrack (success, error, skip).
         .onChange(of: bleManager.sendStage) { stage in
             stageDidChange(stage)
+        }
+    }
+
+    /// The transition the board just played for a cache hit, read from its `TRANSITION:` reply
+    /// (logged with the hit). The board has already finished it by the time the cover arrives
+    /// here, so on a hit the app plays it slightly after the keychain.
+    private func cacheHitTransition() -> BoardTransition? {
+        guard let entry = bleManager.transferLog.last, entry.cacheHit, entry.id != animatedLogID,
+              Date().timeIntervalSince(entry.timestamp) < 15 else { return nil }
+        animatedLogID = entry.id
+        return BoardTransition(name: entry.transitionName)
+    }
+
+    /// Replaces the cover, playing the board's own `transition` frames (`BoardTransitionRenderer`)
+    /// at the board's pace. A plain cut when there is no transition, no previous cover, or Reduce
+    /// Motion is on.
+    private func show(_ image: UIImage?, with transition: BoardTransition?) {
+        transitionToken &+= 1
+        let token = transitionToken
+        guard let transition, !reduceMotion, let old = shownImage, let new = image else {
+            heldImage = nil
+            transitionFrame = nil
+            shownImage = image
+            return
+        }
+        heldImage = old
+        transitionFrame = nil
+        shownImage = new
+        Task { @MainActor in
+            let frames = await Task.detached(priority: .userInitiated) {
+                BoardTransitionRenderer.frames(transition, from: old, to: new)
+            }.value
+            guard token == transitionToken else { return }
+            heldImage = nil
+            guard let frames, !frames.isEmpty else { return }
+            let interval = transition.duration / Double(frames.count)
+            for frame in frames {
+                guard token == transitionToken else { return }
+                transitionFrame = frame
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+            guard token == transitionToken else { return }
+            transitionFrame = nil
         }
     }
 
@@ -86,7 +146,7 @@ struct NowPlayingScreen: View {
             let succeeded = last.map { $0.id != pendingSinceLogID && !$0.cacheHit } ?? false
             // Nothing to mirror without a display: show the song's cover rather than a stale one.
             if succeeded || !bleManager.isConnected {
-                shownImage = pending
+                show(pending, with: succeeded ? bleManager.freshTransition : nil)
             }
             pendingImage = nil
             pendingSinceLogID = nil
@@ -106,6 +166,8 @@ struct NowPlayingScreen: View {
             Color.clear.frame(height: topGap)
             ArtStage(
                 image: shownImage,
+                held: heldImage,
+                frame: transitionFrame,
                 side: side,
                 label: artLabel,
                 value: artValue
@@ -266,24 +328,31 @@ struct StatusDot: View {
 
 // MARK: - Album art
 
-/// The cover as the keychain shows it. A new cover replaces the old one in one piece, like the
-/// firmware's whole-frame draw; send progress lives in the strip below, not on the art.
+/// The cover as the keychain shows it. While a cover changes it shows the board's own transition
+/// frames; send progress lives in the strip below, not on the art.
 struct ArtStage: View {
     let image: UIImage?
+    /// The previous cover, held while a transition's frames are computed.
+    let held: UIImage?
+    /// Current frame of a playing board transition.
+    let frame: CGImage?
     let side: CGFloat
     let label: String
     let value: String
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
-            artLayer(image)
-                .id(imageID)
-                .transition(.opacity)
+            if let frame {
+                Image(decorative: frame, scale: 1)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: side, height: side)
+            } else {
+                artLayer(held ?? image)
+            }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: imageID)
         .frame(width: side, height: side)
         .background(theme.artSurface)
         .clipShape(RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous))
@@ -294,11 +363,6 @@ struct ArtStage: View {
         .accessibilityLabel(label)
         .accessibilityValue(value)
         .accessibilityAddTraits(.isImage)
-    }
-
-    /// Identity of the picture, so a new cover crossfades in as one piece (Reduce Motion: cut).
-    private var imageID: ObjectIdentifier? {
-        image.map { ObjectIdentifier($0) }
     }
 
     @ViewBuilder
