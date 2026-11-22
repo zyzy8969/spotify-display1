@@ -131,21 +131,28 @@ final class BLEManager: NSObject, ObservableObject {
     /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
     /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
     private var prefetchedKeySources: Set<String> = []
-    /// Songs the keychain has shown (`PlayedTracks`), oldest first, plus a set for lookups.
-    private var playedTrackOrder: [String] = PlayedTracks.load()
-    private lazy var playedTrackSet: Set<String> = Set(playedTrackOrder)
+    /// Albums the keychain has shown (`PlayedAlbums`), oldest first, plus a set for lookups.
+    private var playedAlbumOrder: [String] = PlayedAlbums.load()
+    private lazy var playedAlbumSet: Set<String> = Set(playedAlbumOrder)
 
-    /// The keychain is showing this song; true if it is the song's first play.
+    /// What "played before" is keyed on: the album (same album = same cover = not new), or the track
+    /// for a song without an album id.
+    private func playKey(albumId: String?, trackId: String) -> String {
+        if let albumId, !albumId.isEmpty { return "a:" + albumId }
+        return "t:" + trackId
+    }
+
+    /// The keychain is showing this album; true if it is the first time.
     @discardableResult
-    private func markTrackPlayed(_ trackId: String) -> Bool {
-        guard !trackId.isEmpty, !playedTrackSet.contains(trackId) else { return false }
-        playedTrackSet.insert(trackId)
-        playedTrackOrder.append(trackId)
-        if playedTrackOrder.count > PlayedTracks.cap + 200 {
-            playedTrackOrder.removeFirst(playedTrackOrder.count - PlayedTracks.cap)
-            playedTrackSet = Set(playedTrackOrder)
+    private func markAlbumPlayed(_ key: String) -> Bool {
+        guard !playedAlbumSet.contains(key) else { return false }
+        playedAlbumSet.insert(key)
+        playedAlbumOrder.append(key)
+        if playedAlbumOrder.count > PlayedAlbums.cap + 200 {
+            playedAlbumOrder.removeFirst(playedAlbumOrder.count - PlayedAlbums.cap)
+            playedAlbumSet = Set(playedAlbumOrder)
         }
-        PlayedTracks.save(playedTrackOrder)
+        PlayedAlbums.save(playedAlbumOrder)
         return true
     }
     private var mirror: TransitionMirror { TransitionMirror.shared }
@@ -601,15 +608,16 @@ final class BLEManager: NSObject, ObservableObject {
         let cacheHit: Bool
         let cacheKeySource = String.cacheKeySource(albumId: albumId, imageURL: primaryURL)
         let cacheKey = cacheKeySource.md5Digest
+        // "Played before" is per album: the first song from an album is new (orange on the keychain)
+        // even when its cover is already on the card (prefetched); later songs from it are blue.
+        let albumKey = playKey(albumId: albumId, trackId: trackId)
         sendSwapFlipIfAsked()
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
         noteDrawRequest(.cacheCheck(frameTask))
         let hitDrawGen = drawRequestGen
         do {
-            // A song's first play is orange on the keychain even when its cover is already on the card
-            // (prefetched, or same album); later plays from the card are blue.
-            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: !playedTrackSet.contains(trackId))
+            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: !playedAlbumSet.contains(albumKey))
         } catch {
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
@@ -646,8 +654,8 @@ final class BLEManager: NSObject, ObservableObject {
                 boardAckStatus = "Board ACK: cache hit"
                 lastConfirmedTrackId = trackId
                 let wasPrefetched = prefetchedKeySources.remove(cacheKeySource) != nil
-                // First play of this song: "new", although its cover came off the card.
-                let firstShow = markTrackPlayed(trackId)
+                // First song from this album: "new", although its cover came off the card.
+                let firstShow = markAlbumPlayed(albumKey)
                 appendLog(TransferLogEntry(
                     cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
                     downloadMs: nil, convertMs: nil, uploadMs: 0,
@@ -709,7 +717,7 @@ final class BLEManager: NSObject, ObservableObject {
         lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)), \(wireLabel))"
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
-        markTrackPlayed(trackId)
+        markAlbumPlayed(albumKey)
         appendLog(TransferLogEntry(
             cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
             downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,

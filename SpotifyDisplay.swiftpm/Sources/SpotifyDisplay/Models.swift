@@ -51,17 +51,17 @@ struct TransferLogEntry: Identifiable, Codable, Equatable {
     /// song is new to the person even though the board drew it from its card. Optional so older
     /// saved entries still decode.
     var prefetched: Bool? = nil
-    /// A cache hit for a song's first play (its cover was already on the card): the song is new to
-    /// the person ("new" pop-up, not "cache"). Optional so older entries decode.
+    /// A cache hit for the first song shown from its album (the cover was already on the card, e.g.
+    /// prefetched): new to the person ("new" pop-up, not "cache"). Optional so older entries decode.
     var firstShow: Bool? = nil
 }
 
-/// Spotify track ids the keychain has shown at least once, saved on the phone. A song's first play is
-/// "new" (orange LED, "new" pop-up) even when its cover is already on the card (queue prefetch, or
-/// another song from the same album); every later play that comes off the card is "cache" (blue).
-/// Oldest first, capped (~110 KB at most).
-enum PlayedTracks {
-    static let storageKey = "playedTrackIds.v1"
+/// Albums the keychain has shown at least once (Spotify album id; the track id for a song without
+/// one), saved on the phone. The first song shown from an album is "new" (orange LED, "new" pop-up)
+/// even when its cover is already on the card (queue prefetch); every later song from that album is
+/// "cache" (blue). Oldest first, capped (~110 KB at most).
+enum PlayedAlbums {
+    static let storageKey = "playedAlbumIds.v1"
     static let cap = 5000
 
     static func load() -> [String] {

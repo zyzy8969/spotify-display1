@@ -9,8 +9,8 @@ Additive: the app sends the new magic only to boards that announced `CAPS:newson
 - **New-song cache check** — same 20-byte Cache write as a normal check, magic `0xDEADBEE1`. Identical
   behaviour and reply; only the status LED differs: solid orange (the transfer colour) instead of blue
   during the lookup / cache-hit draw, then the usual green. The app uses it when the keychain has never
-  shown this song before (its own list of played track ids), so a first play is orange even when its cover is
-  already on the card (queue prefetch, or the same album).
+  shown a song from this album before (its own list of played album ids), so the first song from an album is orange even when its cover is
+  already on the card (queue prefetch).
 - **`CAPS:newsong`** — sent on every stats request after `CAPS:next`.
 
 Changes in 1.16 summary: (one-shot transition for the next draw: photo <-> cover swaps flip on the keychain.)
