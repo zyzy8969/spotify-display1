@@ -2,7 +2,23 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.10** (New transition indices 28-51.)
+Version: **1.11** (Compressed frames; faster link parameters.)
+
+Changes in 1.11 (faster sending). Additive: old clients and the Python sender are unaffected.
+- **Compressed frame** — new 10-byte image header: `transitionIndex (1)` + `format (1)` = `0x01`
+  (raw DEFLATE, RFC 1951, no zlib header) + raw size `uint32` LE (must be `115200`) + packed size
+  `uint32` LE (1..115200). The body is that many bytes of the deflated RGB565 frame. Firmware inflates it
+  once complete (ROM `tinfl_decompress`), then draws / saves / ACKs exactly as for a raw frame.
+  `0xFE` store-only works the same with compression. If inflating fails or yields anything but 115,200
+  bytes, nothing is drawn or saved and firmware sends `ERROR: Decompress failed` + Image `0x02`; the iOS
+  app then sends raw frames for the rest of the connection.
+- **Capability** — in reply to the stats request (`0xC0FFEEE1`), firmware that can inflate first sends
+  Message `CAPS:deflate`, then `CACHE_COUNT` as before. Clients must send the 10-byte header only after
+  seeing it on the current connection (old firmware rejects it as `ERROR: Invalid image header`).
+- **Link parameters** (no GATT change) — on connect firmware asks for a 7.5–15 ms connection interval and
+  251-byte LE data length. If the phone refuses or keeps an interval above 15 ms, firmware asks once for
+  15 ms (the shortest Apple-compliant value). Outcomes are logged on serial (`BLE: Connection interval …`,
+  `BLE: Data length …`).
 
 Changes in 1.10: header `transitionIndex` values 28-39 are new transitions (Corner Peel, Shatter, Cube Turn,
 Jelly Drop, Tile Spin, Infinite Zoom, RGB Split, Accordion, Ink Bleed, Crack Split, Sand Pile, Halftone), and
@@ -83,10 +99,11 @@ On a hit, the `0x01` reply is sent only **after** the SD load and the full trans
 
 1. **Header**:
    - Legacy: 4-byte little-endian `uint32` payload size (random transition).
-   - Current: 5-byte header: `transitionIndex (1 byte)` + payload size `uint32` LE (4 bytes). `0xFF` keeps random transition. `0xFE` = store-only (1.9): save to SD, don't draw.
-2. **Body**: consecutive chunks of RGB565 LE. The **iOS app** applies Atkinson dither during quantization before sending; firmware draws nothing while the frame arrives (the previous picture stays up), then draws the whole frame with the header's transition and saves the same bytes to SD. The ESP32 does **not** re-dither.
+   - 5-byte header: `transitionIndex (1 byte)` + payload size `uint32` LE (4 bytes). `0xFF` keeps random transition. `0xFE` = store-only (1.9): save to SD, don't draw.
+   - Compressed (1.11): 10-byte header: `transitionIndex (1)` + `0x01` (raw DEFLATE) + raw size `uint32` LE (`115200`) + packed size `uint32` LE. Only after `CAPS:deflate`.
+2. **Body**: consecutive chunks of RGB565 LE (or, after a 10-byte header, of its DEFLATE stream; the board inflates it before drawing). The **iOS app** applies Atkinson dither during quantization before sending; firmware draws nothing while the frame arrives (the previous picture stays up), then draws the whole frame with the header's transition and saves the same bytes to SD. The ESP32 does **not** re-dither.
 
-**Client cancel / new transfer:** If a client stops mid-image and later sends a new transfer, the first write must be a valid 4-byte or 5-byte header. While still receiving a partial frame, firmware treats a valid header (`115200` payload) as resync and discards the partial frame.
+**Client cancel / new transfer:** If a client stops mid-image and later sends a new transfer, the first write must be a valid 4-byte or 5-byte header. While still receiving a partial frame, firmware treats a valid header (4/5-byte with `115200` payload, or a well-formed 10-byte header) as resync and discards the partial frame.
 
 **Notify**: `0x01` on Image characteristic and/or UTF-8 `SUCCESS` on Message **after** firmware finishes drawing (transition) and the SD cache save for that frame. Allow for the transition: up to ~1.3 s plus ~0.4 s save after the last chunk.
 
@@ -126,10 +143,11 @@ message they do not recognise.
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |
 | `SUCCESS` | (a) after a frame's SD save, with Image `0x01`; (b) after a cache hit, right after the Cache `0x01` reply | (a) ends the transfer wait. (b) is redundant with `CACHE_RENDERED`; the iOS app accepts it only while it is waiting for a render confirmation, and ignores it otherwise |
 | `CACHE_MISS_MS:<ms>` | Cache miss, before the Cache `0x00` reply | Telemetry only |
+| `CAPS:deflate` | Stats request, before `CACHE_COUNT` (1.11) | iOS: may send compressed frames this connection |
 | `CACHE_COUNT:<n>` | Stats request, and after a clear | Required for app UI |
 | `CACHE_HEALTH:…` | Stats request | Optional telemetry |
 | `CACHE_CLEARED`, `CACHE_CLEAR_MS:<ms>` | Clear request | See Cache check |
-| `ERROR: <reason>` | Invalid header, size mismatch, buffer overflow (with Image `0x02`) | Fail the in-flight transfer |
+| `ERROR: <reason>` | Invalid header, size mismatch, buffer overflow, decompress failed (with Image `0x02`) | Fail the in-flight transfer |
 
 Cache-hit order on the wire: `CACHE_HIT_MS` → `TRANSITION` → `CACHE_RENDERED` → Cache `0x01` → `SUCCESS`.
 

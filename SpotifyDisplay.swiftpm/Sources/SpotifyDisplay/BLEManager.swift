@@ -128,6 +128,13 @@ final class BLEManager: NSObject, ObservableObject {
     private let cacheProbeMagic = UInt32(0xDEADBEE0)
     /// BLE_PROTOCOL 1.8 prefetch: image header transition byte meaning "save to SD, don't draw".
     private let storeOnlyTransition: UInt8 = 0xFE
+    /// BLE_PROTOCOL 1.11: image header format byte for a raw-DEFLATE payload (10-byte header).
+    private let deflateFormat: UInt8 = 0x01
+    /// Board said `CAPS:deflate` (in reply to the stats request sent on every connect). Cleared on
+    /// disconnect, and for the rest of the connection if the board ever fails to inflate a frame.
+    private var boardSupportsDeflate = false
+    /// Below this saving a frame goes raw: inflating costs the board ~20 ms, not worth it for <10%.
+    private let minDeflateSaving = 0.9
     /// Must match `main.cpp` stats request magic.
     private let statsMagic = UInt32(0xC0FFEEE1)
 
@@ -455,13 +462,15 @@ final class BLEManager: NSObject, ObservableObject {
 
         let uploadStart = CFAbsoluteTimeGetCurrent()
         setLivePhase("sending BLE…")
-        try await sendRGB565(rgb565, epochAtStart: epochAtStart)
+        let wireBytes = try await sendRGB565(rgb565, epochAtStart: epochAtStart)
         let uploadMs = ms(since: uploadStart)
-        setLivePhase("sent \(secondsLabel(fromMs: uploadMs))")
+        let wireLabel = "\(wireBytes / 1024) KB" + (wireBytes < rgb565.count
+            ? String(format: ", %.1f×", Double(rgb565.count) / Double(wireBytes)) : "")
+        setLivePhase("sent \(wireLabel) in \(secondsLabel(fromMs: uploadMs))")
 
         let totalMs = ms(since: totalStart)
         setLivePhase("done \(secondsLabel(fromMs: totalMs))")
-        lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)))"
+        lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)), \(wireLabel))"
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
         appendLog(TransferLogEntry(
@@ -524,7 +533,9 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// `storeOnly` (prefetch): the board saves the frame to SD without drawing it, and this call leaves
     /// every piece of UI state (progress, status text, live phase) alone.
-    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64, storeOnly: Bool = false) async throws {
+    /// Returns the bytes that went over the air (smaller than `rgb565` when sent compressed).
+    @discardableResult
+    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64, storeOnly: Bool = false) async throws -> Int {
         try ensureTransferEpoch(epochAtStart)
         try ensureGattReady()
         guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
@@ -537,9 +548,25 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
+        // BLE_PROTOCOL 1.11: deflate the frame when the board can inflate it. A few ms off-main.
+        var packed: Data?
+        if boardSupportsDeflate {
+            let raw = rgb565
+            packed = await Task.detached(priority: .userInitiated) { ImageProcessor.deflateRaw(raw) }.value
+            if let pk = packed, Double(pk.count) > Double(rgb565.count) * minDeflateSaving { packed = nil }
+            try ensureTransferEpoch(epochAtStart)
+        }
+        let payload = packed ?? rgb565
+
         var header = Data()
         header.append(storeOnly ? storeOnlyTransition : 0xFF) // 0xFF = random transition on firmware
-        withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
+        if packed != nil {
+            header.append(deflateFormat)
+            withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
+            withUnsafeBytes(of: UInt32(payload.count).littleEndian) { header.append(contentsOf: $0) }
+        } else {
+            withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
+        }
         p.writeValue(header, for: img, type: .withResponse)
 
         try ensureTransferEpoch(epochAtStart)
@@ -549,7 +576,7 @@ final class BLEManager: NSObject, ObservableObject {
             transferProgress = 0
         }
 
-        let total = rgb565.count
+        let total = payload.count
         var offset = 0
         let useWithoutResponse = img.properties.contains(.writeWithoutResponse)
         let mtuWR = p.maximumWriteValueLength(for: .withoutResponse)
@@ -564,7 +591,7 @@ final class BLEManager: NSObject, ObservableObject {
             }
             try ensureTransferEpoch(epochAtStart)
             let end = min(offset + writeChunkSize, total)
-            let chunk = rgb565.subdata(in: offset..<end)
+            let chunk = payload.subdata(in: offset..<end)
             let wtype: CBCharacteristicWriteType = useWithoutResponse ? .withoutResponse : .withResponse
             p.writeValue(chunk, for: img, type: wtype)
             offset = end
@@ -634,7 +661,7 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
-        if storeOnly { return }
+        if storeOnly { return total }
 
         isTransferring = false
         transferProgress = 0
@@ -644,6 +671,7 @@ final class BLEManager: NSObject, ObservableObject {
         Task { @MainActor in
             try? await self.refreshSDCacheCount()
         }
+        return total
     }
 
     enum PrefetchOutcome { case alreadyCached, stored, noArt }
@@ -683,7 +711,7 @@ final class BLEManager: NSObject, ObservableObject {
         try ensureTransferEpoch(epochAtStart)
         guard rgb565.count == imagePayloadBytes else { throw SpotifyDisplayError.conversionFailed }
 
-        try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
+        _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
         return .stored
     }
 
@@ -727,6 +755,7 @@ final class BLEManager: NSObject, ObservableObject {
         msgChar = nil
         brightnessChar = nil
         sawReady = false
+        boardSupportsDeflate = false
         failPending(error: SpotifyDisplayError.notConnected)
     }
 
@@ -811,6 +840,11 @@ final class BLEManager: NSObject, ObservableObject {
             return
         }
         if text == "READY" { signalReady() }
+        if text == "CAPS:deflate" { boardSupportsDeflate = true }
+        if text.hasPrefix("ERROR: Decompress") {
+            // The retry (and every later frame this connection) goes raw.
+            boardSupportsDeflate = false
+        }
 
         // Firmware ERROR: replies reject the frame and reset its receive state; no ACK will follow.
         if text.hasPrefix("ERROR:") {

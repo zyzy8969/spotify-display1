@@ -14,6 +14,9 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <esp_gap_ble_api.h>
+// Inflate (raw DEFLATE) lives in the S3 ROM: no library, no flash cost. BLE_PROTOCOL 1.11.
+#include "esp32s3/rom/miniz.h"
 
 // Pin definitions for Waveshare ESP32-S3 1.3" LCD
 #define TFT_BL 20
@@ -64,6 +67,11 @@ int brightness = TFT_BRIGHTNESS_MAX;  // 100% brightness for maximum vibrancy
 //               A transfer abandoned by a skip therefore never touches the screen.
 static uint16_t* imageBuffer = nullptr;
 static uint16_t* rxBuffer = nullptr;
+// Compressed transfers (BLE_PROTOCOL 1.11): the deflated bytes land here, loop() inflates them
+// into rxBuffer once the frame is whole. The decompressor state is ~11 KB, so it lives in PSRAM,
+// never on a stack (loop()'s is 8 KB; BTC_TASK's far smaller).
+static uint8_t* rxPacked = nullptr;
+static tinfl_decompressor* inflator = nullptr;
 // prevBuffer    = copy of the picture last drawn by a transition (the old cover), so frame-based
 //                 transitions can mix old and new. imageBuffer can't serve: a cache hit loads
 //                 the new cover straight into it.
@@ -124,6 +132,11 @@ enum ImageState {
 ImageState imageState = WAITING_FOR_SIZE;
 uint32_t expectedSize = 0;
 uint32_t receivedBytes = 0;
+// Frame being received is deflate-compressed (10-byte header). Chunks go to rxPacked.
+bool rxCompressed = false;
+// Snapshot of rxCompressed when the frame completed (callback resets state right after).
+volatile bool completedCompressed = false;
+#define IMAGE_FORMAT_DEFLATE 0x01
 uint8_t currentCacheKey[16];
 // Key of the frame being received, snapshotted when its header arrives. A later cache check
 // overwrites currentCacheKey, so saving with currentCacheKey could file this frame's pixels
@@ -284,12 +297,41 @@ inline uint32_t decodeLE32(const std::string& value) {
 volatile bool phyUpdatePending = false;
 volatile uint8_t phyTx = 0, phyRx = 0, phyStatus = 0;
 
+// Data length extension result (LE packet payload: 27 bytes default, 251 max).
+volatile bool dleUpdatePending = false;
+volatile uint16_t dleTx = 0, dleRx = 0;
+volatile uint8_t dleStatus = 0;
+
+// Connection interval. onConnect asks for 7.5–15 ms; iOS may refuse anything under 15 ms (Apple's
+// accessory guidelines), and a refused request leaves the link at iOS's ~30 ms default. So loop()
+// watches the outcome and, once per connection, falls back to the 15 ms request iOS accepts.
+// Units: 1.25 ms (interval), 10 ms (supervision timeout).
+#define CONN_INT_FAST_MIN 6           // 7.5 ms
+#define CONN_INT_FAST_MAX 12          // 15 ms
+#define CONN_INT_SAFE 12              // 15 ms min = max: the shortest Apple-compliant request
+#define CONN_SUPERVISION_TIMEOUT 400  // 4 s
+volatile bool connParamsPending = false;
+volatile uint8_t connParamsStatus = 0;
+volatile uint16_t connIntervalUnits = 0;
+esp_bd_addr_t peerAddr = {0};
+volatile bool peerAddrValid = false;
+bool connIntervalFallbackSent = false;  // loop() only; reset on each new connection
+
 static void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
     if (event == ESP_GAP_BLE_PHY_UPDATE_COMPLETE_EVT) {
         phyStatus = param->phy_update.status;
         phyTx = param->phy_update.tx_phy;
         phyRx = param->phy_update.rx_phy;
         phyUpdatePending = true;
+    } else if (event == ESP_GAP_BLE_SET_PKT_LENGTH_COMPLETE_EVT) {
+        dleStatus = param->pkt_data_lenth_cmpl.status;
+        dleTx = param->pkt_data_lenth_cmpl.params.tx_len;
+        dleRx = param->pkt_data_lenth_cmpl.params.rx_len;
+        dleUpdatePending = true;
+    } else if (event == ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT) {
+        connParamsStatus = param->update_conn_params.status;
+        connIntervalUnits = param->update_conn_params.conn_int;
+        connParamsPending = true;
     }
 }
 
@@ -313,14 +355,20 @@ class MyServerCallbacks: public BLEServerCallbacks {
         // Display drawing is deferred to loop() — BTC_TASK stack is tiny.
     }
 
-    // Ask the phone for a 15 ms connection interval (iOS default is ~30 ms). Image transfer
-    // throughput scales with connection events: ~28 KB/s at 30 ms → one 115 KB cover took ~3.7 s,
-    // so quick skips cut transfers off before they finished. 15 ms min = max is within Apple's
-    // accessory guidelines; iOS may still pick its own value. Units: 1.25 ms (interval), 10 ms (timeout).
-    // Lightweight (queues a GAP request) — safe on the small BTC_TASK stack.
+    // Ask the phone for a 7.5–15 ms connection interval (iOS default is ~30 ms). Image transfer
+    // throughput scales with connection events: ~28 KB/s at 30 ms → one 115 KB cover took ~3.7 s.
+    // If iOS refuses, loop() falls back to 15 ms (CONN_INT_SAFE).
+    // Also ask for the largest LE packet (data length extension: 251-byte payloads instead of 27),
+    // so each 512-byte write needs 3 radio packets instead of 19.
+    // Lightweight (each call only queues a GAP request) — safe on the small BTC_TASK stack.
     void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
-        pServer->updateConnParams(param->connect.remote_bda, 12, 12, 0, 400);
-        Serial.println("BLE: Requested 15 ms connection interval");
+        memcpy(peerAddr, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+        peerAddrValid = true;
+        pServer->updateConnParams(param->connect.remote_bda, CONN_INT_FAST_MIN, CONN_INT_FAST_MAX, 0,
+                                  CONN_SUPERVISION_TIMEOUT);
+        Serial.println("BLE: Requested 7.5-15 ms connection interval");
+        esp_ble_gap_set_pkt_data_len(param->connect.remote_bda, 251);
+        Serial.println("BLE: Requested 251-byte data length");
         // Ask for the LE 2M PHY (BLE 5; ESP32-S3 and iPhone 8+ support it): twice the radio bit
         // rate, so the ~2.2 s 115 KB cover transfer should shrink. The phone may decline; the
         // outcome is logged from loop() as "BLE: PHY tx=… rx=…". Also only queues a GAP request.
@@ -331,6 +379,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
+        peerAddrValid = false;
         uint8_t notReady = 0x00;
         pStatusChar->setValue(&notReady, 1);
         Serial.println("BLE Client disconnected");
@@ -381,59 +430,95 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
     }
 };
 
+// A frame header written to the Image characteristic (BLE_PROTOCOL 1.11):
+//   4 bytes  size u32 LE                                   (legacy, random transition)
+//   5 bytes  transition + size u32 LE
+//  10 bytes  transition + format (0x01 = raw DEFLATE) + raw size u32 LE + packed size u32 LE
+// Every form describes one 115,200-byte RGB565 frame. Only the 10-byte form is compressed.
+struct ImageHeader {
+    uint8_t transition;
+    bool compressed;
+    uint32_t payloadBytes;  // bytes that follow on the wire (packed size when compressed)
+};
+
+inline uint32_t decodeLE32At(const std::string& v, size_t off) {
+    return (uint8_t)v[off] | ((uint8_t)v[off + 1] << 8) | ((uint8_t)v[off + 2] << 16) | ((uint8_t)v[off + 3] << 24);
+}
+
+inline bool isImageHeaderLength(size_t n) { return n == 4 || n == 5 || n == 10; }
+
+// True only for a well-formed header of a 240x240 frame. No allocation: safe on BTC_TASK.
+static bool parseImageHeader(const std::string& v, ImageHeader& h) {
+    if (v.length() == 4) {
+        h = { 0xFF, false, decodeLE32At(v, 0) };
+        return h.payloadBytes == IMAGE_SIZE;
+    }
+    if (v.length() == 5) {
+        h = { (uint8_t)v[0], false, decodeLE32At(v, 1) };
+        return h.payloadBytes == IMAGE_SIZE;
+    }
+    if (v.length() == 10) {
+        if ((uint8_t)v[1] != IMAGE_FORMAT_DEFLATE || !rxPacked || !inflator) return false;
+        uint32_t rawSize = decodeLE32At(v, 2);
+        uint32_t packed = decodeLE32At(v, 6);
+        if (rawSize != IMAGE_SIZE || packed == 0 || packed > IMAGE_SIZE) return false;
+        h = { (uint8_t)v[0], true, packed };
+        return true;
+    }
+    return false;
+}
+
+// Inflates one raw-DEFLATE frame (BLE_PROTOCOL 1.11) into `out` (IMAGE_SIZE bytes). loop() only:
+// takes ~10-30 ms. True only if the stream ends cleanly with exactly IMAGE_SIZE bytes.
+static bool inflateFrame(const uint8_t* in, size_t inBytes, uint8_t* out, size_t* outBytes) {
+    *outBytes = 0;
+    if (!in || !out || !inflator || inBytes == 0) return false;
+    tinfl_init(inflator);
+    size_t inSize = inBytes;
+    size_t outSize = IMAGE_SIZE;
+    // Whole input present (no HAS_MORE_INPUT); output buffer holds the whole frame.
+    tinfl_status st = tinfl_decompress(inflator, in, &inSize, out, out, &outSize,
+                                       TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    *outBytes = outSize;
+    return st == TINFL_STATUS_DONE && outSize == IMAGE_SIZE;
+}
+
 // Image transfer callbacks - handle image data reception
 // LIGHTWEIGHT: Only receives data and sets flag, heavy work done in loop()
 class ImageTransferCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
         std::string value = pCharacteristic->getValue();
+        ImageHeader hdr;
 
         if (imageState == WAITING_FOR_SIZE) {
-            // First write should be either:
-            // - 4-byte size header (legacy random transition)
-            // - 5-byte header: 1-byte transition + 4-byte little-endian size
-            if (value.length() != 4 && value.length() != 5) {
-                Serial.printf("ERROR: Expected 4/5-byte header, got %d\n", value.length());
+            if (!isImageHeaderLength(value.length())) {
+                Serial.printf("ERROR: Expected 4/5/10-byte header, got %d\n", value.length());
                 notifyImageTransferRejected("ERROR: Invalid image header");
                 return;
             }
-            if (value.length() == 5) {
-                pendingTransition = (uint8_t)value[0];
-                std::string sizeBytes = value.substr(1, 4);
-                expectedSize = decodeLE32(sizeBytes);
-            } else {
-                pendingTransition = 0xFF;
-                expectedSize = decodeLE32(value);
-            }
-
-            if (expectedSize != IMAGE_SIZE) {
-                Serial.printf("ERROR: Size mismatch, got %d, expected %d\n",
-                              expectedSize, IMAGE_SIZE);
-                notifyImageTransferRejected("ERROR: Size mismatch");
+            if (!parseImageHeader(value, hdr)) {
+                Serial.printf("ERROR: Bad %d-byte image header\n", value.length());
+                notifyImageTransferRejected(value.length() == 10 ? "ERROR: Invalid image header"
+                                                                 : "ERROR: Size mismatch");
                 imageState = WAITING_FOR_SIZE;  // Reset
                 return;
             }
 
-            Serial.printf("BLE: Expecting %d bytes\n", expectedSize);
+            pendingTransition = hdr.transition;
+            expectedSize = hdr.payloadBytes;
+            rxCompressed = hdr.compressed;
+            Serial.printf("BLE: Expecting %u bytes%s\n", (unsigned)expectedSize, rxCompressed ? " (deflate)" : "");
             memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
             receivedBytes = 0;
             imageState = RECEIVING_DATA;
 
         } else if (imageState == RECEIVING_DATA) {
             // New image header mid-stream: client cancelled and started a fresh transfer
-            bool isResyncHeader = false;
-            uint32_t resyncSize = 0;
-            if (value.length() == 4) {
-                resyncSize = decodeLE32(value);
-                isResyncHeader = true;
-                pendingTransition = 0xFF;
-            } else if (value.length() == 5) {
-                std::string sizeBytes = value.substr(1, 4);
-                resyncSize = decodeLE32(sizeBytes);
-                pendingTransition = (uint8_t)value[0];
-                isResyncHeader = true;
-            }
-            if (isResyncHeader && resyncSize == IMAGE_SIZE) {
+            if (isImageHeaderLength(value.length()) && parseImageHeader(value, hdr)) {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
+                pendingTransition = hdr.transition;
+                expectedSize = hdr.payloadBytes;
+                rxCompressed = hdr.compressed;
                 memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
                 receivedBytes = 0;
                 // Prevent a stale completion from a prior partial frame from firing in loop().
@@ -455,7 +540,8 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 
             // Copy chunk to the receive buffer (memcpy is fast, safe in callback). Never imageBuffer:
             // that holds the last complete picture, which loop() may be reading for a transition.
-            memcpy((uint8_t*)rxBuffer + receivedBytes, value.data(), chunkSize);
+            uint8_t* dst = rxCompressed ? rxPacked : (uint8_t*)rxBuffer;
+            memcpy(dst + receivedBytes, value.data(), chunkSize);
             receivedBytes += chunkSize;
 
             // Log progress (every 10KB or final)
@@ -468,8 +554,9 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             if (receivedBytes == expectedSize) {
                 Serial.println("BLE: Image transfer complete");
                 completedImageBytes = receivedBytes;
+                completedCompressed = rxCompressed;
 
-                // Set flag for loop() to handle display/save
+                // Set flag for loop() to handle inflate/display/save
                 // CRITICAL: Don't do display/SD card work here - BTC_TASK stack is tiny!
                 imageTransferComplete = true;
 
@@ -477,6 +564,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 imageState = WAITING_FOR_SIZE;
                 receivedBytes = 0;
                 expectedSize = 0;
+                rxCompressed = false;
 
                 // Return immediately - let loop() do the heavy work
             }
@@ -2064,6 +2152,12 @@ void setup() {
     composeBuffer = (uint16_t*)ps_malloc(IMAGE_SIZE);
   }
   Serial.printf("Compose buffers: %s\n", (prevBuffer && composeBuffer) ? "ok" : "MISSING (frame transitions disabled)");
+  // Compressed transfers (1.11). Without these the board simply never advertises CAPS:deflate.
+  if (psramFound()) {
+    rxPacked = (uint8_t*)ps_malloc(IMAGE_SIZE);
+    inflator = (tinfl_decompressor*)ps_malloc(sizeof(tinfl_decompressor));
+  }
+  Serial.printf("Deflate receive: %s\n", (rxPacked && inflator) ? "ok" : "MISSING (raw frames only)");
 
   if (!imageBuffer || !rxBuffer) {
     Serial.println("FATAL: Cannot allocate image buffers");
@@ -2460,9 +2554,35 @@ void loop() {
     Serial.printf("BLE: PHY tx=%uM rx=%uM (status %u)\n", (unsigned)phyTx, (unsigned)phyRx, (unsigned)phyStatus);
   }
 
+  if (dleUpdatePending) {
+    dleUpdatePending = false;
+    Serial.printf("BLE: Data length tx=%u rx=%u bytes (status %u)\n", (unsigned)dleTx, (unsigned)dleRx,
+                  (unsigned)dleStatus);
+  }
+
+  if (connParamsPending) {
+    connParamsPending = false;
+    unsigned units = connIntervalUnits;
+    Serial.printf("BLE: Connection interval %u.%02u ms (status %u)\n", (units * 125) / 100,
+                  (units * 125) % 100, (unsigned)connParamsStatus);
+    // Refused, or iOS kept something slower than 15 ms: ask once for the compliant 15 ms.
+    if (deviceConnected && peerAddrValid && !connIntervalFallbackSent &&
+        (connParamsStatus != 0 || units > CONN_INT_SAFE)) {
+      connIntervalFallbackSent = true;
+      pServer->updateConnParams(peerAddr, CONN_INT_SAFE, CONN_INT_SAFE, 0, CONN_SUPERVISION_TIMEOUT);
+      Serial.println("BLE: Falling back to 15 ms connection interval request");
+    }
+  }
+
   // BLE stats: number of /cache/*.bin files — sent to the phone app only (never drawn on this display)
   if (statsRequestPending) {
     statsRequestPending = false;
+    // BLE_PROTOCOL 1.11: tells the app it may send deflate-compressed frames (10-byte header).
+    // Sent before CACHE_COUNT, which the app awaits right after connecting.
+    if (rxPacked && inflator) {
+      pMsgChar->setValue("CAPS:deflate");
+      pMsgChar->notify();
+    }
     publishCacheCount();
     publishCacheStats();
   }
@@ -2501,6 +2621,7 @@ void loop() {
       expectedSize = 0;
       imageTransferComplete = false;
       completedImageBytes = 0;
+      rxCompressed = false;
       pendingTransition = 0xFF;  // drop a cut-off prefetch's store-only marker
     }
 
@@ -2595,7 +2716,22 @@ void loop() {
 
     Serial.println("Processing image transfer completion...");
 
-    if (pendingTransition == TRANSITION_STORE_ONLY) {
+    bool frameOk = true;
+    if (completedCompressed) {
+      completedCompressed = false;
+      unsigned long inflateStart = millis();
+      size_t outBytes = 0;
+      frameOk = inflateFrame(rxPacked, completedImageBytes, (uint8_t*)rxBuffer, &outBytes);
+      Serial.printf("BLE: Inflated %u -> %u bytes in %lums (%s)\n", (unsigned)completedImageBytes,
+                    (unsigned)outBytes, millis() - inflateStart, frameOk ? "ok" : "FAILED");
+    }
+
+    if (!frameOk) {
+      // Nothing drawn or saved: the old picture stays up and the app resends the frame raw.
+      pendingTransition = 0xFF;
+      completedImageBytes = 0;
+      notifyImageTransferRejected("ERROR: Decompress failed");
+    } else if (pendingTransition == TRANSITION_STORE_ONLY) {
       // Prefetched cover for a song that isn't playing yet: save it from rxBuffer, leave the
       // panel and imageBuffer alone. When that song starts, its cache check is a hit.
       pendingTransition = 0xFF;
@@ -2656,6 +2792,7 @@ void loop() {
   if (deviceConnected && !oldDeviceConnected) {
     // Client just connected
     oldDeviceConnected = deviceConnected;
+    connIntervalFallbackSent = false;
 
     // Update to connected state (yes=green, no=black - connected!)
     showingStartupScreen = false;

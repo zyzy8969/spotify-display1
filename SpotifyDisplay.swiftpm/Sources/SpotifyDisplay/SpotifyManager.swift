@@ -890,8 +890,12 @@ final class SpotifyManager: ObservableObject {
         prefetchTask = nil
     }
 
-    /// Sends the next queued song's cover to the board's SD card (not drawn). Runs at most once per
-    /// current song, only when no real send is in flight. Failures are silent: prefetch is an
+    /// How many upcoming queue entries to put on the board ahead of time. Each costs one probe
+    /// (~50 ms) when already cached, or one compressed store-only transfer when not.
+    private let prefetchDepth = 5
+
+    /// Sends the covers of the next `prefetchDepth` queued songs to the board's SD card (not drawn),
+    /// nearest first. Runs at most once per current song, only when no real send is in flight. Failures are silent: prefetch is an
     /// optimisation, the normal path still sends the cover when the song starts.
     private func schedulePrefetch(bleManager: BLEManager, currentTrackId: String, currentAlbumId: String?) {
         guard !prefetchUnavailable, prefetchTask == nil, artSendTask == nil,
@@ -922,19 +926,34 @@ final class SpotifyManager: ObservableObject {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard let self, !Task.isCancelled, self.artSendTask == nil else { return }
             guard let queue = try? await self.fetchQueue(), !Task.isCancelled else { return }
-            // First upcoming song with art whose cover isn't already known to be on the board.
-            // Same album = same cache key as the current song, so it is already there.
-            guard let next = queue.first(where: { t in
-                t.id != currentTrackId && !self.prefetchedTrackIds.contains(t.id)
-                    && !(currentAlbumId != nil && t.album?.id == currentAlbumId)
-                    && !self.preferredArtURLs(from: t).isEmpty
-            }) else { return }
-            do {
-                _ = try await bleManager.prefetchTrack(imageURLs: Array(self.preferredArtURLs(from: next).prefix(2)),
-                                                       albumId: next.album?.id)
-                self.prefetchedTrackIds.insert(next.id)
-            } catch {
-                // Cancelled by a real song change, or a transfer hiccup: the song will be sent normally.
+            // Upcoming songs with art whose cover isn't already known to be on the board, nearest first.
+            // Same album = same cache key, so one per album, and none for the current song's album.
+            var albumsSeen = Set<String>()
+            if let currentAlbumId { albumsSeen.insert(currentAlbumId) }
+            var targets: [Track] = []
+            for t in queue.prefix(self.prefetchDepth * 3) where targets.count < self.prefetchDepth {
+                guard t.id != currentTrackId, !self.prefetchedTrackIds.contains(t.id),
+                      !self.preferredArtURLs(from: t).isEmpty else { continue }
+                if let a = t.album?.id {
+                    guard albumsSeen.insert(a).inserted else { continue }
+                }
+                targets.append(t)
+            }
+            for next in targets {
+                // A real send started (song change) or it got cancelled: stop, the real song wins.
+                guard !Task.isCancelled, self.artSendTask == nil else { return }
+                // Locked: stop while there's still background time for the real song's send.
+                let app = UIApplication.shared
+                if app.applicationState != .active, app.backgroundTimeRemaining < 10 { return }
+                do {
+                    _ = try await bleManager.prefetchTrack(imageURLs: Array(self.preferredArtURLs(from: next).prefix(2)),
+                                                           albumId: next.album?.id)
+                    self.prefetchedTrackIds.insert(next.id)
+                } catch {
+                    // Cancelled by a real song change: stop. Other hiccups: that song is sent
+                    // normally when it starts; keep going with the rest.
+                    if Task.isCancelled || error is CancellationError { return }
+                }
             }
         }
     }

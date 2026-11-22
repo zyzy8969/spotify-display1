@@ -1,10 +1,29 @@
 import UIKit
 import CoreImage
 import CoreGraphics
+import Compression
 
 /// sRGB-oriented resize + grade, then Atkinson-dither to little-endian RGB565 for ESP32 (115 200 bytes).
 /// Pipeline: JPEG decode → CIImage (Lanczos resize + color grade, single GPU render) → RGBA rasterize → dither+pack.
 enum ImageProcessor {
+    /// Raw DEFLATE (RFC 1951, no zlib header): what Apple's `COMPRESSION_ZLIB` emits and what the
+    /// board's ROM `tinfl_decompress` reads (BLE_PROTOCOL 1.11). Nil when it would not be smaller.
+    static func deflateRaw(_ data: Data) -> Data? {
+        guard !data.isEmpty else { return nil }
+        let capacity = data.count  // bigger than the input = not worth sending
+        var out = Data(count: capacity)
+        let written = out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
+            data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Int in
+                guard let d = dst.bindMemory(to: UInt8.self).baseAddress,
+                      let s = src.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_encode_buffer(d, capacity, s, data.count, nil, COMPRESSION_ZLIB)
+            }
+        }
+        guard written > 0, written < data.count else { return nil }
+        out.count = written
+        return out
+    }
+
     private static let targetW = 240
     private static let targetH = 240
     private static let targetSize = CGSize(width: targetW, height: targetH)

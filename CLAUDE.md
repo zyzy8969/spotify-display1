@@ -92,8 +92,9 @@ Copy `env.example` to `.env` for `SPOTIFY_CLIENT_ID`/`SECRET`. `.env` is gitigno
 
 Spotify Web API (poll ~1 Hz) → art URL → download JPEG → `ImageProcessor` resize/grade/
 Atkinson-dither → 115,200 bytes LE RGB565 → BLE cache-key probe → hit: firmware renders from
-SD; miss: chunked BLE image write → (nothing drawn until complete) → firmware transition draw +
-SD save → ACK.
+SD; miss: raw-DEFLATE the frame if the board sent `CAPS:deflate` (BLE_PROTOCOL 1.11) → chunked BLE
+image write → (nothing drawn until complete) → firmware inflates (ROM `tinfl`, `rxPacked` → `rxBuffer`)
+→ transition draw + SD save → ACK. The app also prefetches the next 5 queued covers (store-only).
 
 ### Firmware (`src/main.cpp`, ~1900 lines, single file)
 
