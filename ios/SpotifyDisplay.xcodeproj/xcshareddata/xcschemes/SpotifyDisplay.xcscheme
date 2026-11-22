@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "E8660D274E58464A987DC86A"
+               BlueprintIdentifier = "2F7A1BD8FA1C4F8F906D0480"
                BuildableName = "SpotifyDisplay.app"
                BlueprintName = "SpotifyDisplay"
                ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
@@ -45,7 +45,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "E8660D274E58464A987DC86A"
+            BlueprintIdentifier = "2F7A1BD8FA1C4F8F906D0480"
             BuildableName = "SpotifyDisplay.app"
             BlueprintName = "SpotifyDisplay"
             ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
@@ -62,7 +62,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "E8660D274E58464A987DC86A"
+            BlueprintIdentifier = "2F7A1BD8FA1C4F8F906D0480"
             BuildableName = "SpotifyDisplay.app"
             BlueprintName = "SpotifyDisplay"
             ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
