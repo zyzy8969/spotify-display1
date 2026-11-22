@@ -3058,12 +3058,20 @@ void loop() {
     oldDeviceConnected = deviceConnected;
     connIntervalFallbackSent = false;
 
-    // Update to connected state (yes=green, no=black - connected!)
     showingStartupScreen = false;
-    showBluetoothConnectionScreen(GREEN, BLACK);
+    // BLE starts before the boot greeting, so the phone can connect and get its cover drawn (cache
+    // hit or transfer, both handled earlier in this same loop() pass) before we get here. Drawing the
+    // "Play some music" screen then would cover the song, and the app (which got its ACK) would not
+    // resend until the next skip. Only show the connected/ready screens when no cover is up.
+    if (!panelShowsImage) {
+      // Update to connected state (yes=green, no=black - connected!)
+      showBluetoothConnectionScreen(GREEN, BLACK);
 
-    // Clear and show ready message - LARGER & CENTERED
-    showReadyScreen();
+      // Clear and show ready message - LARGER & CENTERED
+      showReadyScreen();
+    } else {
+      Serial.println("BLE: Connected with a cover already drawn — keeping it");
+    }
 
     uint16_t mtu = pServer->getPeerMTU(pServer->getConnId());
     Serial.printf("BLE: Negotiated MTU = %d bytes\n", mtu);
