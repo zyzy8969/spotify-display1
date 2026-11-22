@@ -2,7 +2,18 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.15** (65 more transitions, indices 52-116; enabled-transitions mask widened to 128 bits; speeds for every index.)
+Version: **1.16** (one-shot transition for the next draw: photo <-> cover swaps flip on the keychain.)
+
+Changes in 1.16 (swap flip, 2026-11-22; owner asked for the keychain to flip like the app's card). Additive:
+old firmware never announces `CAPS:next`, so the app never sends it the write; old apps ignore `CAPS:next`.
+- **One-shot transition** — Cache characteristic write, 20 bytes: magic `0xCAC4E1ED` (u32 LE) + index (u8) +
+  15 bytes padding. The next drawn frame that would otherwise pick at random (cache hit, `0xFF` or `0xFD`
+  header) draws this index instead, once; retired or out-of-range indices are ignored. It expires after 15 s
+  and on disconnect. No reply. The app sends Card Flip (23) right before the draw request of a photo <-> cover
+  swap (the photo header, or the cache check for the cover coming back).
+- **`CAPS:next`** — sent on every stats request after `CAPS:t128`.
+
+Changes in 1.15 summary: (65 more transitions, indices 52-116; enabled-transitions mask widened to 128 bits; speeds for every index.)
 
 Changes in 1.15 (build-46 transitions merged into the shared core, 2026-11-22; owner asked for them).
 Additive and backward compatible both ways. This is what the `feat/y2k-transitions` branch (build 46) called
@@ -239,6 +250,7 @@ message they do not recognise.
 | `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>[:<speedPct>]` | Right before every drawn transition starts (cache hit, fresh frame, `0xFD` photo; not `0xFE`) (1.13; `speedPct` since 1.14) | iOS: start the live mirror of the board's transition with the shared core, at that speed |
 | `CAPS:speeds` | Stats request, next to `CAPS:transitions` (1.14) | iOS: may send the transition-speeds write this connection |
 | `CAPS:t128` | Stats request, after `CAPS:speeds` (1.15) | iOS: transitions 52-116 exist; send speeds for all 117 indices |
+| `CAPS:next` | Stats request, after `CAPS:t128` (1.16) | iOS: may send the one-shot next-draw transition (swap flip) |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |

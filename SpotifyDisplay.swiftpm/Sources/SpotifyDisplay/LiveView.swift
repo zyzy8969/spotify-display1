@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Nerd mode's area under the compact player. The live details and the cache history (last three
-/// transfers) are pinned at the top and do not scroll; under them the session log (every BLE / transfer line since the app was opened,
+/// Nerd mode's area under the compact player. The cache history (last three transfers) is pinned at
+/// the top and does not scroll (the live details are above the cover); under them the session log (every BLE / transfer line since the app was opened,
 /// `BLEManager.eventLog`, newest at the bottom) scrolls on its own. It follows new lines while the
 /// person is at the bottom and stays put when they have scrolled up (a "newest" button takes them
 /// back down). The caller provides the side margins and the smaller text (`themeTextScale`).
@@ -21,13 +21,11 @@ struct NerdLogView: View {
     var body: some View {
         let lines = bleManager.eventLog
         VStack(alignment: .leading, spacing: 0) {
-            LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-                .padding(.top, 8)
-            ThemedDivider()
-                .padding(.vertical, 8)
+            // Live details sit at the top of the screen (NowPlayingScreen), above the cover.
             CacheHistory(entries: bleManager.transferLog) {
                 showFullHistory = true
             }
+            .padding(.top, 10)
             ThemedDivider()
                 .padding(.vertical, 8)
             Text(theme.id.text(.sessionLog))

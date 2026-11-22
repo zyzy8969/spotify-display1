@@ -161,6 +161,13 @@ final class BLEManager: NSObject, ObservableObject {
     /// Board said `CAPS:t128` (BLE_PROTOCOL 1.15): transitions 52-116 exist, it reads the 128-bit mask
     /// and takes speeds for all 117 indices.
     @Published private(set) var boardSupports128 = false
+    /// Board said `CAPS:next` (BLE_PROTOCOL 1.16): it takes the one-shot next-draw transition write.
+    @Published private(set) var boardSupportsNextTransition = false
+    /// The view set this for a photo <-> cover swap: the next draw this app asks for (the photo, or the
+    /// cover coming back) plays Card Flip on the keychain, like the app's card. Cleared once sent.
+    var flipNextDraw = false
+    /// Card Flip (header index 23).
+    static let swapFlipTransition: UInt8 = 23
     /// A photo the person uploaded is on the display: Spotify sends are paused until `endPhotoHold()`.
     @Published private(set) var photoHold = false
     /// The last photo the person uploaded (square JPEG), so tapping the cover can show it again.
@@ -203,6 +210,8 @@ final class BLEManager: NSObject, ObservableObject {
     private let displayOnlyTransition: UInt8 = 0xFD
     /// BLE_PROTOCOL 1.12: Cache characteristic write carrying the enabled-transitions bitmask.
     private let transitionMaskMagic = UInt32(0xCAC4E1EB)
+    /// BLE_PROTOCOL 1.16: one-shot transition for the next drawn frame.
+    private let nextTransitionMagic = UInt32(0xCAC4E1ED)
     /// BLE_PROTOCOL 1.11: image header format byte for a raw-DEFLATE payload (10-byte header).
     private let deflateFormat: UInt8 = 0x01
     /// Board said `CAPS:deflate` (in reply to the stats request sent on every connect). Cleared on
@@ -446,6 +455,20 @@ final class BLEManager: NSObject, ObservableObject {
         log("tx      transition speeds: \(speeds.count) custom, random \(random ? "on 0.4-1.3x" : "off"), \(slots) slots", kind: .tx)
     }
 
+    /// Sends the pending swap flip (`flipNextDraw`) right before a draw request, so nothing drawn in
+    /// between can use it. Boards without `CAPS:next` just draw their usual random transition.
+    private func sendSwapFlipIfAsked() {
+        guard flipNextDraw else { return }
+        flipNextDraw = false
+        guard boardSupportsNextTransition, isConnected, let p = peripheral, let c = cacheChar else { return }
+        var packet = Data()
+        withUnsafeBytes(of: nextTransitionMagic.littleEndian) { packet.append(contentsOf: $0) }
+        packet.append(Self.swapFlipTransition)
+        packet.append(Data(count: 15))
+        p.writeValue(packet, for: c, type: .withResponse)
+        log("tx      next draw: Card Flip (photo/cover swap)", kind: .tx)
+    }
+
     /// Photo upload is over (or failed before the board drew it): let Spotify drive the display again.
     /// The caller asks `SpotifyManager.requestResync` afterwards to redraw the current song.
     func endPhotoHold() {
@@ -467,6 +490,7 @@ final class BLEManager: NSObject, ObservableObject {
         photoHold = true
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
+        sendSwapFlipIfAsked()
 
         sendStageGen &+= 1
         let myStageGen = sendStageGen
@@ -570,6 +594,7 @@ final class BLEManager: NSObject, ObservableObject {
         let cacheHit: Bool
         let cacheKeySource = String.cacheKeySource(albumId: albumId, imageURL: primaryURL)
         let cacheKey = cacheKeySource.md5Digest
+        sendSwapFlipIfAsked()
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
         noteDrawRequest(.cacheCheck(frameTask))
@@ -986,6 +1011,8 @@ final class BLEManager: NSObject, ObservableObject {
         boardSupportsTransitionMask = false
         boardSupportsSpeeds = false
         boardSupports128 = false
+        boardSupportsNextTransition = false
+        flipNextDraw = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
         // Waiting screen: nothing of ours is on the panel any more.
         boardFrame = nil
@@ -1096,6 +1123,7 @@ final class BLEManager: NSObject, ObservableObject {
             boardSupportsSpeeds = true
             if firstTime { applyTransitionSpeeds() }
         }
+        if text == "CAPS:next" { boardSupportsNextTransition = true }
         if text == "CAPS:t128" {
             // Arrives after CAPS:speeds: send the speeds again, now for every index.
             let firstTime = !boardSupports128

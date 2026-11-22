@@ -170,7 +170,12 @@ struct NowPlayingScreen: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .overlay {
-                ResultPopups(lastEntry: bleManager.transferLog.last, photoUp: bleManager.photoHold, area: geo.size)
+                ResultPopups(
+                    lastEntry: bleManager.transferLog.last,
+                    photoUp: bleManager.photoHold,
+                    nerd: layoutNerd,
+                    area: geo.size
+                )
             }
         }
         .alert("Photo", isPresented: Binding(
@@ -411,8 +416,11 @@ struct NowPlayingScreen: View {
     /// (nothing happens when no photo was uploaded since the app was opened).
     private func coverTapped() {
         if bleManager.photoHold {
+            // The keychain flips too (Card Flip), like the card here, instead of a random transition.
+            bleManager.flipNextDraw = true
             backToSpotify()
         } else if let jpeg = bleManager.lastPhotoJPEG {
+            bleManager.flipNextDraw = true
             sendPhoto(jpeg)
         } else {
             return
@@ -515,6 +523,16 @@ struct NowPlayingScreen: View {
             Spacer(minLength: nerd ? 2 : ArtMetrics.topGap(for: size))
                 .frame(maxHeight: nerd ? 2 : CGFloat.infinity)
 
+            if nerd {
+                // Nerd mode: the live details come first, right under the header.
+                LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                    .padding(.bottom, 10)
+                    .environment(\.themeTextScale, ArtMetrics.compactTextScale)
+                    .transition(.opacity)
+            }
+
             HStack(alignment: .top, spacing: 14) {
                 art(side: side)
                 if nerd {
@@ -532,8 +550,7 @@ struct NowPlayingScreen: View {
                     .padding(.top, 10)
                     .transition(.opacity)
             } else {
-                // Nerd mode: the progress line sits right under the small cover, as wide as it,
-                // with the live details straight below (no divider line in between).
+                // Nerd mode: the progress line sits right under the small cover, as wide as it.
                 nerdStrip
                     .frame(width: side)
                     .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
@@ -771,6 +788,8 @@ private struct ResultPopups: View {
     let lastEntry: TransferLogEntry?
     /// A photo is on the display: nothing pops.
     let photoUp: Bool
+    /// Nerd mode shows the same in Live details and the log: nothing pops.
+    let nerd: Bool
     let area: CGSize
 
     @Environment(\.theme) private var theme
@@ -805,7 +824,7 @@ private struct ResultPopups: View {
         .allowsHitTesting(false)
         .accessibilityHidden(true)
         .onChange(of: lastEntry?.id) { _ in
-            guard !photoUp, let entry = lastEntry,
+            guard !photoUp, !nerd, let entry = lastEntry,
                   entry.outcome == "cache hit" || entry.outcome == "ok" else { return }
             spawn(cached: entry.cacheHit && entry.firstShow != true)
         }

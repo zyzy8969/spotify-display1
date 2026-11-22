@@ -189,6 +189,14 @@ static volatile uint32_t transitionMaskW3 = 0xFFFFFFFFu;
 #define TRANSITION_SPEEDS_COUNT 117
 #define TRANSITION_SPEEDS_LEN_114 (5 + 52)
 #define TRANSITION_SPEEDS_LEN (5 + TRANSITION_SPEEDS_COUNT)
+// BLE_PROTOCOL 1.16 one-shot transition: Cache characteristic write, 20 bytes: magic + index (u8) +
+// padding. The next drawn frame that would pick at random (cache hit, 0xFF or 0xFD header) uses this
+// index instead, once. The app sends Card Flip before a photo <-> cover swap so the keychain flips like
+// the app's card. Ignored after TRANSITION_NEXT_TTL_MS (a swap that never drew must not flip a later song).
+#define TRANSITION_NEXT_MAGIC 0xCAC4E1EDu
+#define TRANSITION_NEXT_TTL_MS 15000
+static volatile uint8_t nextDrawTransition = 0xFF;
+static volatile unsigned long nextDrawTransitionAt = 0;
 #define TRANSITION_SPEED_RANDOM_MIN 0.4f
 #define TRANSITION_SPEED_RANDOM_MAX 1.3f
 static volatile uint8_t transitionSpeedPct[TRANSITION_SPEEDS_COUNT] = {0};
@@ -358,6 +366,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
+        nextDrawTransition = 0xFF;
         peerAddrValid = false;
         uint8_t notReady = 0x00;
         pStatusChar->setValue(&notReady, 1);
@@ -412,6 +421,13 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
                 transitionMaskW2 = 0xFFFFFFFFu;
                 transitionMaskW3 = 0xFFFFFFFFu;
             }
+            return;
+        }
+
+        // One-shot transition for the next draw (iOS app, 1.16). Only stores two values.
+        if (magic == TRANSITION_NEXT_MAGIC) {
+            nextDrawTransitionAt = millis();
+            nextDrawTransition = (uint8_t)value[4];
             return;
         }
 
@@ -929,6 +945,16 @@ static String drawWithoutTransition(uint16_t* buffer, int width, int height) {
 // `quick`: when no transition is forced, pick from QUICK_TRANSITIONS (fresh transfers).
 String drawImageWithTransitionChoice(uint16_t* buffer, int width, int height, uint8_t transitionChoice,
                                      bool quick = false) {
+  // 1.16: a one-shot index from the app (photo <-> cover swap) wins over a random pick, once.
+  if (transitionChoice == 0xFF || transitionChoice >= (uint8_t)TRANSITION_COUNT) {
+    const uint8_t next = nextDrawTransition;
+    const bool fresh = millis() - nextDrawTransitionAt < TRANSITION_NEXT_TTL_MS;
+    nextDrawTransition = 0xFF;
+    if (next < (uint8_t)TRANSITION_COUNT && fresh && !isRetiredTransition((TransitionType)next)) {
+      transitionChoice = next;
+      Serial.println("One-shot transition from the app (swap)");
+    }
+  }
   if (transitionChoice == 0xFF || transitionChoice >= (uint8_t)TRANSITION_COUNT) {
     if (!anyTransitionEnabled()) return drawWithoutTransition(buffer, width, height);
     return quick ? drawImageWithQuickTransition(buffer, width, height)
@@ -1809,6 +1835,9 @@ void loop() {
     // BLE_PROTOCOL 1.15: transitions 52-116 exist, the mask is 128 bits and the speeds write may
     // carry 117 slots.
     pMsgChar->setValue("CAPS:t128");
+    pMsgChar->notify();
+    // BLE_PROTOCOL 1.16: the board takes the one-shot next-draw transition write.
+    pMsgChar->setValue("CAPS:next");
     pMsgChar->notify();
     publishCacheCount();
     publishCacheStats();
