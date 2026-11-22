@@ -729,7 +729,9 @@ static void fwPixel(void*, int16_t x, int16_t y, uint16_t c) { gfx->drawPixel(x,
 static float fwSpeed = 1.0f;
 static bool fwStretchDrawing = false;
 static uint32_t fwStepStartUs = 0;
+static void ledUpdate();  // status LED, defined below; also stepped during transitions
 static void fwWaitUs(void*, uint32_t us) {
+  ledUpdate();  // loop() is blocked while a transition draws: animate the LED between its frames
   if (fwStretchDrawing && fwSpeed < 1.0f) {
     const uint32_t work = micros() - fwStepStartUs;
     us += (uint32_t)((float)work * (1.0f / fwSpeed - 1.0f));
@@ -1705,7 +1707,7 @@ void clearCacheDirectory() {
 #define LED_RGB_GREEN  0x00FF28
 #define LED_RGB_RED    0xFF0000
 
-enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR };
+enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR };
 static LedMode ledMode = LED_OFF;
 static unsigned long ledModeSince = 0;
 static uint32_t ledLastWritten = 0xFFFFFFFF;
@@ -1733,6 +1735,11 @@ static void ledUpdate() {
       break;
     case LED_CACHE:
       ledShow(LED_RGB_BLUE, 255);  // solid while the SD lookup / cache-hit draw blocks loop()
+      break;
+    case LED_BOTH:
+      // A song played for the first time whose cover is already on SD (prefetched, or the same album):
+      // blue (from the card) and orange (new) alternate while it draws. Stepped from fwWaitUs.
+      ledShow(((t / 300) % 2) ? LED_RGB_ORANGE : LED_RGB_BLUE, 255);
       break;
     case LED_NEW:
       // 1.17: a song new to the person drawn from SD (prefetched): the transfer orange, solid,
@@ -1929,10 +1936,11 @@ void loop() {
       pCacheChar->notify();
     } else {
 
-    // Orange for a song the keychain has never shown (1.17), even when its cover is on SD.
+    // 1.17 new-song check = a song played for the first time: blue + orange alternating if its cover
+    // is on SD (set below, on the hit), orange if not (the miss path). Otherwise the cache blue.
     const bool newSong = cacheCheckNewSong;
     cacheCheckNewSong = false;
-    ledSetMode(newSong ? LED_NEW : LED_CACHE);
+    ledSetMode(LED_CACHE);
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
@@ -1944,6 +1952,7 @@ void loop() {
       unsigned long totalStartTime = millis();
       Serial.println("BLE: Cache HIT");
 
+      if (newSong) ledSetMode(LED_BOTH);
       // Load and display cached image
       if (loadFromCache(currentCacheKey)) {
         // Hide startup screen when displaying image

@@ -56,13 +56,15 @@ struct TransferLogEntry: Identifiable, Codable, Equatable {
     var firstShow: Bool? = nil
 }
 
-/// Covers the app saved to the keychain's card ahead of time (queue prefetch) that the keychain has not
-/// shown yet (cache-key sources), saved on the phone. A song whose cover is one of these is "new" (orange
-/// LED, "new" pop-up) although it comes off the card. Every other cover already on the card is "cache"
-/// (blue), including a new song from an album shown before (owner's rule, 2026-11-22). Capped.
-enum AheadCovers {
-    static let storageKey = "unshownAheadCovers.v1"
-    static let cap = 500
+/// Spotify track ids the keychain has shown, saved on the phone (owner's three-way rule, 2026-11-22):
+/// - played before, cover on the card: "cache", blue;
+/// - never played, cover already on the card (prefetched, or the same album): "cache" AND "new", the
+///   keychain's light and the app's line alternate blue / orange;
+/// - never played, not on the card (fresh send): "new", orange.
+/// Oldest first, capped (~110 KB at most).
+enum PlayedTracks {
+    static let storageKey = "playedTrackIds.v2"
+    static let cap = 5000
 
     static func load() -> [String] {
         UserDefaults.standard.stringArray(forKey: storageKey) ?? []

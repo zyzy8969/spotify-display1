@@ -19,11 +19,11 @@ Changes in 1.17 summary: (new-song cache check: songs the keychain has never sho
 
 Changes in 1.17 (2026-11-22; owner asked for the orange light on every new song, prefetched ones too).
 Additive: the app sends the new magic only to boards that announced `CAPS:newsong`.
-- **New-song cache check** — same 20-byte Cache write as a normal check, magic `0xDEADBEE1`. Identical
-  behaviour and reply; only the status LED differs: solid orange (the transfer colour) instead of blue
-  during the lookup / cache-hit draw, then the usual green. The app uses it for a cover it saved ahead (queue
-  prefetch) that the keychain has not shown yet; any other cover already on the card (a new song from an
-  album shown before included) is a plain check, blue.
+- **New-song cache check** — same 20-byte Cache write as a normal check, magic `0xDEADBEE1`, sent for a
+  song the app has never seen the keychain show (its own list of played track ids). Identical behaviour and
+  reply; only the status LED differs: on a hit it alternates blue and orange (~300 ms each) while the cover
+  draws ("on the card, but a new song"), then green; on a miss it is the usual transfer orange. A song played
+  before gets the plain check (blue on a hit).
 - **`CAPS:newsong`** — sent on every stats request after `CAPS:next`.
 - Firmware note (no wire change): a new song's transition (fresh song transfer, or a new-song cache check)
   always runs at 1.3x, the top of the random range; the transition itself is still a random pick.

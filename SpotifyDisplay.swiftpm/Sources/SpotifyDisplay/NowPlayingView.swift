@@ -767,7 +767,14 @@ private struct ResultPopups: View {
         .accessibilityHidden(true)
         .onChange(of: drawn?.id) { _ in
             guard !photoUp, !nerd, let drawn else { return }
-            spawn(cached: drawn.cached)
+            switch drawn.kind {
+            case .cache: spawn(cached: true)
+            case .new: spawn(cached: false)
+            case .both:
+                // New song, cover already on the card: both words, each at its own random spot.
+                spawn(cached: true)
+                spawn(cached: false)
+            }
         }
     }
 
@@ -1250,8 +1257,8 @@ struct LiveStrip: View {
     var bleFloor: Double = 0
     /// The send that just ended failed: the line turns red and stays.
     var failed = false
-    /// The song being sent is new (the keychain's LED is orange): the line is orange from the start,
-    /// not the cache-check blue.
+    /// The song being sent has never been played: during the cache check the line alternates blue and
+    /// orange (the keychain's light does the same on a hit); orange once it is sent fresh.
     var newSong = false
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
@@ -1333,7 +1340,12 @@ struct LiveStrip: View {
             let checking = stage == .checking
             return Look(
                 fill: min(1, max(creep, bleFloor)),
-                color: checking && !newSong ? StripColors.check(theme) : StripColors.fresh(theme),
+                // A never-played song alternates blue / orange while the board checks its card, like
+                // the keychain's light; then orange if it has to be sent fresh.
+                color: checking
+                    ? (newSong && Int(now.timeIntervalSinceReferenceDate / 0.3) % 2 == 1
+                        ? StripColors.fresh(theme) : StripColors.check(theme))
+                    : StripColors.fresh(theme),
                 opacity: 1,
                 dashedTrack: checking,
                 marker: .none

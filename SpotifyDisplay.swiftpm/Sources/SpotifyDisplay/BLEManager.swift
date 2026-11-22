@@ -131,21 +131,20 @@ final class BLEManager: NSObject, ObservableObject {
     /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
     /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
     private var prefetchedKeySources: Set<String> = []
-    /// Prefetched covers the keychain has not shown yet (`AheadCovers`), oldest first.
-    private var aheadCovers: [String] = AheadCovers.load()
+    /// Songs the keychain has shown (`PlayedTracks`), oldest first, plus a set for lookups.
+    private var playedTrackOrder: [String] = PlayedTracks.load()
+    private lazy var playedTrackSet: Set<String> = Set(playedTrackOrder)
 
-    private func noteAheadCover(_ keySource: String) {
-        guard !aheadCovers.contains(keySource) else { return }
-        aheadCovers.append(keySource)
-        aheadCovers = Array(aheadCovers.suffix(AheadCovers.cap))
-        AheadCovers.save(aheadCovers)
-    }
-
-    /// The keychain is showing this cover: it is no longer "saved ahead, not shown".
-    private func coverShown(_ keySource: String) {
-        guard let i = aheadCovers.firstIndex(of: keySource) else { return }
-        aheadCovers.remove(at: i)
-        AheadCovers.save(aheadCovers)
+    /// The keychain is showing this song.
+    private func markTrackPlayed(_ trackId: String) {
+        guard !trackId.isEmpty, !playedTrackSet.contains(trackId) else { return }
+        playedTrackSet.insert(trackId)
+        playedTrackOrder.append(trackId)
+        if playedTrackOrder.count > PlayedTracks.cap + 200 {
+            playedTrackOrder.removeFirst(playedTrackOrder.count - PlayedTracks.cap)
+            playedTrackSet = Set(playedTrackOrder)
+        }
+        PlayedTracks.save(playedTrackOrder)
     }
     private var mirror: TransitionMirror { TransitionMirror.shared }
     /// Rolling terminal-style log for the Live tab (newest last).
@@ -164,20 +163,29 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupportsNextTransition = false
     /// Board said `CAPS:newsong` (BLE_PROTOCOL 1.17): it takes the new-song cache check.
     @Published private(set) var boardSupportsNewSong = false
-    /// The send in flight is a new song (first from its album, or a fresh send): the keychain's LED is
-    /// orange, so the app's progress line is orange too. False for songs drawn from cache (blue).
+    /// The song in flight has never been played (`PlayedTracks`). While the cache check runs the app's
+    /// line alternates blue / orange like the keychain's light; a fresh send is orange anyway.
     @Published private(set) var sendIsNewSong = false
-    /// One "new" / "cache" word to pop, published when the board says `DRAWN` (BLE_PROTOCOL 1.18), i.e.
-    /// when the keychain turns green. `popupForNextDraw` is what the current song send will show.
+    /// What a song cover shows when it lands.
+    enum DrawnKind: Equatable {
+        /// Played before, from the card: "cache".
+        case cache
+        /// Never played, but its cover was already on the card: "cache" and "new".
+        case both
+        /// Never played, sent fresh: "new".
+        case new
+    }
+    /// The word(s) to pop, published when the board says `DRAWN` (BLE_PROTOCOL 1.18), i.e. when the
+    /// keychain turns green. `popupForNextDraw` is what the current song send will show.
     struct DrawnPopup: Equatable {
         let id = UUID()
-        let cached: Bool
+        let kind: DrawnKind
     }
     @Published private(set) var drawnPopup: DrawnPopup?
-    private var popupForNextDraw: Bool?
-    /// The cover the next `DRAWN` puts on screen: no longer "saved ahead, not shown" right then, so a
-    /// skip that cuts the send short on the phone still counts (going back to it is "cache").
-    private var albumKeyForNextDraw: String?
+    private var popupForNextDraw: DrawnKind?
+    /// The song the next `DRAWN` puts on screen: marked as played right then, so a skip that cuts the
+    /// send short on the phone still counts (going back to it is "cache").
+    private var trackForNextDraw: String?
     /// The view set this for a photo <-> cover swap: the next draw this app asks for (the photo, or the
     /// cover coming back) plays Card Flip on the keychain, like the app's card. Cleared once sent.
     var flipNextDraw = false
@@ -518,7 +526,7 @@ final class BLEManager: NSObject, ObservableObject {
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         sendSwapFlipIfAsked()
         popupForNextDraw = nil
-        albumKeyForNextDraw = nil
+        trackForNextDraw = nil
         sendIsNewSong = false
 
         sendStageGen &+= 1
@@ -681,14 +689,12 @@ final class BLEManager: NSObject, ObservableObject {
         let cacheKey = cacheKeySource.md5Digest
         // "Played before" is per album: the first song from an album is new (orange on the keychain)
         // even when its cover is already on the card (prefetched); later songs from it are blue.
-        // New = a cover the app saved ahead (queue) and the keychain has not shown yet. Any other cover
-        // already on the card is "cache" / blue, even for a new song from an album shown before. A miss
-        // (fresh send) is new; that is set further down.
-        let newToPerson = aheadCovers.contains(cacheKeySource)
+        // Never played: a hit is "cache" + "new" (blue / orange); played before: "cache" (blue). A miss
+        // (fresh send) is "new" (orange); that is set further down.
+        let newToPerson = !playedTrackSet.contains(trackId)
         sendIsNewSong = newToPerson
-        // A hit says "cache" unless the album is new to the person; a miss (fresh send) says "new".
-        popupForNextDraw = !newToPerson
-        albumKeyForNextDraw = cacheKeySource
+        popupForNextDraw = newToPerson ? .both : .cache
+        trackForNextDraw = trackId
         sendSwapFlipIfAsked()
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
@@ -752,7 +758,7 @@ final class BLEManager: NSObject, ObservableObject {
         cacheRenderConfirmed = false
         // Fresh send: orange on the keychain, "new" when it turns green.
         sendIsNewSong = true
-        popupForNextDraw = false
+        popupForNextDraw = .new
 
         let data: Data
         setLivePhase("waiting download…")
@@ -798,7 +804,7 @@ final class BLEManager: NSObject, ObservableObject {
         lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)), \(wireLabel))"
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
-        coverShown(cacheKeySource)
+        markTrackPlayed(trackId)
         appendLog(TransferLogEntry(
             cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
             downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,
@@ -1060,7 +1066,6 @@ final class BLEManager: NSObject, ObservableObject {
 
         _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
         prefetchedKeySources.insert(keySource)
-        noteAheadCover(keySource)
         return .stored
     }
 
@@ -1227,13 +1232,13 @@ final class BLEManager: NSObject, ObservableObject {
         if text == "CAPS:newsong" { boardSupportsNewSong = true }
         if text == "DRAWN" {
             // Song covers only: photos and anything not started by processTrack pop nothing.
-            if let cached = popupForNextDraw, !photoHold {
-                drawnPopup = DrawnPopup(cached: cached)
+            if let kind = popupForNextDraw, !photoHold {
+                drawnPopup = DrawnPopup(kind: kind)
             }
             popupForNextDraw = nil
-            // On screen now: this album has been shown, whatever happens to the send on the phone.
-            if let key = albumKeyForNextDraw, !photoHold { coverShown(key) }
-            albumKeyForNextDraw = nil
+            // On screen now: this song has been shown, whatever happens to the send on the phone.
+            if let track = trackForNextDraw, !photoHold { markTrackPlayed(track) }
+            trackForNextDraw = nil
         }
         if text == "CAPS:t128" {
             // Arrives after CAPS:speeds: send the speeds again, now for every index.
