@@ -37,14 +37,23 @@ enum DitherMode: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Appended to the SD cache key so each mode gets its own cached covers (Atkinson keeps the
-    /// original keys, so covers already on the board stay valid).
-    var cacheKeySuffix: String { self == .atkinson ? "" : "|d=\(rawValue)" }
+    /// Appended to the SD cache key so each look gets its own cached covers. "|c=native" marks
+    /// ungraded colour (2026-11-22): covers cached before that were colour-boosted and must not be
+    /// reused. Atkinson adds nothing more; the other modes add their name.
+    var cacheKeySuffix: String {
+        let colour = ImageProcessor.applyColorGrade ? "" : "|c=native"
+        return colour + (self == .atkinson ? "" : "|d=\(rawValue)")
+    }
 }
 
-/// sRGB-oriented resize + grade, then Atkinson-dither to little-endian RGB565 for ESP32 (115 200 bytes).
-/// Pipeline: JPEG decode → CIImage (Lanczos resize + color grade, single GPU render) → RGBA rasterize → dither+pack.
+/// sRGB-oriented resize (+ optional grade), then dither to little-endian RGB565 for ESP32 (115 200 bytes).
+/// Pipeline: JPEG decode → CIImage (Lanczos resize, single GPU render) → RGBA rasterize → dither+pack.
 enum ImageProcessor {
+    /// Owner's choice 2026-11-22: show covers in their native colours. The old TFT boost
+    /// (`applyGrading`: lifted blacks, gamma 0.85, vibrance, saturation 1.3, contrast 1.22) is
+    /// kept below but off. Setting this to true also brings back the old cache keys.
+    static let applyColorGrade = false
+
     /// Raw DEFLATE (RFC 1951, no zlib header): what Apple's `COMPRESSION_ZLIB` emits and what the
     /// board's ROM `tinfl_decompress` reads (BLE_PROTOCOL 1.11). Nil when it would not be smaller.
     static func deflateRaw(_ data: Data) -> Data? {
@@ -110,8 +119,8 @@ enum ImageProcessor {
         ci = ci.cropped(to: CGRect(x: cropX, y: cropY, width: CGFloat(targetW), height: CGFloat(targetH)))
             .transformed(by: CGAffineTransform(translationX: -cropX, y: -cropY))
 
-        // Color grade (GPU).
-        ci = applyGrading(ci)
+        // Color grade (GPU) — off: native colours (see `applyColorGrade`).
+        if applyColorGrade { ci = applyGrading(ci) }
 
         // Single GPU render → CGImage.
         let bounds = CGRect(origin: .zero, size: targetSize)

@@ -2054,10 +2054,13 @@ void setup() {
   bus->write(0x00);        // Binary: 00000000 - RGB mode
   bus->endWrite();
 
-  // ST7789 gamma tuning baseline (to be fine-tuned on hardware)
-  // Tuned for slightly more punch/saturation while keeping skin tones stable.
-  const uint8_t gammaPos[] = {0xD0,0x06,0x10,0x14,0x16,0x30,0x3F,0x55,0x4A,0x16,0x0C,0x0A,0x1E,0x22};
-  const uint8_t gammaNeg[] = {0xD0,0x05,0x0F,0x13,0x16,0x30,0x3E,0x47,0x53,0x30,0x20,0x20,0x21,0x24};
+  // ST7789 gamma: the datasheet's typical gamma 2.2 (sRGB) curve, so covers show in native colour
+  // (owner's choice 2026-11-22; the app's colour boost is off too). Values from
+  // resources/st7789vw_gamma_reference.md "Default γ=2.2". The earlier "punchy" table, to go back:
+  //   pos {0xD0,0x06,0x10,0x14,0x16,0x30,0x3F,0x55,0x4A,0x16,0x0C,0x0A,0x1E,0x22}
+  //   neg {0xD0,0x05,0x0F,0x13,0x16,0x30,0x3E,0x47,0x53,0x30,0x20,0x20,0x21,0x24}
+  const uint8_t gammaPos[] = {0xD0,0x04,0x0D,0x11,0x13,0x2B,0x3F,0x54,0x4C,0x18,0x0D,0x0B,0x1F,0x23};
+  const uint8_t gammaNeg[] = {0xD0,0x04,0x0C,0x11,0x13,0x2C,0x3F,0x44,0x51,0x2F,0x1F,0x1F,0x20,0x23};
   bus->beginWrite();
   bus->writeCommand(0xE0);
   for (size_t i = 0; i < sizeof(gammaPos); i++) bus->write(gammaPos[i]);
@@ -2583,9 +2586,13 @@ static void ledUpdate() {
       break;
     case LED_TRANSFER: {
       // Base brightness follows progress (40% -> 100%); a 1.2 s triangle pulse rides on top.
-      uint32_t got = receivedBytes;  // written on BTC_TASK; a torn read only nudges brightness
-      if (got > IMAGE_SIZE) got = IMAGE_SIZE;
-      uint32_t base = 100 + (got * 155) / IMAGE_SIZE;
+      // Progress is against this frame's wire size: a compressed frame (1.11) is smaller than
+      // IMAGE_SIZE. Both are written on BTC_TASK; a torn read only nudges brightness.
+      uint32_t want = expectedSize;
+      if (want == 0 || want > IMAGE_SIZE) want = IMAGE_SIZE;
+      uint32_t got = receivedBytes;
+      if (got > want) got = want;
+      uint32_t base = 100 + (got * 155) / want;
       uint32_t phase = t % 1200;
       uint32_t tri = phase < 600 ? phase : 1200 - phase;  // 0..600
       uint32_t pulse = 150 + (tri * 105) / 600;            // 150..255

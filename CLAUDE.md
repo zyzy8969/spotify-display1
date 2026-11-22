@@ -90,8 +90,8 @@ Copy `env.example` to `.env` for `SPOTIFY_CLIENT_ID`/`SECRET`. `.env` is gitigno
 
 ### Data flow
 
-Spotify Web API (poll ~1 Hz) → art URL → download JPEG → `ImageProcessor` resize/grade/
-Atkinson-dither → 115,200 bytes LE RGB565 → BLE cache-key probe → hit: firmware renders from
+Spotify Web API (poll ~1 Hz) → art URL → download JPEG → `ImageProcessor` resize (native colour, no grade)/
+dither (Atkinson default; Bayer/none in Settings) → 115,200 bytes LE RGB565 → BLE cache-key probe → hit: firmware renders from
 SD; miss: raw-DEFLATE the frame if the board sent `CAPS:deflate` (BLE_PROTOCOL 1.11) → chunked BLE
 image write → (nothing drawn until complete) → firmware inflates (ROM `tinfl`, `rxPacked` → `rxBuffer`)
 → transition draw + SD save → ACK. The app also prefetches the next 5 queued covers (store-only).
@@ -154,8 +154,8 @@ dithering happens app-side.)
   proactive token refresh, ~1 Hz currently-playing poll with HTTP 429 `Retry-After` cooldown,
   per-track failure cooldown plus global backoff after display errors, and
   `requestResync`/`lastSentToDisplayTrackId` to stop 1 Hz resend loops.
-- `ImageProcessor` — JPEG decode → CIImage Lanczos resize + grade (one GPU render) → RGBA
-  rasterize → Atkinson dither → packed LE RGB565.
+- `ImageProcessor` — JPEG decode → CIImage Lanczos resize (colour grade off since 2026-11-22: `applyColorGrade`) → RGBA
+  rasterize → dither (`DitherMode`) → packed LE RGB565.
 - Views — `ContentView` (root: owns the managers, picks the screen, applies the theme),
   `NowPlayingView` (now playing + sending state, live strip, playback controls),
   `SignedOutView`, `SettingsView` (incl. theme picker), `StatsView` (transfer log + live
