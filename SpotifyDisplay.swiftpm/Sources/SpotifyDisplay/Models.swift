@@ -48,6 +48,23 @@ struct TransferLogEntry: Identifiable {
     let outcome: String // "ok", "cache hit", or error description
 }
 
+/// One `TRANSITION:<name>` announcement from the board. A new `id` each time, so the same effect twice
+/// in a row still counts as a new event.
+struct TransitionEvent: Identifiable, Equatable {
+    let id = UUID()
+    let date = Date()
+    let name: String
+}
+
+/// One line of the Live tab's terminal.
+struct LogLine: Identifiable {
+    enum Kind { case info, tx, rx, transition, error }
+    let id = UUID()
+    let date = Date()
+    let kind: Kind
+    let text: String
+}
+
 enum SpotifyDisplayError: Error {
     case notConnected
     case conversionFailed

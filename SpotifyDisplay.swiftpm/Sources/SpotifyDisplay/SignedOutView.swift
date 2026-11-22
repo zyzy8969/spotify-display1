@@ -18,7 +18,6 @@ struct SignedOutScreen: View {
                     StatusHeader(
                         spotifyOn: false,
                         displayOn: bleManager.isConnected,
-                        showStatsLink: false,
                         onOpen: onOpen
                     )
                     Spacer(minLength: 16)

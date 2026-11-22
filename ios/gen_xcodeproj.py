@@ -30,8 +30,10 @@ swift_files = [
     "Extensions.swift",
     "ImageProcessor.swift",
     "KeychainHelper.swift",
+    "LiveView.swift",
     "Models.swift",
     "NowPlayingView.swift",
+    "PhotoUploadView.swift",
     "SettingsView.swift",
     "SignedOutView.swift",
     "SpotifyAuthPresenter.swift",
@@ -42,6 +44,8 @@ swift_files = [
     "ThemeComponents.swift",
     "ThemeCopy.swift",
     "ThemeTypography.swift",
+    "TransitionPickerView.swift",
+    "Transitions.swift",
 ]
 
 file_refs = {}

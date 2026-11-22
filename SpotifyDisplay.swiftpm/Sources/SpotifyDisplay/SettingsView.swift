@@ -12,6 +12,8 @@ struct SettingsView: View {
     @AppStorage("showDebugInfo") private var showDebugInfo = false
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
     @AppStorage(DitherMode.storageKey) private var ditherRaw = DitherMode.fallback.rawValue
+    @AppStorage(TransitionPrefs.storageKey) private var disabledTransitions = ""
+    @State private var showTransitions = false
 
     @State private var clientIDOverride = ""
     @State private var brightnessValue: Double = 200
@@ -30,6 +32,8 @@ struct SettingsView: View {
                 ThemePicker(selection: $themeRaw)
                 ThemedDivider()
                 DitherPicker(selection: $ditherRaw)
+                ThemedDivider()
+                transitionsRow
                 ThemedDivider()
                 cacheRows
                 ThemedDivider()
@@ -89,6 +93,31 @@ struct SettingsView: View {
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Opens the transition picker (which transitions the display may use, with live examples).
+    private var transitionsRow: some View {
+        Button {
+            showTransitions = true
+        } label: {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Transitions")
+                    .themeText(.row)
+                    .foregroundStyle(theme.ink)
+                Spacer()
+                Text("\(TransitionPrefs.enabledCount(disabledRaw: disabledTransitions)) of \(TransitionCatalog.all.count) on")
+                    .themeText(.rowValue)
+                    .foregroundStyle(theme.inkSoft)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $showTransitions) {
+            TransitionPickerView(bleManager: bleManager)
+                .environment(\.theme, theme)
+                .preferredColorScheme(theme.colorScheme)
         }
     }
 

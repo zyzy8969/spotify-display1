@@ -3,7 +3,7 @@ import SwiftUI
 /// Which sheet is open over the main screen.
 enum Panel: String, Identifiable {
     case settings
-    case stats
+    case transitions
 
     var id: String { rawValue }
 }

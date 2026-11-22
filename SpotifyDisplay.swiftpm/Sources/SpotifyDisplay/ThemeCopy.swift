@@ -38,8 +38,8 @@ extension ThemeID {
         case .showStats: return p ? "show stats" : "Detailed stats"
         case .showStatsHint:
             return p
-                ? "adds a stats button and live transfer details"
-                : "Adds a Stats button and live transfer details."
+                ? "adds general and live pages (swipe or tap) to the main screen"
+                : "Adds General and Live pages to the main screen: swipe or tap to switch."
         case .themeTitle: return p ? "look" : "Theme"
         case .onTheDisplay: return p ? "on the keychain" : "On the display"
         case .emptyCache: return p ? "empty it" : "Clear display cache"

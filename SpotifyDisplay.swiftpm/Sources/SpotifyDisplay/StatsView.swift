@@ -1,53 +1,42 @@
 import SwiftUI
 
-/// Stats sheet. Shows only what the app already records: `BLEManager.transferLog` (in memory,
-/// last 30 transfers since launch), the SD cache count and the live status strings. There are no
-/// per-transfer track names in the log, so rows are labelled by time instead.
-struct StatsView: View {
+/// The "General" page of the main screen. Shows only what the app already records:
+/// `BLEManager.transferLog` (in memory, last 30 transfers since launch) and the SD cache count. The
+/// per-transfer specifics and the live terminal are on the "Live" page (`LiveView`). The caller
+/// provides the scrolling and the side margins.
+struct GeneralStatsView: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
 
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
 
     var body: some View {
         let entries = bleManager.transferLog
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                SheetHeader(title: theme.id.text(.stats)) { dismiss() }
-                if let last = entries.last {
-                    LastTransferHero(entry: last)
-                        .padding(.top, 12)
-                    PhaseBreakdown(entry: last)
-                        .padding(.top, 28)
-                } else {
-                    Text(theme.id.text(.nothingYet))
-                        .themeText(.row)
-                        .foregroundStyle(theme.inkSoft)
-                        .padding(.top, 16)
-                }
-                ThemedDivider()
-                    .padding(.vertical, 24)
-                AveragesRow(entries: entries, cachedCount: bleManager.sdCacheEntryCount)
-                if !entries.isEmpty {
-                    RecentTransfers(entries: Array(entries.suffix(8).reversed()))
-                        .padding(.top, 24)
-                    MarkerLegend()
-                        .padding(.top, 18)
-                }
-                ThemedDivider()
-                    .padding(.vertical, 24)
-                LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-                Text(theme.id.text(.sinceOpened))
-                    .themeText(.statCaption)
-                    .foregroundStyle(theme.inkFaint)
-                    .frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 0) {
+            if let last = entries.last {
+                LastTransferHero(entry: last)
+                PhaseBreakdown(entry: last)
                     .padding(.top, 28)
+            } else {
+                Text(theme.id.text(.nothingYet))
+                    .themeText(.row)
+                    .foregroundStyle(theme.inkSoft)
             }
-            .padding(.horizontal, theme.margin + 4)
-            .padding(.bottom, 32)
+            ThemedDivider()
+                .padding(.vertical, 24)
+            AveragesRow(entries: entries, cachedCount: bleManager.sdCacheEntryCount)
+            if !entries.isEmpty {
+                RecentTransfers(entries: Array(entries.suffix(8).reversed()))
+                    .padding(.top, 24)
+                MarkerLegend()
+                    .padding(.top, 18)
+            }
+            Text(theme.id.text(.sinceOpened))
+                .themeText(.statCaption)
+                .foregroundStyle(theme.inkFaint)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 28)
         }
-        .background(theme.background.ignoresSafeArea())
     }
 }
 
@@ -333,12 +322,14 @@ struct TransferRow: View {
         var parts: [String] = []
         if entry.cacheHit {
             parts.append("cache \(StatsFormat.short(entry.cacheCheckMs))")
-            if let name = entry.transitionName, !name.isEmpty { parts.append("tr \(name)") }
         } else {
+            if entry.outcome == "photo" { parts.append("photo") }
             if let dl = entry.downloadMs { parts.append("dl \(StatsFormat.short(dl))") }
             if let cv = entry.convertMs { parts.append("cv \(StatsFormat.short(cv))") }
             if let ul = entry.uploadMs { parts.append("ble \(StatsFormat.short(ul))") }
         }
+        // Since BLE_PROTOCOL 1.12 fresh sends report their transition too, not only cache hits.
+        if let name = entry.transitionName, !name.isEmpty { parts.append("tr \(name)") }
         return parts.joined(separator: "  ")
     }
 }

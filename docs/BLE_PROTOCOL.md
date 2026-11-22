@@ -2,7 +2,26 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.11** (Compressed frames; faster link parameters.)
+Version: **1.12** (Enabled-transitions mask; fresh draws announce their transition; display-only photo frames.)
+
+Changes in 1.12 (transition picker + photo upload). Additive: old clients, old firmware and the Python
+sender are unaffected.
+- **Enabled-transitions mask** — Cache characteristic write, 20 bytes: magic `0xCAC4E1EB` (u32 LE) +
+  mask `u64` LE + 8 padding bytes. Bit *i* set = header transition index *i* may be picked at random
+  (indices 0-51; retired 5, 10, 16 are ignored). It governs random picks only (`0xFF` headers and every
+  cache hit); a forced header index is still honoured. A mask with no live bit set means "all enabled".
+  The board keeps it in RAM only, so the app sends it on every connect. No reply. Fresh (new-song)
+  draws normally pick from the quick set; if none of the quick ones is enabled they pick from whatever is.
+- **Fresh draws announce their transition** — Message `TRANSITION:<name>` is now also sent after a fresh
+  transfer is drawn, before the Image `0x01` ACK / `SUCCESS` (previously cache hits only). The iOS app
+  replays that effect on its cover and shows it in the Live tab.
+- **Display-only frame** — image header `transitionIndex` `0xFD`: draw the frame with a random enabled
+  transition but do **not** save it to SD (photo upload). Same ACK as a normal frame. Needs no cache check
+  first; the board ignores `transferCacheKey` for it.
+- **Capability** — Message `CAPS:transitions`, sent with the stats reply (next to `CAPS:deflate`). Clients
+  must send the mask and the `0xFD` header byte only after seeing it on the current connection (old firmware
+  would treat `0xFD` as a random frame *and save it*, and log the mask write as a bad magic).
+- The Python sender is unchanged (it never sends any of this).
 
 Changes in 1.11 (faster sending). Additive: old clients and the Python sender are unaffected.
 How 1.10 worked and how to roll back: `docs/ROLLBACK_FASTER_TRANSFER.md` (tag `backup/pre-faster-transfer`).
@@ -140,7 +159,8 @@ message they do not recognise.
 | `READY` | Connect callback (usually lost; read Status instead) | Readiness |
 | `HB` | Every ~1 s while connected | iOS: background poll tick. Not a reply to anything |
 | `CACHE_HIT_MS:<ms>` | Cache hit, after SD load + transition | Telemetry only |
-| `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS` | iOS: shown in Stats |
+| `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
+| `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |
 | `SUCCESS` | (a) after a frame's SD save, with Image `0x01`; (b) after a cache hit, right after the Cache `0x01` reply | (a) ends the transfer wait. (b) is redundant with `CACHE_RENDERED`; the iOS app accepts it only while it is waiting for a render confirmation, and ignores it otherwise |
 | `CACHE_MISS_MS:<ms>` | Cache miss, before the Cache `0x00` reply | Telemetry only |

@@ -7,7 +7,9 @@ import UIKit
 final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var isConnected = false
     @Published var currentAlbumArt: Data?
-    @Published var statusMessage = "Bluetooth…"
+    @Published var statusMessage = "Bluetooth…" {
+        didSet { if statusMessage != oldValue { log("status  \(statusMessage)", kind: .info) } }
+    }
     @Published var isTransferring = false
     @Published var transferProgress: Double = 0
     /// Total `.bin` files in `/cache` on the display (from stats / `CACHE_COUNT:`). `nil` until first successful read this connection.
@@ -96,6 +98,17 @@ final class BLEManager: NSObject, ObservableObject {
     private var cacheRenderConfirmed = false
     /// Last transition announced by firmware via `MESSAGE` notify (`TRANSITION:<name>`).
     @Published private(set) var lastTransitionName: String?
+    /// Every `TRANSITION:` announcement (cache hits since 1.7, fresh draws too since 1.12). The main
+    /// cover replays it so the app shows the effect the board just drew.
+    @Published private(set) var transitionEvent: TransitionEvent?
+    /// Rolling terminal-style log for the Live tab (newest last).
+    @Published private(set) var eventLog: [LogLine] = []
+    private let maxLogLines = 300
+    /// Board said `CAPS:transitions` (BLE_PROTOCOL 1.12): it takes the enabled-transitions mask, the
+    /// display-only header byte, and announces fresh draws.
+    @Published private(set) var boardSupportsTransitionMask = false
+    /// A photo the person uploaded is on the display: Spotify sends are paused until `endPhotoHold()`.
+    @Published private(set) var photoHold = false
 
     /// Set in `centralManager(_:willRestoreState:)` and consumed when the central becomes `.poweredOn`.
     private var pendingRestoredPeripheral: CBPeripheral?
@@ -128,6 +141,10 @@ final class BLEManager: NSObject, ObservableObject {
     private let cacheProbeMagic = UInt32(0xDEADBEE0)
     /// BLE_PROTOCOL 1.8 prefetch: image header transition byte meaning "save to SD, don't draw".
     private let storeOnlyTransition: UInt8 = 0xFE
+    /// BLE_PROTOCOL 1.12: header byte meaning "draw it, don't save it to SD" (photo upload).
+    private let displayOnlyTransition: UInt8 = 0xFD
+    /// BLE_PROTOCOL 1.12: Cache characteristic write carrying the enabled-transitions bitmask.
+    private let transitionMaskMagic = UInt32(0xCAC4E1EB)
     /// BLE_PROTOCOL 1.11: image header format byte for a raw-DEFLATE payload (10-byte header).
     private let deflateFormat: UInt8 = 0x01
     /// Board said `CAPS:deflate` (in reply to the stats request sent on every connect). Cleared on
@@ -228,6 +245,7 @@ final class BLEManager: NSObject, ObservableObject {
         var packet = Data()
         withUnsafeBytes(of: magic.littleEndian) { packet.append(contentsOf: $0) }
         packet.append(cacheKey)
+        log("tx      cache \(magic == cacheProbeMagic ? "probe" : "check") key=\(cacheKey.prefix(4).map { String(format: "%02x", $0) }.joined())…", kind: .tx)
 
         cacheCheckGen &+= 1
         let myGen = cacheCheckGen
@@ -318,7 +336,87 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     private func setLivePhase(_ text: String?) {
+        if let text, text != currentLivePhase { log("phase   \(text)", kind: .info) }
         currentLivePhase = text
+    }
+
+    /// Appends one line to the Live tab's terminal.
+    func log(_ text: String, kind: LogLine.Kind) {
+        eventLog.append(LogLine(kind: kind, text: text))
+        if eventLog.count > maxLogLines {
+            eventLog.removeFirst(eventLog.count - maxLogLines)
+        }
+    }
+
+    /// Sends the person's enabled-transitions list to the board (BLE_PROTOCOL 1.12). Only boards that
+    /// announced `CAPS:transitions` get it; older firmware would just log a bad magic.
+    func applyTransitionPrefs() {
+        guard boardSupportsTransitionMask, isConnected, let p = peripheral, let c = cacheChar else { return }
+        let mask = TransitionPrefs.currentMask
+        var packet = Data()
+        withUnsafeBytes(of: transitionMaskMagic.littleEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: mask.littleEndian) { packet.append(contentsOf: $0) }
+        packet.append(Data(count: 8))
+        p.writeValue(packet, for: c, type: .withResponse)
+        let on = TransitionCatalog.all.filter { mask & (UInt64(1) << UInt64($0.id)) != 0 }.count
+        log("tx      transition mask: \(on) of \(TransitionCatalog.all.count) on", kind: .tx)
+    }
+
+    /// Photo upload is over (or failed before the board drew it): let Spotify drive the display again.
+    /// The caller asks `SpotifyManager.requestResync` afterwards to redraw the current song.
+    func endPhotoHold() {
+        guard photoHold else { return }
+        photoHold = false
+        log("photo   released, Spotify resumes", kind: .info)
+    }
+
+    /// Shows a user photo on the display. `jpeg` is already cropped square. Not saved to the SD cache
+    /// (header byte 0xFD) and Spotify sends stay paused (`photoHold`) until `endPhotoHold()`.
+    func sendPhoto(jpeg: Data) async throws {
+        guard boardSupportsTransitionMask else {
+            throw SpotifyDisplayError.bleTransferRejected("This display's firmware is too old for photo upload. Flash the latest firmware.")
+        }
+        holdTransferBackgroundTime()
+        defer { releaseTransferBackgroundTime() }
+        let hadHold = photoHold
+        photoHold = true
+        cancelOngoingTransfer()
+        if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
+
+        sendStageGen &+= 1
+        let myStageGen = sendStageGen
+        defer { if sendStageGen == myStageGen { sendStage = .idle } }
+        let epochAtStart = transferEpoch
+        let totalStart = CFAbsoluteTimeGetCurrent()
+        do {
+            sendStage = .preparingFresh
+            currentAlbumArt = jpeg
+            setLivePhase("photo: dithering…")
+            let convertStart = CFAbsoluteTimeGetCurrent()
+            let rgb565 = try await Task.detached(priority: .userInitiated) {
+                try ImageProcessor.convertToRGB565(imageData: jpeg)
+            }.value
+            let convertMs = ms(since: convertStart)
+            try ensureTransferEpoch(epochAtStart)
+            guard rgb565.count == imagePayloadBytes else { throw SpotifyDisplayError.conversionFailed }
+
+            let uploadStart = CFAbsoluteTimeGetCurrent()
+            setLivePhase("photo: sending BLE…")
+            _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, displayOnly: true)
+            let uploadMs = ms(since: uploadStart)
+            let totalMs = ms(since: totalStart)
+            lastTransferResult = "Photo shown  \(secondsLabel(fromMs: totalMs))"
+            boardAckStatus = "Board ACK: photo shown (not saved)"
+            appendLog(TransferLogEntry(
+                cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: 0,
+                downloadMs: nil, convertMs: convertMs, uploadMs: uploadMs,
+                totalMs: totalMs, outcome: "photo"
+            ))
+            setLivePhase("last: photo \(secondsLabel(fromMs: totalMs))")
+        } catch {
+            if !hadHold { photoHold = false }
+            throw error
+        }
     }
 
     /// Clears top status badges so stale transfer state is hidden while the next track prepares.
@@ -474,7 +572,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
         appendLog(TransferLogEntry(
-            cacheHit: false, transitionName: nil, cacheCheckMs: cacheCheckMs,
+            cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
             downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,
             totalMs: totalMs, outcome: "ok"
         ))
@@ -535,7 +633,7 @@ final class BLEManager: NSObject, ObservableObject {
     /// every piece of UI state (progress, status text, live phase) alone.
     /// Returns the bytes that went over the air (smaller than `rgb565` when sent compressed).
     @discardableResult
-    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64, storeOnly: Bool = false) async throws -> Int {
+    func sendRGB565(_ rgb565: Data, epochAtStart: UInt64, storeOnly: Bool = false, displayOnly: Bool = false) async throws -> Int {
         try ensureTransferEpoch(epochAtStart)
         try ensureGattReady()
         guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
@@ -559,7 +657,8 @@ final class BLEManager: NSObject, ObservableObject {
         let payload = packed ?? rgb565
 
         var header = Data()
-        header.append(storeOnly ? storeOnlyTransition : 0xFF) // 0xFF = random transition on firmware
+        // 0xFF = random (enabled) transition on firmware; 0xFE store-only; 0xFD display-only (photo)
+        header.append(storeOnly ? storeOnlyTransition : (displayOnly ? displayOnlyTransition : 0xFF))
         if packed != nil {
             header.append(deflateFormat)
             withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
@@ -568,6 +667,9 @@ final class BLEManager: NSObject, ObservableObject {
             withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         }
         p.writeValue(header, for: img, type: .withResponse)
+        if !storeOnly {
+            log("tx      image header (\(displayOnly ? "photo, no SD save" : "random transition")), \(payload.count / 1024) KB\(packed != nil ? " deflated" : " raw")", kind: .tx)
+        }
 
         try ensureTransferEpoch(epochAtStart)
 
@@ -662,6 +764,7 @@ final class BLEManager: NSObject, ObservableObject {
         try ensureTransferEpoch(epochAtStart)
 
         if storeOnly { return total }
+        log("rx      image ACK", kind: .rx)
 
         isTransferring = false
         transferProgress = 0
@@ -756,6 +859,8 @@ final class BLEManager: NSObject, ObservableObject {
         brightnessChar = nil
         sawReady = false
         boardSupportsDeflate = false
+        boardSupportsTransitionMask = false
+        photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
         failPending(error: SpotifyDisplayError.notConnected)
     }
 
@@ -839,8 +944,21 @@ final class BLEManager: NSObject, ObservableObject {
             onHeartbeat?()
             return
         }
+        if text.hasPrefix("ERROR") {
+            log("rx      \(text)", kind: .error)
+        } else if text.hasPrefix("TRANSITION:") {
+            log("rx      \(text)", kind: .transition)
+        } else {
+            log("rx      \(text)", kind: .rx)
+        }
         if text == "READY" { signalReady() }
         if text == "CAPS:deflate" { boardSupportsDeflate = true }
+        if text == "CAPS:transitions" {
+            // The board repeats this on every stats reply (the app asks after each send): act on the first.
+            let firstTime = !boardSupportsTransitionMask
+            boardSupportsTransitionMask = true
+            if firstTime { applyTransitionPrefs() }
+        }
         if text.hasPrefix("ERROR: Decompress") {
             // The retry (and every later frame this connection) goes raw.
             boardSupportsDeflate = false
@@ -915,6 +1033,7 @@ final class BLEManager: NSObject, ObservableObject {
             let t = text.dropFirst("TRANSITION:".count).trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty {
                 lastTransitionName = t
+                transitionEvent = TransitionEvent(name: t)
             }
         }
     }
