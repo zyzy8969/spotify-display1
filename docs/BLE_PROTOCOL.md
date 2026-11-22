@@ -12,6 +12,9 @@ Additive: the app sends the new magic only to boards that announced `CAPS:newson
   shown a song from this album before (its own list of played album ids), so the first song from an album is orange even when its cover is
   already on the card (queue prefetch).
 - **`CAPS:newsong`** — sent on every stats request after `CAPS:next`.
+- Firmware note (no wire change): a new song's transition (fresh song transfer, or a new-song cache check)
+  always runs at 1.3x, the top of the random range; the transition itself is still a random pick.
+  `TRANSITION_START` reports that speed as usual.
 
 Changes in 1.16 summary: (one-shot transition for the next draw: photo <-> cover swaps flip on the keychain.)
 

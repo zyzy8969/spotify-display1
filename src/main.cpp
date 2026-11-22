@@ -747,7 +747,13 @@ static uint16_t transitionLastMs[TRANSITION_COUNT] = {0};
 
 // 1.14: the speed for this draw. A per-transition setting wins; otherwise random, uniform in
 // 0.4x-1.3x (owner's range), when the app turned it on; otherwise 1x.
+// The cover being drawn is a new song (a fresh song transfer, or the 1.17 new-song cache check): its
+// transition runs at the top of the speed range, so new songs land fast (owner's request 2026-11-22).
+// Set by loop() just before the draw, cleared right after.
+static bool drawingNewSong = false;
+
 static float pickTransitionSpeed(int drawn) {
+  if (drawingNewSong) return TRANSITION_SPEED_RANDOM_MAX;
   if (drawn >= 0 && drawn < TRANSITION_SPEEDS_COUNT) {
     const uint8_t pct = transitionSpeedPct[drawn];
     if (pct >= 25) return (float)pct / 100.0f;
@@ -1930,7 +1936,9 @@ void loop() {
 
         // Draw image with random transition
         unsigned long displayStart = millis();
+        drawingNewSong = newSong;
         String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, pendingTransition);
+        drawingNewSong = false;
         unsigned long displayTime = millis() - displayStart;
 
         unsigned long totalTime = millis() - totalStartTime;
@@ -2038,8 +2046,10 @@ void loop() {
     // New covers pick from every enabled transition, like cache hits (owner's choice 2026-11-22;
     // they used to be limited to QUICK_TRANSITIONS). The app's Transitions page still has a
     // "Quick only" shortcut for anyone who wants new songs fast.
+    drawingNewSong = !displayOnly;  // a fresh song cover is a new song; photos keep the usual speed
     String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                                           pendingTransition, /*quick=*/false);
+    drawingNewSong = false;
     unsigned long displayTime = millis() - displayStart;
     pendingTransition = 0xFF;  // a later cache hit must not inherit this frame's header byte
     // Green as soon as the cover is on screen, not after the SD save (~0.4 s later).
