@@ -107,7 +107,26 @@ enum TransitionCatalog {
         .init(id: 95, name: "Pixelate", quick: false, blurb: "Breaks into big pixels and sharpens back"),
         .init(id: 96, name: "VHS Glitch", quick: false, blurb: "Tape-tracking tears and colour fringes"),
         .init(id: 97, name: "Cube Up", quick: false, blurb: "Cube rolls the old cover away upward"),
-        .init(id: 98, name: "Cube Down", quick: false, blurb: "Cube rolls the old cover away downward")
+        .init(id: 98, name: "Cube Down", quick: false, blurb: "Cube rolls the old cover away downward"),
+        // Slideshow set (PowerPoint 2003 / 2010, Google Slides)
+        .init(id: 99, name: "Comb Horizontal", quick: false, blurb: "Alternate strips slide in from left and right"),
+        .init(id: 100, name: "Comb Vertical", quick: false, blurb: "Alternate strips slide in from top and bottom"),
+        .init(id: 101, name: "Cover Down", quick: false, blurb: "New cover drops down over the old one"),
+        .init(id: 102, name: "Uncover Left", quick: false, blurb: "Old cover slides off left, revealing the new one"),
+        .init(id: 103, name: "Uncover Down", quick: false, blurb: "Old cover slides down and out"),
+        .init(id: 104, name: "Fade Through Black", quick: false, blurb: "Fade out to black, then fade up"),
+        .init(id: 105, name: "Newsflash", quick: false, blurb: "New cover spins in from the centre, twice round"),
+        .init(id: 106, name: "Strips", quick: true, blurb: "Stair-step blocks wipe from the top-left"),
+        .init(id: 107, name: "Wedge", quick: true, blurb: "Two hands sweep down both sides from 12 o'clock"),
+        .init(id: 108, name: "Checkerboard Across", quick: true, blurb: "Checker squares fill left to right, staggered"),
+        .init(id: 109, name: "Honeycomb", quick: true, blurb: "Hexagons pop in with a warm edge"),
+        .init(id: 110, name: "Glitter", quick: true, blurb: "Diamonds sparkle in, left to right"),
+        .init(id: 111, name: "Shred", quick: false, blurb: "Old cover cut into strips that slide apart"),
+        .init(id: 112, name: "Gallery", quick: false, blurb: "Covers glide past on a reflective floor"),
+        .init(id: 113, name: "Doors", quick: false, blurb: "Two doors swing open toward you"),
+        .init(id: 114, name: "Ripple", quick: false, blurb: "A water ripple spreads from the centre"),
+        .init(id: 115, name: "Flash", quick: false, blurb: "Camera-flash white-out into the new cover"),
+        .init(id: 116, name: "Fly Through", quick: false, blurb: "Fly through the old cover into the new one")
     ]
 
     /// Themes for the picker, so a whole family (e.g. everything that slides) can be switched at once.
@@ -120,6 +139,8 @@ enum TransitionCatalog {
 
     static let groups: [Group] = [
         Group(name: "Y2K tech", ids: [91, 93, 94, 95, 96]),
+        Group(name: "PowerPoint & Slides", ids: [99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
+                                                 109, 110, 111, 112, 113, 114, 115, 116]),
         Group(name: "Sliding & pushing", ids: [21, 81, 18, 82, 30, 83, 97, 98, 23, 35, 85]),
         Group(name: "Wipes & sweeps", ids: [0, 52, 1, 2, 6, 7, 66, 67, 9, 28, 84, 43, 56, 72, 48, 61, 51, 69]),
         Group(name: "Splits & blinds", ids: [12, 64, 13, 65, 14, 8, 49, 37, 73, 74]),
@@ -201,12 +222,20 @@ enum TransitionPrefs {
 /// renderer; the rest move or fade whole covers. The app's versions are approximations of the board's.
 enum TransitionMode {
     case threshold, crossfade, push, cardStack, flip, cube, zoomPunch, infiniteZoom
-    case mirrored, cubeV, zoomOut, infiniteZoomOut, crt, pixelate, vhs
+    case mirrored, cubeV, coverDown, uncoverLeft, uncoverDown, fadeBlack, newsflash, flash, flyThrough, zoomOut, infiniteZoomOut, crt, pixelate, vhs
 
     static func of(_ id: Int) -> TransitionMode {
         switch id {
         case 81, 82, 83: return .mirrored
         case 97, 98: return .cubeV
+        case 101: return .coverDown
+        case 102: return .uncoverLeft
+        case 103: return .uncoverDown
+        case 104: return .fadeBlack
+        case 105: return .newsflash
+        case 112: return .push
+        case 115: return .flash
+        case 116: return .flyThrough
         case 89: return .zoomOut
         case 90: return .infiniteZoomOut
         case 91: return .crt
@@ -279,7 +308,9 @@ struct PreviewVariant {
         87: .init(base: 26, my: true),
         88: .init(base: 31, my: true),
         93: .init(base: 1, tint: Color(red: 0, green: 0.9, blue: 1)),
-        94: .init(base: 1019, tint: Color(white: 1))
+        94: .init(base: 1019, tint: Color(white: 1)),
+        109: .init(base: 109, tint: Color(red: 1, green: 0.91, blue: 0.66)),
+        110: .init(base: 110, tint: Color(white: 1))
     ]
 }
 
@@ -397,6 +428,22 @@ enum TransitionMaskMath {
             return (fx * fx + fy * fy).squareRoot()
         case 1019: return x + y
         case 1092: return y * 0.6 + hash(ix / 2, 0, 92) * 0.4
+        // Slideshow set: preview approximations of the board's effects.
+        case 99: return (iy / (n / 10)) % 2 == 0 ? x : 1 - x
+        case 100: return (ix / (n / 10)) % 2 == 0 ? y : 1 - y
+        case 106: return Float(ix / (n / 12) + iy / (n / 12))
+        case 107:
+            var ang = atan2(dx, -dy)
+            if ang < 0 { ang += 2 * Float.pi }
+            return min(ang, 2 * Float.pi - ang)
+        case 108:
+            let c = n / 8
+            return Float(ix % c) / Float(c) + Float(((ix / c) + (iy / c)) % 2) + Float(ix / c) * 0.27
+        case 109: return hash(ix / 5, iy / 5, 109) * 0.85 + r * 0.15
+        case 110: return hash((ix + iy) / 3, (ix - iy + n) / 3, 110) * 0.8 + x * 0.25
+        case 111: return hash(ix / 4, 0, 111) * 0.25 + ((ix / 4) % 2 == 0 ? y : 1 - y) * 0.75
+        case 113: return abs(dx)
+        case 114: return r
         default: return y
         }
     }
@@ -537,6 +584,48 @@ struct TransitionStage<Old: View, New: View>: View {
                         .rotation3DEffect(.degrees(Double(-90 * (1 - p) * up)), axis: (x: 1, y: 0, z: 0),
                                           anchor: up > 0 ? .top : .bottom, perspective: 0.4)
                         .offset(y: h * (1 - p) * up)
+                case .coverDown:
+                    old.frame(width: w, height: h)
+                    new.frame(width: w, height: h)
+                        .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 4)
+                        .offset(y: -h * (1 - p))
+                case .uncoverLeft:
+                    new.frame(width: w, height: h)
+                    old.frame(width: w, height: h)
+                        .shadow(color: .black.opacity(0.35), radius: 6, x: 4, y: 0)
+                        .offset(x: -w * p)
+                case .uncoverDown:
+                    new.frame(width: w, height: h)
+                    old.frame(width: w, height: h)
+                        .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: -4)
+                        .offset(y: h * p)
+                case .fadeBlack:
+                    Color.black.frame(width: w, height: h)
+                    if p < 0.5 {
+                        old.frame(width: w, height: h).opacity(Double(1 - 2 * p))
+                    } else {
+                        new.frame(width: w, height: h).opacity(Double(2 * p - 1))
+                    }
+                case .newsflash:
+                    old.frame(width: w, height: h)
+                    new.frame(width: w, height: h)
+                        .rotationEffect(.degrees(Double(1 - p) * 720))
+                        .scaleEffect(max(0.03, p))
+                case .flash:
+                    if p < 0.3 {
+                        old.frame(width: w, height: h)
+                        Color.white.frame(width: w, height: h).opacity(Double(p / 0.3))
+                    } else {
+                        new.frame(width: w, height: h)
+                        Color.white.frame(width: w, height: h).opacity(Double(1 - (p - 0.3) / 0.7))
+                    }
+                case .flyThrough:
+                    Color.black.frame(width: w, height: h)
+                    new.frame(width: w, height: h)
+                        .scaleEffect(0.55 + 0.45 * p)
+                    old.frame(width: w, height: h)
+                        .scaleEffect(1 + 1.4 * p)
+                        .opacity(Double(1 - p))
                 case .zoomOut:
                     // Ease-in-back: grows a touch, then shrinks away.
                     let c: CGFloat = 1.70158
