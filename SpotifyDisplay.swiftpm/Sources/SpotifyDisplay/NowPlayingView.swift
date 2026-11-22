@@ -278,7 +278,6 @@ struct NowPlayingScreen: View {
             displayOn: bleManager.isConnected,
             onPhotoPicked: { item in showPhoto(item) },
             extras: HeaderExtras(
-                lastTransition: bleManager.lastTransitionName,
                 nerdMode: nerdMode,
                 onToggleNerdMode: { nerdMode.toggle() }
             ),
@@ -351,10 +350,14 @@ struct NowPlayingScreen: View {
             }
             .frame(maxWidth: .infinity, alignment: nerd ? .leading : .center)
 
-            strip
-                .frame(width: nerd ? nil : bigSide)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 10)
+            if !nerd {
+                strip
+                    .frame(width: bigSide)
+                    .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 10)
+                    .transition(.opacity)
+            }
 
             if !nerd {
                 normalTrackBlock(side: bigSide)
@@ -403,29 +406,32 @@ struct NowPlayingScreen: View {
         }
     }
 
-    /// Nerd mode, right of the cover: title and artist, then the controls, bottom-aligned with the art.
+    /// Nerd mode, right of the cover: title and artist, the controls right under them, then the strip.
     private func nerdTrackColumn(side: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: true, leading: true)
                 .matchedGeometryEffect(id: "track", in: playerNS, properties: .position)
-            Spacer(minLength: 0)
             PlaybackControls(spotifyManager: spotifyManager, compact: true)
                 // The first button's 44 pt frame is wider than its glyph: line the glyph up with the text.
                 .padding(.leading, -10)
                 .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
+            strip
+                .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
+                .padding(.top, 2)
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, minHeight: side, alignment: .topLeading)
         .environment(\.themeTextScale, ArtMetrics.compactTextScale)
     }
 
-    /// Nerd mode under the strip: the photo banner, then the live details + session log.
+    /// Nerd mode under the cover row: the photo banner, then the live details (fixed) + session log.
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
         VStack(spacing: 0) {
             if bleManager.photoHold {
                 photoBanner
             }
             ThemedDivider()
-                .padding(.top, 8)
+                .padding(.top, 12)
             if showsLower {
                 NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
                     .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
@@ -622,27 +628,23 @@ struct SessionSummary: View {
 
 // MARK: - Header
 
-/// The signed-in screen's extra header icons: last transition and nerd mode.
+/// The signed-in screen's extra header icon: nerd mode. (Transitions live in Settings.)
 struct HeaderExtras {
-    let lastTransition: String?
     let nerdMode: Bool
     let onToggleNerdMode: () -> Void
 }
 
-/// Dots on the left; icons on the right: [last transition] [photo] [nerd mode] [settings].
+/// Dots on the left; icons on the right: [nerd mode] [photo] [settings].
 struct StatusHeader: View {
     let spotifyOn: Bool
     let displayOn: Bool
     /// Called with the photo picked from the library; nil hides the icon (signed-out screen).
     var onPhotoPicked: ((PhotosPickerItem) -> Void)? = nil
-    /// Last-transition and nerd-mode icons; nil hides them (signed-out screen).
+    /// Nerd-mode icon; nil hides it (signed-out screen).
     var extras: HeaderExtras? = nil
     let onOpen: (Panel) -> Void
 
     @State private var pickedPhoto: PhotosPickerItem?
-    /// The last-transition name bubble under the header.
-    @State private var showsTransitionName = false
-    @State private var bubbleGen = 0
 
     @Environment(\.theme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -658,7 +660,7 @@ struct StatusHeader: View {
             Spacer(minLength: 4)
             HStack(spacing: 0) {
                 if let extras {
-                    transitionButton(extras)
+                    nerdButton(extras)
                 }
                 if let onPhotoPicked {
                     // Pick a library photo and it goes straight to the display.
@@ -676,9 +678,6 @@ struct StatusHeader: View {
                         onPhotoPicked(item)
                     }
                 }
-                if let extras {
-                    nerdButton(extras)
-                }
                 Button { onOpen(.settings) } label: {
                     GlyphIcon(glyph: .gear, color: theme.headerLink, size: gearSize)
                         .frame(width: max(44, gearSize + 12), height: max(44, gearSize + 12))
@@ -690,30 +689,6 @@ struct StatusHeader: View {
             .padding(.trailing, -11)
         }
         .padding(.top, 4)
-        .overlay(alignment: .bottomTrailing) {
-            if showsTransitionName, let extras {
-                transitionBubble(extras)
-                    // Top of the bubble 2pt below the bottom of the header.
-                    .alignmentGuide(.bottom) { d in d[.top] - 2 }
-                    .transition(.opacity)
-            }
-        }
-    }
-
-    private func transitionButton(_ extras: HeaderExtras) -> some View {
-        Button {
-            flashTransitionName()
-        } label: {
-            Image(systemName: "sparkles")
-                .font(Self.iconFont)
-                .foregroundStyle(theme.headerLink)
-                .opacity(extras.lastTransition == nil ? 0.55 : 1)
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(extras.lastTransition.map { "Last transition: \($0)" } ?? "No transition yet")
-        .accessibilityAction(named: "Choose transitions") { onOpen(.transitions) }
     }
 
     private func nerdButton(_ extras: HeaderExtras) -> some View {
@@ -752,46 +727,6 @@ struct StatusHeader: View {
         .accessibilityLabel("Nerd mode, live stats")
         .accessibilityValue(on ? "On" : "Off")
         .accessibilityAddTraits(on ? .isSelected : [])
-    }
-
-    /// Small themed label with the last transition's name. Tap it to open the transition picker.
-    /// VoiceOver gets the name from the icon's label instead.
-    private func transitionBubble(_ extras: HeaderExtras) -> some View {
-        Button {
-            showsTransitionName = false
-            onOpen(.transitions)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 12, weight: .regular))
-                Text(extras.lastTransition ?? "No transition yet")
-                    .themeText(.footnote)
-                    .lineLimit(1)
-            }
-            .foregroundStyle(theme.ink)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(Capsule().fill(theme.background))
-            .overlay(Capsule().stroke(theme.ringOff, lineWidth: 1))
-            .shadow(color: Color.black.opacity(0.12), radius: 6, x: 0, y: 2)
-        }
-        .buttonStyle(.plain)
-        .accessibilityHidden(true)
-    }
-
-    /// Shows the bubble and hides it again about 2 s after the last tap.
-    private func flashTransitionName() {
-        bubbleGen &+= 1
-        let gen = bubbleGen
-        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
-            showsTransitionName = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            guard gen == bubbleGen else { return }
-            withAnimation(reduceMotion ? nil : .easeIn(duration: 0.2)) {
-                showsTransitionName = false
-            }
-        }
     }
 
     /// At accessibility text sizes the dot names would crowd out the buttons; the dots keep
@@ -1066,9 +1001,12 @@ struct LiveStrip: View {
         // Ticks only while something moves; Reduce Motion steps 4x a second with no creep.
         TimelineView(.animation(minimumInterval: reduceMotion ? 0.25 : nil, paused: !isAnimating)) { context in
             let look = appearance(at: context.date)
+            // Only a failure gets a marker (the red x); the cached / fresh dot was removed by request.
             HStack(spacing: 8) {
-                marker(look.marker)
-                    .frame(width: markerSize, height: markerSize)
+                if look.marker == .failed {
+                    marker(look.marker)
+                        .frame(width: markerSize, height: markerSize)
+                }
                 line(look)
             }
         }

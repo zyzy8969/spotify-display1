@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// Nerd mode's area under the compact player: one scrolling list in the Live details style. The live
-/// details come first, then the session log (every BLE / transfer line since the app was opened,
-/// `BLEManager.eventLog`, newest at the bottom). It follows new lines while the person is at the
-/// bottom and stays put when they have scrolled up (a "newest" button takes them back down).
-/// The caller provides the side margins and the smaller text (`themeTextScale`).
+/// Nerd mode's area under the compact player. The live details are pinned at the top and do not
+/// scroll; under them the session log (every BLE / transfer line since the app was opened,
+/// `BLEManager.eventLog`, newest at the bottom) scrolls on its own. It follows new lines while the
+/// person is at the bottom and stays put when they have scrolled up (a "newest" button takes them
+/// back down). The caller provides the side margins and the smaller text (`themeTextScale`).
 struct NerdLogView: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
@@ -18,18 +18,24 @@ struct NerdLogView: View {
 
     var body: some View {
         let lines = bleManager.eventLog
+        VStack(alignment: .leading, spacing: 0) {
+            LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
+                .padding(.top, 12)
+            ThemedDivider()
+                .padding(.vertical, 14)
+            Text(theme.id.text(.sessionLog))
+                .themeText(.eyebrow)
+                .foregroundStyle(theme.inkFaint)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.bottom, 8)
+            log(lines)
+        }
+    }
+
+    private func log(_ lines: [LogLine]) -> some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-                        .padding(.top, 12)
-                    ThemedDivider()
-                        .padding(.vertical, 14)
-                    Text(theme.id.text(.sessionLog))
-                        .themeText(.eyebrow)
-                        .foregroundStyle(theme.inkFaint)
-                        .accessibilityAddTraits(.isHeader)
-                        .padding(.bottom, 8)
                     if lines.isEmpty {
                         Text(theme.id.text(.waitingForActivity))
                             .themeText(.mono)
@@ -200,9 +206,12 @@ struct LiveDetails: View {
             Row(id: "live", label: "live", value: bleManager.currentLivePhase ?? "idle"),
             Row(id: "board", label: "board", value: bleManager.statusMessage)
         ]
-        if bleManager.isTransferring {
-            out.append(Row(id: "progress", label: "progress", value: "\(Int((bleManager.transferProgress * 100).rounded()))%"))
-        }
+        // Always present so the pinned block keeps its height and the log under it doesn't jump.
+        out.append(Row(
+            id: "progress",
+            label: "progress",
+            value: bleManager.isTransferring ? "\(Int((bleManager.transferProgress * 100).rounded()))%" : "\u{2014}"
+        ))
         if let ack = bleManager.boardAckStatus { out.append(Row(id: "ack", label: "ack", value: ack)) }
         if let result = bleManager.lastTransferResult { out.append(Row(id: "last", label: "last", value: result)) }
         if let poll = spotifyManager.pollStatus { out.append(Row(id: "spotify", label: "spotify", value: poll)) }

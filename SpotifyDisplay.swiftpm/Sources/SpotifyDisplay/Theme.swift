@@ -166,7 +166,8 @@ extension Theme {
             Color(hex: 0xA8A8A8), Color(hex: 0x1A1A1A), Color(hex: 0xF2742C),
             Color(hex: 0x3B7DD8), Color(hex: 0xE8453C), Color(hex: 0xF5B924)
         ]
-        t.artFrame = Color(hex: 0xFFD400)
+        // The yellow hand-drawn outline behind the cover was removed by request (2026-11-22).
+        t.artFrame = nil
         t.wobble = 1
         t.iconStroke = 2.4
         t.stripThickness = 6
