@@ -113,7 +113,6 @@ struct NowPlayingScreen: View {
     /// Reduce Motion crossfade: the player dips to the background and comes back.
     @State private var playerOpacity: Double = 1
     @State private var modeGen = 0
-    @Namespace private var playerNS
 
     @State private var photoError: String?
     /// What the keychain shows right now, decoded once per change instead of on every render.
@@ -290,17 +289,6 @@ struct NowPlayingScreen: View {
                 }
             }
         }
-    }
-
-    /// Footer / stats (normal) and the log (nerd): in a beat after the cover, out first and fast.
-    private var lowerTransition: AnyTransition {
-        if reduceMotion { return .opacity }
-        return .asymmetric(
-            insertion: AnyTransition.opacity
-                .combined(with: .offset(y: ModeMotion.lowerRise))
-                .animation(ModeMotion.spring.delay(ModeMotion.lowerDelay)),
-            removal: AnyTransition.opacity.animation(ModeMotion.lowerExit)
-        )
     }
 
     // MARK: Send state
@@ -540,27 +528,21 @@ struct NowPlayingScreen: View {
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.top, nerd ? 2 : 10)
 
-            // The two modes' lower areas overlap (top-aligned) instead of stacking: a view on its way
-            // out can never push the other mode's content down. Nerd mode's live details used to sit
-            // ~150 pt low because normal mode's (invisible) track block kept its place above them.
-            ZStack(alignment: .top) {
-                if !nerd {
-                    VStack(spacing: 0) {
-                        normalTrackBlock(side: bigSide)
-                            .transition(.opacity)
-                        normalLowerBlock(size: size)
-                            .transition(lowerTransition)
-                    }
-                    .transition(.opacity)
-                } else {
-                    nerdLowerBlock(size: size, scrolls: scrolls)
-                }
+            // Both modes' lower areas are ALWAYS in the tree; the inactive one is collapsed to zero
+            // height (and hidden). They used to be inserted / removed with transitions, and normal mode's
+            // title + controls block could stay behind invisible in nerd mode, still taking its ~150 pt,
+            // so the live details sat where the big cover's lower half would be. A zero-height frame
+            // cannot linger.
+            VStack(spacing: 0) {
+                normalTrackBlock(side: bigSide)
+                normalLowerBlock(size: size)
             }
-            .frame(maxHeight: nerd ? CGFloat.infinity : nil, alignment: .top)
-            if !nerd {
-                Spacer(minLength: 8)
-                    .frame(maxHeight: .infinity)
-            }
+            .modeCollapsed(nerd)
+            nerdLowerBlock(size: size, scrolls: scrolls)
+                .modeCollapsed(!nerd)
+                .frame(maxHeight: nerd ? CGFloat.infinity : 0, alignment: .top)
+            Spacer(minLength: nerd ? 0 : 8)
+                .frame(maxHeight: nerd ? 0 : .infinity)
         }
         .padding(.horizontal, theme.margin)
         .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
@@ -571,10 +553,8 @@ struct NowPlayingScreen: View {
         VStack(spacing: 0) {
             TrackInfo(title: trackTitle, subtitle: trackSubtitle)
                 .frame(width: side)
-                .matchedGeometryEffect(id: "track", in: playerNS, properties: .position)
                 .padding(.top, 20)
             PlaybackControls(spotifyManager: spotifyManager)
-                .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
                 .padding(.top, 18)
         }
     }
@@ -597,10 +577,8 @@ struct NowPlayingScreen: View {
     private func nerdTrackColumn(side: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: true, leading: true)
-                .matchedGeometryEffect(id: "track", in: playerNS, properties: .position)
             PlaybackControls(spotifyManager: spotifyManager, compact: true)
                 .frame(maxWidth: .infinity, alignment: .center)
-                .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, minHeight: side, alignment: .topLeading)
@@ -609,18 +587,12 @@ struct NowPlayingScreen: View {
 
     /// Nerd mode under the progress line: the live details (fixed, first) + cache history + session log.
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
-        VStack(spacing: 0) {
-            if showsLower {
-                NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
-                    .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
-                    .frame(maxHeight: scrolls ? nil : CGFloat.infinity)
-                    .transition(lowerTransition)
-            } else {
-                Spacer(minLength: 0)
-            }
-        }
+        // Always present (only faded), so it can never be inserted twice or linger.
+        NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
+            .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
+            .frame(maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
+            .opacity(showsLower ? 1 : 0)
         .environment(\.themeTextScale, ArtMetrics.compactTextScale)
-        .transition(lowerTransition)
     }
 
     /// The cover, with the other picture (song cover or last photo) peeking out behind it.
@@ -1562,5 +1534,18 @@ struct NowPlayingFooter: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+private extension View {
+    /// The other mode's area: zero height, invisible, not tappable, hidden from VoiceOver. Stays in the
+    /// view tree, so a mode switch never leaves a half-removed view taking space.
+    func modeCollapsed(_ collapsed: Bool) -> some View {
+        self
+            .frame(height: collapsed ? 0 : nil, alignment: .top)
+            .clipped()
+            .opacity(collapsed ? 0 : 1)
+            .allowsHitTesting(!collapsed)
+            .accessibilityHidden(collapsed)
     }
 }
