@@ -985,9 +985,18 @@ String drawImageWithTransitionChoice(uint16_t* buffer, int width, int height, ui
 // BLUETOOTH CONNECTION SCREEN HELPER
 // ==================================================
 
+// Full-screen fills reuse the panel window of the last full-frame draw (Arduino_ST7789 skips CASET/RASET
+// when the window is unchanged). If one of those commands was garbled, the white fill went to the wrong
+// rectangle and only the small text writes landed: the waiting text showed over the old cover after a
+// disconnect. A 1x1 write first forces the next draw to resend the window (same trick as runTransition).
+static void fillScreenResynced(uint16_t color) {
+    gfx->drawPixel(0, 0, color);
+    gfx->fillScreen(color);
+}
+
 void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor) {
     panelShowsImage = false;
-    gfx->fillScreen(WHITE);
+    fillScreenResynced(WHITE);
 
     // Show "Bluetooth connected?" with "Bluetooth" in blue - LARGER & CENTERED
     gfx->setTextSize(3);  // Increased from 2 to 3
@@ -1021,7 +1030,7 @@ void resetToWaitingScreen() {
 // Connected, nothing played yet.
 void showReadyScreen() {
     panelShowsImage = false;
-    gfx->fillScreen(WHITE);
+    fillScreenResynced(WHITE);
     gfx->setTextSize(3);
     gfx->setTextColor(BLACK);
     gfx->setCursor(39, 80);  // Centered: "Play some" = 9 chars

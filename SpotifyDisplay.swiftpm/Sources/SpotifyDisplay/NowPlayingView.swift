@@ -721,8 +721,8 @@ private struct ScrollIf<Content: View>: View {
 }
 
 /// Little words that pop up at a random spot when a song cover lands: "new" in the status LED's orange
-/// for the first song shown from an album (even if its cover was already on the card) or a fresh send,
-/// "cache" in its blue for a later song from an album already shown, off the card. Photos never pop anything: album -> photo is silent; photo -> album is the song's
+/// for a fresh send or a cover saved ahead from the queue and shown for the first time; "cache" in its
+/// blue for any other cover already on the card (a new song from an album shown before included). Photos never pop anything: album -> photo is silent; photo -> album is the song's
 /// cover coming back, so it says "cache". Purely decorative: no hit testing, hidden from VoiceOver
 /// (the strip already says the same). Reduce Motion: fade only.
 private struct ResultPopups: View {

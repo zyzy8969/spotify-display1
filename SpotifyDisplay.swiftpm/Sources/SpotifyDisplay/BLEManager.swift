@@ -131,29 +131,21 @@ final class BLEManager: NSObject, ObservableObject {
     /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
     /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
     private var prefetchedKeySources: Set<String> = []
-    /// Albums the keychain has shown (`PlayedAlbums`), oldest first, plus a set for lookups.
-    private var playedAlbumOrder: [String] = PlayedAlbums.load()
-    private lazy var playedAlbumSet: Set<String> = Set(playedAlbumOrder)
+    /// Prefetched covers the keychain has not shown yet (`AheadCovers`), oldest first.
+    private var aheadCovers: [String] = AheadCovers.load()
 
-    /// What "played before" is keyed on: the album (same album = same cover = not new), or the track
-    /// for a song without an album id.
-    private func playKey(albumId: String?, trackId: String) -> String {
-        if let albumId, !albumId.isEmpty { return "a:" + albumId }
-        return "t:" + trackId
+    private func noteAheadCover(_ keySource: String) {
+        guard !aheadCovers.contains(keySource) else { return }
+        aheadCovers.append(keySource)
+        aheadCovers = Array(aheadCovers.suffix(AheadCovers.cap))
+        AheadCovers.save(aheadCovers)
     }
 
-    /// The keychain is showing this album; true if it is the first time.
-    @discardableResult
-    private func markAlbumPlayed(_ key: String) -> Bool {
-        guard !playedAlbumSet.contains(key) else { return false }
-        playedAlbumSet.insert(key)
-        playedAlbumOrder.append(key)
-        if playedAlbumOrder.count > PlayedAlbums.cap + 200 {
-            playedAlbumOrder.removeFirst(playedAlbumOrder.count - PlayedAlbums.cap)
-            playedAlbumSet = Set(playedAlbumOrder)
-        }
-        PlayedAlbums.save(playedAlbumOrder)
-        return true
+    /// The keychain is showing this cover: it is no longer "saved ahead, not shown".
+    private func coverShown(_ keySource: String) {
+        guard let i = aheadCovers.firstIndex(of: keySource) else { return }
+        aheadCovers.remove(at: i)
+        AheadCovers.save(aheadCovers)
     }
     private var mirror: TransitionMirror { TransitionMirror.shared }
     /// Rolling terminal-style log for the Live tab (newest last).
@@ -183,8 +175,8 @@ final class BLEManager: NSObject, ObservableObject {
     }
     @Published private(set) var drawnPopup: DrawnPopup?
     private var popupForNextDraw: Bool?
-    /// The album the next `DRAWN` puts on screen: marked as played right then, so a skip that cuts the
-    /// send short on the phone still counts (going back to that song is "cache", not "new" again).
+    /// The cover the next `DRAWN` puts on screen: no longer "saved ahead, not shown" right then, so a
+    /// skip that cuts the send short on the phone still counts (going back to it is "cache").
     private var albumKeyForNextDraw: String?
     /// The view set this for a photo <-> cover swap: the next draw this app asks for (the photo, or the
     /// cover coming back) plays Card Flip on the keychain, like the app's card. Cleared once sent.
@@ -689,12 +681,14 @@ final class BLEManager: NSObject, ObservableObject {
         let cacheKey = cacheKeySource.md5Digest
         // "Played before" is per album: the first song from an album is new (orange on the keychain)
         // even when its cover is already on the card (prefetched); later songs from it are blue.
-        let albumKey = playKey(albumId: albumId, trackId: trackId)
-        let newToPerson = !playedAlbumSet.contains(albumKey)
+        // New = a cover the app saved ahead (queue) and the keychain has not shown yet. Any other cover
+        // already on the card is "cache" / blue, even for a new song from an album shown before. A miss
+        // (fresh send) is new; that is set further down.
+        let newToPerson = aheadCovers.contains(cacheKeySource)
         sendIsNewSong = newToPerson
         // A hit says "cache" unless the album is new to the person; a miss (fresh send) says "new".
         popupForNextDraw = !newToPerson
-        albumKeyForNextDraw = albumKey
+        albumKeyForNextDraw = cacheKeySource
         sendSwapFlipIfAsked()
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
@@ -739,7 +733,7 @@ final class BLEManager: NSObject, ObservableObject {
                 lastConfirmedTrackId = trackId
                 let wasPrefetched = prefetchedKeySources.remove(cacheKeySource) != nil
                 // First song from this album: "new", although its cover came off the card.
-                let firstShow = markAlbumPlayed(albumKey)
+                let firstShow = newToPerson
                 appendLog(TransferLogEntry(
                     cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
                     downloadMs: nil, convertMs: nil, uploadMs: 0,
@@ -804,7 +798,7 @@ final class BLEManager: NSObject, ObservableObject {
         lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)), \(wireLabel))"
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
-        markAlbumPlayed(albumKey)
+        coverShown(cacheKeySource)
         appendLog(TransferLogEntry(
             cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
             downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,
@@ -1066,6 +1060,7 @@ final class BLEManager: NSObject, ObservableObject {
 
         _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
         prefetchedKeySources.insert(keySource)
+        noteAheadCover(keySource)
         return .stored
     }
 
@@ -1237,7 +1232,7 @@ final class BLEManager: NSObject, ObservableObject {
             }
             popupForNextDraw = nil
             // On screen now: this album has been shown, whatever happens to the send on the phone.
-            if let key = albumKeyForNextDraw, !photoHold { markAlbumPlayed(key) }
+            if let key = albumKeyForNextDraw, !photoHold { coverShown(key) }
             albumKeyForNextDraw = nil
         }
         if text == "CAPS:t128" {
