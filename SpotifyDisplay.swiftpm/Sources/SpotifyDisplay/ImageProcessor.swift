@@ -3,6 +3,45 @@ import CoreImage
 import CoreGraphics
 import Compression
 
+/// How the 24-bit cover is reduced to the panel's RGB565. Picked in Settings (stored under
+/// `ditherMode`) so the looks can be compared on the real panel.
+enum DitherMode: String, CaseIterable, Identifiable {
+    /// Error diffusion: finest detail, but its noise compresses poorly (BLE_PROTOCOL 1.11 deflate).
+    case atkinson
+    /// Ordered 8x8 Bayer: a fixed pattern. No banding, and compresses much better than Atkinson.
+    case bayer
+    /// Plain rounding: smallest transfers, visible banding in smooth gradients.
+    case off = "none"
+
+    static let storageKey = "ditherMode"
+    static let fallback = DitherMode.atkinson
+    var id: String { rawValue }
+
+    static var current: DitherMode {
+        DitherMode(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? fallback
+    }
+
+    var displayName: String {
+        switch self {
+        case .atkinson: return "Atkinson"
+        case .bayer: return "Pattern (Bayer)"
+        case .off: return "None"
+        }
+    }
+
+    var blurb: String {
+        switch self {
+        case .atkinson: return "finest detail, biggest transfer"
+        case .bayer: return "smooth, smaller transfer"
+        case .off: return "smallest transfer, may band"
+        }
+    }
+
+    /// Appended to the SD cache key so each mode gets its own cached covers (Atkinson keeps the
+    /// original keys, so covers already on the board stay valid).
+    var cacheKeySuffix: String { self == .atkinson ? "" : "|d=\(rawValue)" }
+}
+
 /// sRGB-oriented resize + grade, then Atkinson-dither to little-endian RGB565 for ESP32 (115 200 bytes).
 /// Pipeline: JPEG decode → CIImage (Lanczos resize + color grade, single GPU render) → RGBA rasterize → dither+pack.
 enum ImageProcessor {
@@ -43,7 +82,7 @@ enum ImageProcessor {
 
     /// Decodes image data, resizes, grades, dithers, and returns 115 200 bytes of LE RGB565.
     /// Safe to call from any thread (no UIKit dependency on main).
-    static func convertToRGB565(imageData: Data) throws -> Data {
+    static func convertToRGB565(imageData: Data, dither: DitherMode = .current) throws -> Data {
         guard let uiImage = UIImage(data: imageData),
               let srcCG = uiImage.cgImage else {
             throw SpotifyDisplayError.conversionFailed
@@ -80,7 +119,7 @@ enum ImageProcessor {
             throw SpotifyDisplayError.conversionFailed
         }
 
-        return try packRGB565LittleEndian(cgImage: output)
+        return try packRGB565LittleEndian(cgImage: output, dither: dither)
     }
 
     // MARK: - Grading
@@ -127,7 +166,19 @@ enum ImageProcessor {
 
     /// Rasterizes the graded CGImage to RGBA, then Atkinson-dithers to LE RGB565.
     /// Uses an interleaved RGB float buffer + unsafe pointers — eliminates ~1 M function calls vs the old per-channel approach.
-    private static func packRGB565LittleEndian(cgImage: CGImage) throws -> Data {
+    /// 8x8 Bayer threshold matrix (0...63).
+    private static let bayer8: [Float] = [
+         0, 32,  8, 40,  2, 34, 10, 42,
+        48, 16, 56, 24, 50, 18, 58, 26,
+        12, 44,  4, 36, 14, 46,  6, 38,
+        60, 28, 52, 20, 62, 30, 54, 22,
+         3, 35, 11, 43,  1, 33,  9, 41,
+        51, 19, 59, 27, 49, 17, 57, 25,
+        15, 47,  7, 39, 13, 45,  5, 37,
+        63, 31, 55, 23, 61, 29, 53, 21,
+    ]
+
+    private static func packRGB565LittleEndian(cgImage: CGImage, dither: DitherMode) throws -> Data {
         let width = targetW
         let height = targetH
         let pixelCount = width * height
@@ -167,6 +218,18 @@ enum ImageProcessor {
         var dequantG = [Float](repeating: 0, count: 64)
         for v in 0..<64 { dequantG[v] = Float(v * 255) / 63.0 }
 
+        // Atkinson quantises by truncation (the diffused error makes up for it). The other modes add
+        // an offset first: Bayer a per-pixel threshold in [0, step), None half a step (= rounding).
+        // Steps: 8 for 5-bit red/blue, 4 for 6-bit green.
+        let diffuse = dither == .atkinson
+        var offset5 = [Float](repeating: 0, count: 64)
+        var offset6 = [Float](repeating: 0, count: 64)
+        for k in 0..<64 {
+            let t: Float = dither == .bayer ? (bayer8[k] + 0.5) / 64 : 0.5
+            offset5[k] = diffuse ? 0 : t * 8
+            offset6[k] = diffuse ? 0 : t * 4
+        }
+
         var le = Data(count: pixelCount * 2)
         le.withUnsafeMutableBytes { outRaw in
             buf.withUnsafeMutableBufferPointer { bufPtr in
@@ -183,9 +246,10 @@ enum ImageProcessor {
                                 let i = rowOff + x
                                 let i3 = i * 3
 
-                                let oldR = min(255.0, max(0.0, b[i3]))
-                                let oldG = min(255.0, max(0.0, b[i3 + 1]))
-                                let oldB = min(255.0, max(0.0, b[i3 + 2]))
+                                let k = ((y & 7) << 3) | (x & 7)
+                                let oldR = min(255.0, max(0.0, b[i3] + offset5[k]))
+                                let oldG = min(255.0, max(0.0, b[i3 + 1] + offset6[k]))
+                                let oldB = min(255.0, max(0.0, b[i3 + 2] + offset5[k]))
 
                                 let r5 = Int(UInt16(oldR) >> 3)
                                 let g6 = Int(UInt16(oldG) >> 2)
@@ -195,6 +259,8 @@ enum ImageProcessor {
                                 let base = i * 2
                                 o[base]     = UInt8(truncatingIfNeeded: packed & 0xff)
                                 o[base + 1] = UInt8(truncatingIfNeeded: packed >> 8)
+
+                                if !diffuse { continue }
 
                                 // Atkinson error shares (÷8).
                                 let eR = (oldR - dr[r5]) * 0.125

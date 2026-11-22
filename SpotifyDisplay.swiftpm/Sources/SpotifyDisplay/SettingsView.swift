@@ -11,6 +11,7 @@ struct SettingsView: View {
     @Environment(\.theme) private var theme
     @AppStorage("showDebugInfo") private var showDebugInfo = false
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
+    @AppStorage(DitherMode.storageKey) private var ditherRaw = DitherMode.fallback.rawValue
 
     @State private var clientIDOverride = ""
     @State private var brightnessValue: Double = 200
@@ -28,6 +29,8 @@ struct SettingsView: View {
                 ThemedDivider()
                 ThemePicker(selection: $themeRaw)
                 ThemedDivider()
+                DitherPicker(selection: $ditherRaw)
+                ThemedDivider()
                 cacheRows
                 ThemedDivider()
                 spotifyRows
@@ -39,6 +42,10 @@ struct SettingsView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(theme.background.ignoresSafeArea())
+        .onChange(of: ditherRaw) { _ in
+            // Redraw the current song in the new mode (new cache key, so a fresh send the first time).
+            Task { await spotifyManager.requestResync(reason: "dither mode changed") }
+        }
         .onAppear {
             clientIDOverride = spotifyManager.storedClientIdOverride
             brightnessValue = Double(bleManager.brightness)
@@ -329,6 +336,51 @@ struct ThemePicker: View {
         case .quiet: return .system(.body).weight(.semibold)
         case .serif: return .custom("TimesNewRomanPSMT", size: 20, relativeTo: .body)
         }
+    }
+}
+
+/// Dither mode for the board's covers. Same row style as `ThemePicker`.
+struct DitherPicker: View {
+    @Binding var selection: String
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Dither")
+                .themeText(.row)
+                .foregroundStyle(theme.ink)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.bottom, 6)
+            ForEach(DitherMode.allCases) { option in
+                optionRow(option)
+            }
+        }
+    }
+
+    private func optionRow(_ option: DitherMode) -> some View {
+        let isSelected = (DitherMode(rawValue: selection) ?? .fallback) == option
+        return Button {
+            selection = option.rawValue
+        } label: {
+            HStack(spacing: 12) {
+                StateMarker(filled: isSelected, fillColor: theme.ink, ringColor: theme.ringOff, size: 14)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(option.displayName)
+                        .themeText(.row)
+                        .foregroundStyle(theme.ink)
+                    Text(option.blurb)
+                        .themeText(.footnote)
+                        .foregroundStyle(theme.inkSoft)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 52)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(option.displayName) dither, \(option.blurb)")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 }
 

@@ -14,7 +14,8 @@ extension String {
 
     /// Canonical cache identifier source sent to firmware (firmware controls filename/versioning).
     static func cacheKeySource(albumId: String?, imageURL: String) -> String {
-        (albumId?.isEmpty == false) ? "album:\(albumId!)" : "url:\(imageURL)"
+        // Each dither mode is a different picture, so it gets its own cache entry on the board.
+        ((albumId?.isEmpty == false) ? "album:\(albumId!)" : "url:\(imageURL)") + DitherMode.current.cacheKeySuffix
     }
 
     /// BLE transport key: 16-byte digest of canonical source.
