@@ -360,7 +360,17 @@ final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// All-time totals (Settings > Lifetime stats), saved after every finished transfer.
+    @Published private(set) var lifetime = LifetimeStats.load()
+
+    func resetLifetimeStats() {
+        lifetime = LifetimeStats()
+        lifetime.save()
+    }
+
     private func appendLog(_ entry: TransferLogEntry) {
+        lifetime.record(entry)
+        lifetime.save()
         transferLog.append(entry)
         if transferLog.count > maxLogEntries {
             transferLog.removeFirst(transferLog.count - maxLogEntries)

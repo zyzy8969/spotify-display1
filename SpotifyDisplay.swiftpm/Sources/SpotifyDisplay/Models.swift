@@ -48,6 +48,65 @@ struct TransferLogEntry: Identifiable {
     let outcome: String // "ok", "cache hit", or error description
 }
 
+/// All-time totals for Settings > Lifetime stats. Saved on the phone (UserDefaults, a few hundred
+/// bytes) so they survive app restarts; `transferLog` only covers the current launch.
+struct LifetimeStats: Codable, Equatable {
+    var firstRecorded: Date?
+    var cachedCovers = 0
+    var freshCovers = 0
+    var photos = 0
+    var cachedMsTotal = 0
+    var freshMsTotal = 0
+    var fastestFreshMs: Int?
+    /// How often each transition was drawn (board names, `TRANSITION:<name>`).
+    var transitions: [String: Int] = [:]
+
+    static let storageKey = "lifetimeStats.v1"
+
+    static func load() -> LifetimeStats {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let stats = try? JSONDecoder().decode(LifetimeStats.self, from: data) else { return LifetimeStats() }
+        return stats
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: Self.storageKey)
+        }
+    }
+
+    /// Counts one finished transfer. Failed ones (any other outcome) are not counted.
+    mutating func record(_ entry: TransferLogEntry) {
+        switch entry.outcome {
+        case "cache hit":
+            cachedCovers += 1
+            cachedMsTotal += max(0, entry.totalMs)
+        case "ok":
+            freshCovers += 1
+            freshMsTotal += max(0, entry.totalMs)
+            fastestFreshMs = min(fastestFreshMs ?? Int.max, max(0, entry.totalMs))
+        case "photo":
+            photos += 1
+        default:
+            return
+        }
+        if let name = entry.transitionName, !name.isEmpty {
+            transitions[name, default: 0] += 1
+        }
+        if firstRecorded == nil { firstRecorded = Date() }
+    }
+
+    var covers: Int { cachedCovers + freshCovers }
+    var hitRate: Double? { covers > 0 ? Double(cachedCovers) / Double(covers) : nil }
+    var averageCachedMs: Int? { cachedCovers > 0 ? cachedMsTotal / cachedCovers : nil }
+    var averageFreshMs: Int? { freshCovers > 0 ? freshMsTotal / freshCovers : nil }
+    var favouriteTransition: (name: String, count: Int)? {
+        guard let best = transitions.max(by: { a, b in a.value < b.value || (a.value == b.value && a.key > b.key) })
+        else { return nil }
+        return (best.key, best.value)
+    }
+}
+
 /// One `TRANSITION:<name>` announcement from the board. A new `id` each time, so the same effect twice
 /// in a row still counts as a new event.
 struct TransitionEvent: Identifiable, Equatable {

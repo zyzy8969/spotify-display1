@@ -21,6 +21,76 @@ struct LifetimeStatsView: View {
     }
 }
 
+/// All-time totals saved on the phone (`BLEManager.lifetime`), above this launch's details.
+struct AllTimeStats: View {
+    @ObservedObject var bleManager: BLEManager
+    @Environment(\.theme) private var theme
+    @State private var confirmReset = false
+
+    var body: some View {
+        let s = bleManager.lifetime
+        VStack(alignment: .leading, spacing: 12) {
+            Text("All time")
+                .themeText(.eyebrow)
+                .foregroundStyle(theme.inkFaint)
+            if s.covers == 0 && s.photos == 0 {
+                Text("Nothing yet. Covers you play are counted here from now on.")
+                    .themeText(.footnote)
+                    .foregroundStyle(theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                row("Covers shown", "\(s.covers)")
+                row("From the SD card", cachedText(s))
+                row("Sent new", "\(s.freshCovers)")
+                if s.photos > 0 { row("Photos shown", "\(s.photos)") }
+                if let ms = s.averageCachedMs { row("Average cached", theme.id.seconds(ms)) }
+                if let ms = s.averageFreshMs { row("Average new", theme.id.seconds(ms)) }
+                if let ms = s.fastestFreshMs { row("Fastest new", theme.id.seconds(ms)) }
+                if let fav = s.favouriteTransition { row("Most drawn transition", "\(fav.name) ×\(fav.count)") }
+                if let first = s.firstRecorded {
+                    row("Counting since", first.formatted(date: .abbreviated, time: .omitted))
+                }
+                Button {
+                    confirmReset = true
+                } label: {
+                    Text("Reset all-time stats")
+                        .themeText(.rowValue)
+                        .foregroundStyle(theme.inkSoft)
+                        .underline()
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .confirmationDialog("Reset all-time stats?", isPresented: $confirmReset, titleVisibility: .visible) {
+                    Button("Reset", role: .destructive) { bleManager.resetLifetimeStats() }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This clears the totals saved on this phone. Covers on the display are not affected.")
+                }
+            }
+        }
+    }
+
+    private func cachedText(_ s: LifetimeStats) -> String {
+        guard let rate = s.hitRate else { return "\(s.cachedCovers)" }
+        return "\(s.cachedCovers)  (\(Int((rate * 100).rounded()))%)"
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .themeText(.row)
+                .foregroundStyle(theme.ink)
+            Spacer(minLength: 8)
+            Text(value)
+                .themeText(.rowValue)
+                .foregroundStyle(theme.inkSoft)
+                .multilineTextAlignment(.trailing)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// General transfer stats (Settings > Lifetime stats). Shows only what the app already records:
 /// `BLEManager.transferLog` (in memory, last 30 transfers since launch) and the SD cache count.
 /// The caller provides the scrolling and the side margins.
