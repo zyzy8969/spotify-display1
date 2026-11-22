@@ -23,7 +23,6 @@ struct NerdLogView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Starts right under the progress line (no gap, no divider above it).
             LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-                .padding(.top, 4)
             ThemedDivider()
                 .padding(.vertical, 8)
             CacheHistory(entries: bleManager.transferLog) {

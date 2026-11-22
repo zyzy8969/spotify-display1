@@ -538,7 +538,7 @@ struct NowPlayingScreen: View {
             strip(nerd: nerd)
                 .frame(width: nerd ? nil : bigSide)
                 .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, nerd ? 8 : 10)
+                .padding(.top, nerd ? 2 : 10)
 
             // The two modes' lower areas overlap (top-aligned) instead of stacking: a view on its way
             // out can never push the other mode's content down. Nerd mode's live details used to sit
@@ -762,9 +762,8 @@ private struct ScrollIf<Content: View>: View {
 }
 
 /// Little words that pop up at a random spot when a song cover lands: "cache" in the status LED's blue
-/// for a cover the keychain has shown before (drawn from its SD card), "new" in its orange for a song
-/// it is showing for the first time, even when that cover was saved ahead (prefetch) and so also comes
-/// off the card. Photos never pop anything: album -> photo is silent; photo -> album is the song's
+/// for a cover already on the keychain's SD card, "new" in its orange for a fresh send or a cover that
+/// was only saved ahead (queue prefetch) and is shown for the first time. Photos never pop anything: album -> photo is silent; photo -> album is the song's
 /// cover coming back, so it says "cache". Purely decorative: no hit testing, hidden from VoiceOver
 /// (the strip already says the same). Reduce Motion: fade only.
 private struct ResultPopups: View {

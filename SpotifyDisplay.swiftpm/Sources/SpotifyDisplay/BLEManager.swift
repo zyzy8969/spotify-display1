@@ -131,21 +131,22 @@ final class BLEManager: NSObject, ObservableObject {
     /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
     /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
     private var prefetchedKeySources: Set<String> = []
-    /// Covers the keychain has shown (`ShownCovers`), in order, plus a set for lookups.
-    private var shownCoverOrder: [String] = ShownCovers.load()
-    private lazy var shownCoverSet: Set<String> = Set(shownCoverOrder)
+    /// Prefetched covers the keychain has not shown yet (`UnshownPrefetches`), oldest first.
+    private var unshownPrefetches: [String] = UnshownPrefetches.load()
 
-    /// Records that the keychain showed this cover; true if it had never shown it before.
+    private func noteUnshownPrefetch(_ keySource: String) {
+        guard !unshownPrefetches.contains(keySource) else { return }
+        unshownPrefetches.append(keySource)
+        UnshownPrefetches.save(unshownPrefetches)
+        unshownPrefetches = Array(unshownPrefetches.suffix(UnshownPrefetches.cap))
+    }
+
+    /// The keychain is showing this cover: true if it was a prefetched cover it had never shown.
     @discardableResult
     private func markCoverShown(_ keySource: String) -> Bool {
-        guard !shownCoverSet.contains(keySource) else { return false }
-        shownCoverSet.insert(keySource)
-        shownCoverOrder.append(keySource)
-        if shownCoverOrder.count > ShownCovers.cap + 200 {
-            shownCoverOrder.removeFirst(shownCoverOrder.count - ShownCovers.cap)
-            shownCoverSet = Set(shownCoverOrder)
-        }
-        ShownCovers.save(shownCoverOrder)
+        guard let i = unshownPrefetches.firstIndex(of: keySource) else { return false }
+        unshownPrefetches.remove(at: i)
+        UnshownPrefetches.save(unshownPrefetches)
         return true
     }
     private var mirror: TransitionMirror { TransitionMirror.shared }
@@ -607,7 +608,9 @@ final class BLEManager: NSObject, ObservableObject {
         noteDrawRequest(.cacheCheck(frameTask))
         let hitDrawGen = drawRequestGen
         do {
-            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: !shownCoverSet.contains(cacheKeySource))
+            // New to the person only if its cover was saved ahead and never shown; any other cover on
+            // the card was shown before (cache blue). A miss is a fresh send, orange anyway.
+            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: unshownPrefetches.contains(cacheKeySource))
         } catch {
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
@@ -644,7 +647,7 @@ final class BLEManager: NSObject, ObservableObject {
                 boardAckStatus = "Board ACK: cache hit"
                 lastConfirmedTrackId = trackId
                 let wasPrefetched = prefetchedKeySources.remove(cacheKeySource) != nil
-                // A new song whose cover was only saved ahead (prefetch) is still new to the person.
+                // A song whose cover was only saved ahead (prefetch, any launch) is still new to the person.
                 let firstShow = markCoverShown(cacheKeySource)
                 appendLog(TransferLogEntry(
                     cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
@@ -969,6 +972,7 @@ final class BLEManager: NSObject, ObservableObject {
 
         _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
         prefetchedKeySources.insert(keySource)
+        noteUnshownPrefetch(keySource)
         return .stored
     }
 
