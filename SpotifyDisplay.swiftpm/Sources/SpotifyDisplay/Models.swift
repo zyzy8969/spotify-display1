@@ -34,9 +34,10 @@ enum SendStage: Equatable {
     case preparingFresh
 }
 
-struct TransferLogEntry: Identifiable {
-    let id = UUID()
-    let timestamp = Date()
+/// Codable so the latest one can be kept in `LifetimeStats.last` ("Last time" survives a relaunch).
+struct TransferLogEntry: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var timestamp = Date()
     let cacheHit: Bool
     let transitionName: String?
     /// Milliseconds for each phase; nil if skipped (e.g. download skipped on cache hit).
@@ -60,6 +61,8 @@ struct LifetimeStats: Codable, Equatable {
     var fastestFreshMs: Int?
     /// How often each transition was drawn (board names, `TRANSITION:<name>`).
     var transitions: [String: Int] = [:]
+    /// The latest counted transfer, for "Last time" (optional, so older saves still load).
+    var last: TransferLogEntry?
 
     static let storageKey = "lifetimeStats.v1"
 
@@ -93,6 +96,7 @@ struct LifetimeStats: Codable, Equatable {
         if let name = entry.transitionName, !name.isEmpty {
             transitions[name, default: 0] += 1
         }
+        last = entry
         if firstRecorded == nil { firstRecorded = Date() }
     }
 

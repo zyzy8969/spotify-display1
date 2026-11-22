@@ -830,6 +830,13 @@ final class BLEManager: NSObject, ObservableObject {
 
         try ensureTransferEpoch(epochAtStart)
 
+        // The board ACKs only after its SD save, so a saved frame (everything but a photo) is one more
+        // cover on the card right now: bump the count at once, prefetches included (they otherwise
+        // never refreshed it). The board's own count, read after every drawn frame and on reconnect,
+        // corrects it if a save didn't add a file.
+        if !displayOnly, let n = sdCacheEntryCount {
+            sdCacheEntryCount = n + 1
+        }
         if storeOnly { return total }
         log("rx      image ACK", kind: .rx)
         if drawRequestGen == myDrawGen { boardFrame = rgb565 }

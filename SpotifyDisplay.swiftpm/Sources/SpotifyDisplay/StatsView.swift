@@ -14,7 +14,7 @@ struct LifetimeStatsView: View {
                 SheetHeader(title: theme.id.text(.lifetimeStats)) { dismiss() }
                 AllTimeStats(bleManager: bleManager)
                 ThemedDivider()
-                GeneralStatsView(bleManager: bleManager, spotifyManager: spotifyManager)
+                LastTimeStats(entry: bleManager.lifetime.last)
             }
             .padding(.horizontal, theme.margin + 4)
             .padding(.bottom, 32)
@@ -93,48 +93,58 @@ struct AllTimeStats: View {
     }
 }
 
-/// General transfer stats (Settings > Lifetime stats). Shows only what the app already records:
-/// `BLEManager.transferLog` (in memory, last 30 transfers since launch) and the SD cache count.
-/// The caller provides the scrolling and the side margins.
-struct GeneralStatsView: View {
-    @ObservedObject var bleManager: BLEManager
-    @ObservedObject var spotifyManager: SpotifyManager
-    /// Nerd mode: half the gaps and fewer recent rows.
-    var compact = false
-
+/// Settings > Lifetime stats, under the totals: the most recent cover (saved with the totals, so it
+/// is there after a relaunch too) with its time split per phase. The per-transfer cache history is in
+/// nerd mode (`CacheHistory`).
+struct LastTimeStats: View {
+    let entry: TransferLogEntry?
     @Environment(\.theme) private var theme
 
     var body: some View {
-        let entries = bleManager.transferLog
         VStack(alignment: .leading, spacing: 0) {
-            if let last = entries.last {
-                LastTransferHero(entry: last)
-                PhaseBreakdown(entry: last)
-                    .padding(.top, gap(28))
+            Text(theme.id.text(.lastTime))
+                .themeText(.eyebrow)
+                .foregroundStyle(theme.inkFaint)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.bottom, 12)
+            if let entry {
+                LastTransferHero(entry: entry)
+                Text(entry.timestamp.formatted(date: .abbreviated, time: .shortened))
+                    .themeText(.statCaption)
+                    .foregroundStyle(theme.inkFaint)
+                    .padding(.top, 6)
+                PhaseBreakdown(entry: entry)
+                    .padding(.top, 24)
             } else {
                 Text(theme.id.text(.nothingYet))
                     .themeText(.row)
                     .foregroundStyle(theme.inkSoft)
             }
-            ThemedDivider()
-                .padding(.vertical, gap(24))
-            AveragesRow(entries: entries, cachedCount: bleManager.sdCacheEntryCount)
-            if !entries.isEmpty {
-                RecentTransfers(entries: Array(entries.suffix(compact ? 5 : 8).reversed()))
-                    .padding(.top, gap(24))
-                MarkerLegend()
-                    .padding(.top, gap(18))
-            }
-            Text(theme.id.text(.sinceOpened))
-                .themeText(.statCaption)
-                .foregroundStyle(theme.inkFaint)
-                .frame(maxWidth: .infinity)
-                .padding(.top, gap(28))
         }
     }
+}
 
-    private func gap(_ normal: CGFloat) -> CGFloat {
-        compact ? (normal / 2).rounded() : normal
+/// Nerd mode: the last few transfers since the app was opened, each marked cached (filled dot) or
+/// sent fresh (ring), with its phase timings.
+struct CacheHistory: View {
+    let entries: [TransferLogEntry]
+    var limit = 3
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(theme.id.text(.cacheHistory))
+                .themeText(.eyebrow)
+                .foregroundStyle(theme.inkFaint)
+                .accessibilityAddTraits(.isHeader)
+            if entries.isEmpty {
+                Text(theme.id.text(.nothingYet))
+                    .themeText(.mono)
+                    .foregroundStyle(theme.inkFaint)
+            } else {
+                RecentTransfers(entries: Array(entries.suffix(limit).reversed()), spacing: 6)
+            }
+        }
     }
 }
 
@@ -366,6 +376,7 @@ struct StatCell: View {
 
 struct RecentTransfers: View {
     let entries: [TransferLogEntry]
+    var spacing: CGFloat = 12
 
     private static let timeFormatter: DateFormatter = {
         // Follows the person's 12/24-hour setting and locale.
@@ -376,7 +387,7 @@ struct RecentTransfers: View {
     }()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: spacing) {
             ForEach(entries) { entry in
                 TransferRow(entry: entry, time: Self.timeFormatter.string(from: entry.timestamp))
             }

@@ -17,6 +17,7 @@ enum CopyKey {
     case sinceOpened, nothingYet, liveDetails
     case sessionLog, waitingForActivity, newestLine, lifetimeStats, transitionsRow, choose
     case summaryLast, summaryHitRate, summaryAvgNew
+    case cacheHistory, lastTime
 }
 
 extension ThemeID {
@@ -40,8 +41,8 @@ extension ThemeID {
         case .showStats: return p ? "nerd mode (live stats)" : "Nerd mode (live stats)"
         case .showStatsHint:
             return p
-                ? "moves the cover to the corner and shows live details and the log since you opened the app. same as the terminal icon at the top"
-                : "Moves the cover to the corner and shows live details and the session log under it. Same as the terminal icon at the top of the main screen."
+                ? "adds a terminal icon at the top. tap it to move the cover to the corner and see live details, cache history and the log"
+                : "Adds a terminal icon to the top of the main screen. Tap it to move the cover to the corner and show live details, cache history and the session log."
         case .themeTitle: return p ? "look" : "Theme"
         case .onTheDisplay: return p ? "on the keychain" : "On the display"
         case .emptyCache: return p ? "empty it" : "Clear display cache"
@@ -76,6 +77,8 @@ extension ThemeID {
         case .summaryLast: return p ? "last one" : "Last"
         case .summaryHitRate: return p ? "hits" : "Cache hits"
         case .summaryAvgNew: return p ? "avg new" : "Avg new"
+        case .cacheHistory: return p ? "cache history" : "Cache history"
+        case .lastTime: return p ? "last time" : "Last time"
         }
     }
 

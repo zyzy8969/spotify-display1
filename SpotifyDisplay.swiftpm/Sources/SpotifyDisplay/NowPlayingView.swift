@@ -57,14 +57,33 @@ enum ModeMotion {
     static let reducedHalf = 0.1
 }
 
+// MARK: - Nerd mode settings
+
+/// Nerd mode is two switches: Settings turns the feature on (the terminal icon appears in the header),
+/// and the icon flips the layout. `layoutKey` keeps its old name so the last layout is remembered.
+enum NerdMode {
+    static let enabledKey = "nerdModeEnabled"
+    static let layoutKey = "showDebugInfo"
+
+    /// Whether the nerd layout should show. Also migrates once: someone who had the layout on before
+    /// the Settings switch existed gets the switch turned on, so their layout and icon stay.
+    static var isOn: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: enabledKey) == nil, defaults.bool(forKey: layoutKey) {
+            defaults.set(true, forKey: enabledKey)
+        }
+        return defaults.bool(forKey: enabledKey) && defaults.bool(forKey: layoutKey)
+    }
+}
+
 // MARK: - Now playing
 
 /// Main screen while signed in to Spotify. Covers the Crayon "playing" and "sending" artboards
 /// (and their Quiet / Serif counterparts) — sending is a state of this screen, not a new screen.
 ///
 /// Normal mode: the big cover centred with the strip, track info, controls, footer and (on taller
-/// screens) a quiet stats line under it. Nerd mode (`@AppStorage("showDebugInfo")`, the header's
-/// terminal icon or the Settings toggle): the cover goes small to the top left with the track info and
+/// screens) a quiet stats line under it. Nerd mode (`NerdMode`: on in Settings, then the header's
+/// terminal icon): the cover goes small to the top left with the track info and
 /// controls to its right, the strip across the width, and the live details + session log below.
 ///
 /// Both modes are one view tree: the single `ArtStage` keeps its identity (so a mirrored transition
@@ -77,10 +96,12 @@ struct NowPlayingScreen: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    /// Nerd mode as the person set it. Same key as the Settings toggle, so both stay in sync.
-    @AppStorage("showDebugInfo") private var nerdMode = false
-    /// Nerd mode as laid out right now. Follows `nerdMode`, sequenced by `applyMode`.
-    @State private var layoutNerd = UserDefaults.standard.bool(forKey: "showDebugInfo")
+    /// Nerd layout as the person set it with the header's terminal icon (remembered across launches).
+    @AppStorage(NerdMode.layoutKey) private var nerdMode = false
+    /// Settings > Nerd mode: shows the terminal icon. Off = no icon and the normal layout.
+    @AppStorage(NerdMode.enabledKey) private var nerdEnabled = false
+    /// Nerd mode as laid out right now. Follows `nerdOn`, sequenced by `applyMode`.
+    @State private var layoutNerd = NerdMode.isOn
     /// False while the log fades out, before the cover grows back (nerd -> normal).
     @State private var showsLower = true
     /// Reduce Motion crossfade: the player dips to the background and comes back.
@@ -98,6 +119,17 @@ struct NowPlayingScreen: View {
     /// Newest transfer-log entry when the pending send began; a newer non-cache entry at the end
     /// of the send means it succeeded.
     @State private var pendingSinceLogID: UUID?
+
+    // Photo / song card stack: the picture not on the display peeks out behind the cover.
+    /// The front cover is the uploaded photo (set when the board confirms the photo).
+    @State private var shownIsPhoto = false
+    /// Latest song cover shown, kept while a photo covers it.
+    @State private var songImage: UIImage?
+    /// Last uploaded photo, decoded once.
+    @State private var photoImage: UIImage?
+    /// The back card was tapped and its swap is on the way (it slides out a little further).
+    @State private var peekNudge = false
+    @State private var nudgeGen = 0
 
     // Progress line under the cover (see `LiveStrip`).
     @State private var stripRun: StripRun = .idle
@@ -134,11 +166,14 @@ struct NowPlayingScreen: View {
         }
         .onAppear {
             shownImage = Self.decode(bleManager.currentAlbumArt)
-            if layoutNerd != nerdMode {
-                layoutNerd = nerdMode
+            shownIsPhoto = bleManager.photoHold
+            if !shownIsPhoto { songImage = shownImage }
+            photoImage = Self.decode(bleManager.lastPhotoJPEG)
+            if layoutNerd != nerdOn {
+                layoutNerd = nerdOn
             }
         }
-        .onChange(of: nerdMode) { on in
+        .onChange(of: nerdOn) { on in
             applyMode(on)
         }
         .onChange(of: bleManager.currentAlbumArt) { newData in
@@ -147,6 +182,15 @@ struct NowPlayingScreen: View {
             guard bleManager.sendStage != .preparingFresh else { return }
             shownImage = Self.decode(newData)
             pendingImage = nil
+            // Photos always arrive through a fresh send, so anything here is a song cover.
+            shownIsPhoto = false
+            songImage = shownImage
+        }
+        .onChange(of: bleManager.lastPhotoJPEG) { data in
+            photoImage = Self.decode(data)
+        }
+        .onChange(of: shownIsPhoto) { _ in
+            peekNudge = false
         }
         // `sendStage` returns to idle on every exit from processTrack (success, error, skip).
         .onChange(of: bleManager.sendStage) { stage in
@@ -166,6 +210,9 @@ struct NowPlayingScreen: View {
     }
 
     // MARK: Mode switch
+
+    /// The nerd layout shows only while the feature is on in Settings and the icon is toggled on.
+    private var nerdOn: Bool { nerdEnabled && nerdMode }
 
     /// Moves the layout to `on`. Toggling again mid-way retargets the springs (they are interruptible)
     /// and `modeGen` drops any step still scheduled by the previous toggle.
@@ -233,9 +280,12 @@ struct NowPlayingScreen: View {
             // Nothing to mirror without a display: show the song's cover rather than a stale one.
             if succeeded || !bleManager.isConnected {
                 shownImage = pending
+                shownIsPhoto = bleManager.photoHold
+                if !shownIsPhoto { songImage = pending }
             }
             pendingImage = nil
             pendingSinceLogID = nil
+            peekNudge = false
         case .checking:
             break
         }
@@ -277,10 +327,10 @@ struct NowPlayingScreen: View {
             spotifyOn: spotifyManager.isAuthenticated,
             displayOn: bleManager.isConnected,
             onPhotoPicked: { item in showPhoto(item) },
-            extras: HeaderExtras(
+            extras: nerdEnabled ? HeaderExtras(
                 nerdMode: nerdMode,
                 onToggleNerdMode: { nerdMode.toggle() }
-            ),
+            ) : nil,
             onOpen: onOpen
         )
     }
@@ -325,7 +375,23 @@ struct NowPlayingScreen: View {
             backToSpotify()
         } else if let jpeg = bleManager.lastPhotoJPEG {
             sendPhoto(jpeg)
+        } else {
+            return
         }
+        // Feedback until the board has drawn the swap (or ~8 s, if it never does).
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { peekNudge = true }
+        nudgeGen &+= 1
+        let gen = nudgeGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            guard gen == nudgeGen else { return }
+            withAnimation(.easeOut(duration: 0.2)) { peekNudge = false }
+        }
+    }
+
+    /// The picture that is not on the display: the song cover while a photo is up, otherwise the
+    /// last photo (nil until one was uploaded since the app was opened).
+    private var backImage: UIImage? {
+        shownIsPhoto ? songImage : photoImage
     }
 
     // MARK: Layout
@@ -381,11 +447,6 @@ struct NowPlayingScreen: View {
                 .frame(width: side)
                 .matchedGeometryEffect(id: "track", in: playerNS, properties: .position)
                 .padding(.top, 20)
-            if bleManager.photoHold {
-                photoBanner
-                    .frame(width: side)
-                    .padding(.top, 12)
-            }
             PlaybackControls(spotifyManager: spotifyManager)
                 .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
                 .padding(.top, 18)
@@ -424,12 +485,9 @@ struct NowPlayingScreen: View {
         .environment(\.themeTextScale, ArtMetrics.compactTextScale)
     }
 
-    /// Nerd mode under the cover row: the photo banner, then the live details (fixed) + session log.
+    /// Nerd mode under the cover row: the live details (fixed) + session log.
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
         VStack(spacing: 0) {
-            if bleManager.photoHold {
-                photoBanner
-            }
             ThemedDivider()
                 .padding(.top, 12)
             if showsLower {
@@ -445,17 +503,31 @@ struct NowPlayingScreen: View {
         .transition(lowerTransition)
     }
 
-    /// The cover. Tap: back to Spotify while a photo is up, otherwise the last photo again.
+    /// The cover, with the other picture (song cover or last photo) peeking out behind it.
+    /// Tap: back to Spotify while a photo is up, otherwise the last photo again. The front plays the
+    /// board's transition as usual; the back card flips over to the picture it replaced.
     private func art(side: CGFloat) -> some View {
         let photoUp = bleManager.photoHold
         let canReshow = !photoUp && bleManager.lastPhotoJPEG != nil
-        return ArtStage(
-            image: shownImage,
-            side: side,
-            label: artLabel,
-            value: artValue,
-            event: bleManager.transitionEvent
-        )
+        let back = backImage
+        return ZStack {
+            if let back {
+                PeekCard(image: back, side: side)
+                    .rotationEffect(.degrees(peekNudge ? 7 : 4))
+                    .offset(x: PeekCard.peek(for: side, nudged: peekNudge))
+                    .transition(.opacity)
+                    .accessibilityHidden(true)
+            }
+            ArtStage(
+                image: shownImage,
+                side: side,
+                label: artLabel,
+                value: artValue,
+                event: bleManager.transitionEvent
+            )
+        }
+        // Nerd mode: keep the peeking card clear of the track text beside the cover.
+        .padding(.trailing, layoutNerd && back != nil ? PeekCard.peek(for: side, nudged: true) + 6 : 0)
         .contentShape(Rectangle())
         .onTapGesture { coverTapped() }
         .accessibilityAddTraits(photoUp || canReshow ? .isButton : [])
@@ -531,27 +603,6 @@ struct NowPlayingScreen: View {
         return theme.id.text(.displayReady)
     }
 
-    /// Shown while a photo the person uploaded is on the display (Spotify sends are paused).
-    private var photoBanner: some View {
-        HStack(spacing: 10) {
-            Text("Photo on display")
-                .themeText(.footnote)
-                .foregroundStyle(theme.inkSoft)
-            Spacer(minLength: 8)
-            Button {
-                backToSpotify()
-            } label: {
-                Text("Back to Spotify")
-                    .themeText(.rowValue)
-                    .foregroundStyle(theme.ink)
-                    .underline()
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
     private var footerSecondary: String? {
         if let error = spotifyManager.lastError, !error.isEmpty {
             return error
@@ -581,6 +632,66 @@ private struct ScrollIf<Content: View>: View {
             }
         } else {
             content()
+        }
+    }
+}
+
+/// The picture that is not on the display, tucked behind the cover. When it changes (the two
+/// swapped) it flips over on its vertical axis; Reduce Motion: a short crossfade.
+private struct PeekCard: View {
+    let image: UIImage
+    let side: CGFloat
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// What the card shows right now (changes halfway through a flip).
+    @State private var face: UIImage?
+    @State private var angle: Double = 0
+    @State private var gen = 0
+
+    private static let half = 0.17
+
+    /// How far the card sticks out to the right of the cover.
+    static func peek(for side: CGFloat, nudged: Bool) -> CGFloat {
+        (side * (nudged ? 0.12 : 0.07)).rounded()
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous)
+        Image(uiImage: face ?? image)
+            .resizable()
+            .scaledToFill()
+            .frame(width: side, height: side)
+            .clipped()
+            .clipShape(shape)
+            .overlay(shape.stroke(theme.ringOff.opacity(0.6), lineWidth: 1))
+            .brightness(-0.04)
+            .shadow(color: theme.artShadowColor, radius: theme.artShadowRadius, x: 0, y: theme.artShadowY)
+            .rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
+            .onAppear { face = image }
+            .onChange(of: ObjectIdentifier(image)) { _ in flip() }
+    }
+
+    private func flip() {
+        gen &+= 1
+        let g = gen
+        if reduceMotion {
+            withAnimation(.easeInOut(duration: 0.2)) { face = image }
+            return
+        }
+        withAnimation(.easeIn(duration: Self.half)) { angle = 90 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.half) {
+            guard g == gen else { return }
+            var cut = Transaction()
+            cut.disablesAnimations = true
+            withTransaction(cut) {
+                face = image
+                angle = -90
+            }
+            DispatchQueue.main.async {
+                guard g == gen else { return }
+                withAnimation(.easeOut(duration: Self.half + 0.05)) { angle = 0 }
+            }
         }
     }
 }

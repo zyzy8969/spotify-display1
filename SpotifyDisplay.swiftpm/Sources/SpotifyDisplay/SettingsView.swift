@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Settings sheet. Every control is wired to something that already exists in the app:
-/// brightness (BLE), the debug toggle, cache count/clear (BLE), Spotify sign-in/out, and the
+/// brightness (BLE), cache count/clear (BLE), Spotify sign-in/out, and the
 /// Client ID override. The theme picker is the only new setting and is purely visual.
 struct SettingsView: View {
     @ObservedObject var spotifyManager: SpotifyManager
@@ -9,8 +9,11 @@ struct SettingsView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
-    @AppStorage("showDebugInfo") private var showDebugInfo = false
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
+    /// Nerd mode is available: the main screen shows its terminal icon.
+    @AppStorage(NerdMode.enabledKey) private var nerdEnabled = false
+    /// Nerd layout currently on (the terminal icon's state); switched off with the feature.
+    @AppStorage(NerdMode.layoutKey) private var nerdLayout = false
     @State private var showTransitions = false
     @State private var showLifetimeStats = false
     @ScaledMetric(relativeTo: .body) private var chevronSize: CGFloat = 14
@@ -28,16 +31,16 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 SheetHeader(title: theme.id.text(.settings)) { dismiss() }
+                // The display itself: how it looks and draws.
                 brightnessRow
                 statusLightRow
-                statsToggleRow
+                transitionsRow
                 ThemedDivider()
                 ThemePicker(selection: $themeRaw)
                 ThemedDivider()
-                VStack(alignment: .leading, spacing: 4) {
-                    transitionsRow
-                    lifetimeStatsRow
-                }
+                // Numbers: nerd mode (live, on the main screen) and the all-time totals.
+                nerdModeRow
+                lifetimeStatsRow
                 ThemedDivider()
                 cacheRows
                 ThemedDivider()
@@ -90,6 +93,25 @@ struct SettingsView: View {
         }
     }
 
+    /// Turns nerd mode on as a feature: the terminal icon appears at the top of the main screen.
+    private var nerdModeRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $nerdEnabled) {
+                Text(theme.id.text(.showStats))
+                    .themeText(.row)
+                    .foregroundStyle(theme.ink)
+            }
+            .toggleStyle(ThemedToggleStyle())
+            .onChange(of: nerdEnabled) { on in
+                if !on { nerdLayout = false }
+            }
+            Text(theme.id.text(.showStatsHint))
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var brightnessRow: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
@@ -113,21 +135,6 @@ struct SettingsView: View {
         }
     }
 
-    private var statsToggleRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle(isOn: $showDebugInfo) {
-                Text(theme.id.text(.showStats))
-                    .themeText(.row)
-                    .foregroundStyle(theme.ink)
-            }
-            .toggleStyle(ThemedToggleStyle())
-            Text(theme.id.text(.showStatsHint))
-                .themeText(.footnote)
-                .foregroundStyle(theme.inkSoft)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     /// Opens the transition picker (which transitions the display may use, with live examples).
     private var transitionsRow: some View {
         navRow(title: theme.id.text(.transitionsRow)) {
@@ -142,7 +149,8 @@ struct SettingsView: View {
 
     /// Opens the general transfer stats (totals, cache counts, averages, recent transfers).
     private var lifetimeStatsRow: some View {
-        navRow(title: theme.id.text(.lifetimeStats)) {
+        // Nothing to pick on this page, so no "Choose": just the chevron.
+        navRow(title: theme.id.text(.lifetimeStats), showsChoose: false) {
             showLifetimeStats = true
         }
         .sheet(isPresented: $showLifetimeStats) {
@@ -152,18 +160,20 @@ struct SettingsView: View {
         }
     }
 
-    /// A row that opens another page: title, then "Choose" and a chevron.
-    private func navRow(title: String, action: @escaping () -> Void) -> some View {
+    /// A row that opens another page: title, then "Choose" (pages where you pick something) and a chevron.
+    private func navRow(title: String, showsChoose: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(alignment: .center, spacing: 8) {
                 Text(title)
                     .themeText(.row)
                     .foregroundStyle(theme.ink)
                 Spacer(minLength: 8)
-                Text(theme.id.text(.choose))
-                    .themeText(.rowValue)
-                    .foregroundStyle(theme.inkSoft)
-                    .accessibilityHidden(true)
+                if showsChoose {
+                    Text(theme.id.text(.choose))
+                        .themeText(.rowValue)
+                        .foregroundStyle(theme.inkSoft)
+                        .accessibilityHidden(true)
+                }
                 GlyphIcon(glyph: .chevronLeft, color: theme.inkSoft, size: chevronSize)
                     .rotationEffect(.degrees(180))
                     .accessibilityHidden(true)
