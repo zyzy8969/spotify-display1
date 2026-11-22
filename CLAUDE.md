@@ -203,7 +203,7 @@ not built; ask before starting them.
 
 ## Hardware pins (do not change without asking)
 
-LCD: BL 20, RST 42, DC 38, CS 39, MOSI 41, SCLK 40. SD: CS 17, MISO 16, MOSI 18, CLK 21.
+LCD: BL 20, RST 42, DC 38, CS 39, MOSI 41, SCLK 40. SD: CS 17, MISO 16, MOSI 18, CLK 21. Status LED (WS2812B): 15 — blue cache, orange transfer, green done, red error; driven only from `loop()`.
 Display 240x240, frame size 115,200 bytes. **Display SPI runs at 40 MHz — do not raise it.** 80 MHz
 (above the ST7789's ~62.5 MHz rating) garbled transfers: covers logged as drawn never appeared, single
 lines, stray squares (webcam-verified 2026-11-20). The S3's SPI clock is 80 MHz / integer, so there is
