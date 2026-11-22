@@ -8,6 +8,7 @@
 #include <SPI.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <vector>
 
 // Bluetooth LE includes
 #include <BLEDevice.h>
@@ -2403,30 +2404,41 @@ void clearCacheDirectory() {
     clearCacheIndex();
     return;
   }
-  uint32_t removed = 0;
+  // Collect first, delete after: removing entries while openNextFile() walks a FAT directory can
+  // skip entries. And File::name() is the BASENAME on core 2.0.x ("v1_ab..bin"), so the old
+  // SD.remove(f.name()) had no "/cache/" prefix, failed every time, and the phone was still told
+  // the cache was empty. Also sweeps "*.tmp" left by a power loss mid-save.
+  std::vector<String> names;
   for (;;) {
     File f = root.openNextFile();
     if (!f) break;
     if (!f.isDirectory()) {
-      String name = String(f.name());
-      name.toLowerCase();
-      if (name.endsWith(".bin")) {
-        String path = String(f.name());
-        uint8_t key[16];
-        uint8_t version = 0;
-        if (parseCacheFilenameToKey(path, key, &version)) {
-          if (SD.remove(path)) {
-            cacheIndexRemove(key);
-            removed++;
-          }
-        } else if (SD.remove(path)) {
-          removed++;
-        }
-      }
+      String base = String(f.name());
+      int slash = base.lastIndexOf('/');
+      if (slash >= 0) base = base.substring(slash + 1);
+      String lower = base;
+      lower.toLowerCase();
+      if (lower.endsWith(".bin") || lower.endsWith(".tmp")) names.push_back(base);
     }
     f.close();
   }
   root.close();
+
+  uint32_t removed = 0;
+  uint32_t failed = 0;
+  for (const String& base : names) {
+    String path = String("/cache/") + base;
+    if (SD.remove(path)) {
+      removed++;
+      uint8_t key[16];
+      uint8_t version = 0;
+      if (parseCacheFilenameToKey(base, key, &version)) cacheIndexRemove(key);
+    } else {
+      failed++;
+      Serial.printf("WARN: cache clear could not remove %s\n", path.c_str());
+    }
+  }
+  if (failed) Serial.printf("WARN: cache clear left %lu file(s)\n", (unsigned long)failed);
   clearCacheIndex();
   unsigned long elapsed = millis() - start;
   Serial.printf("Cache clear complete: removed=%lu elapsed=%lums\n", (unsigned long)removed, elapsed);

@@ -1,54 +1,45 @@
 #!/usr/bin/env python3
 """Generate ios/SpotifyDisplay.xcodeproj/project.pbxproj for SpotifyDisplay iOS app."""
+import hashlib
 import os
-import uuid
 
-def uid():
-    return uuid.uuid4().hex[:24].upper()
+# Object IDs are derived from a stable name, not random, so re-running the script on the
+# same sources produces byte-identical output. CI relies on that: it regenerates the project
+# and fails if the committed copy differs (i.e. someone added a Swift file and forgot to run this).
+def uid(key):
+    return hashlib.md5(key.encode("utf-8")).hexdigest()[:24].upper()
 
-PROJECT = uid()
-TARGET = uid()
-MAIN_GROUP = uid()
-PRODUCTS_GROUP = uid()
-SOURCES_PHASE = uid()
-FRAMEWORKS_PHASE = uid()
-RESOURCES_PHASE = uid()
-APP_REF = uid()
-SPOTIFY_GROUP = uid()
-PROJECT_CONF_LIST = uid()
-TARGET_CONF_LIST = uid()
-PROJ_DEBUG = uid()
-PROJ_REL = uid()
-TGT_DEBUG = uid()
-TGT_REL = uid()
+PROJECT = uid("project")
+TARGET = uid("target")
+MAIN_GROUP = uid("group:main")
+PRODUCTS_GROUP = uid("group:products")
+SOURCES_PHASE = uid("phase:sources")
+FRAMEWORKS_PHASE = uid("phase:frameworks")
+RESOURCES_PHASE = uid("phase:resources")
+APP_REF = uid("ref:app")
+SPOTIFY_GROUP = uid("group:spotify")
+PROJECT_CONF_LIST = uid("conflist:project")
+TARGET_CONF_LIST = uid("conflist:target")
+PROJ_DEBUG = uid("conf:project:debug")
+PROJ_REL = uid("conf:project:release")
+TGT_DEBUG = uid("conf:target:debug")
+TGT_REL = uid("conf:target:release")
 
-swift_files = [
-    "AppDelegate.swift",
-    "BLEManager.swift",
-    "ContentView.swift",
-    "CrayonShapes.swift",
-    "Extensions.swift",
-    "ImageProcessor.swift",
-    "KeychainHelper.swift",
-    "Models.swift",
-    "NowPlayingView.swift",
-    "SettingsView.swift",
-    "SignedOutView.swift",
-    "SpotifyAuthPresenter.swift",
-    "SpotifyDisplayApp.swift",
-    "SpotifyManager.swift",
-    "StatsView.swift",
-    "Theme.swift",
-    "ThemeComponents.swift",
-    "ThemeCopy.swift",
-    "ThemeTypography.swift",
-]
+# Every .swift file in the package's source folder (top level), so a new file can't be missed.
+SOURCES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "SpotifyDisplay.swiftpm", "Sources", "SpotifyDisplay",
+)
+swift_files = sorted(
+    f for f in os.listdir(SOURCES_DIR)
+    if f.endswith(".swift") and os.path.isfile(os.path.join(SOURCES_DIR, f))
+)
 
 file_refs = {}
 build_files = {}
 for name in swift_files:
-    file_refs[name] = uid()
-    build_files[name] = uid()
+    file_refs[name] = uid("fileref:" + name)
+    build_files[name] = uid("buildfile:" + name)
 
 lines = []
 

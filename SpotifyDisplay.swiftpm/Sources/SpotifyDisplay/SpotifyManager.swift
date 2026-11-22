@@ -152,6 +152,9 @@ final class SpotifyManager: ObservableObject {
 
         let verifier = Self.codeVerifier()
         let challenge = Self.codeChallenge(for: verifier)
+        // OAuth `state`: PKCE already stops a stolen code being redeemed, but `state` also stops
+        // another app registered for spotifydisplay:// from injecting a callback we never asked for.
+        let state = Self.randomState()
 
         var comp = URLComponents(string: "https://accounts.spotify.com/authorize")!
         comp.queryItems = [
@@ -161,7 +164,8 @@ final class SpotifyManager: ObservableObject {
             // user-read-playback-state: needed by GET /me/player/queue for cover prefetch.
             URLQueryItem(name: "scope", value: "user-read-currently-playing user-read-playback-state user-modify-playback-state"),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
-            URLQueryItem(name: "code_challenge", value: challenge)
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "state", value: state)
         ]
 
         guard let authURL = comp.url else {
@@ -194,6 +198,10 @@ final class SpotifyManager: ObservableObject {
                             cont.resume(throwing: NSError(domain: "SpotifyAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: desc]))
                             return
                         }
+                        guard pieces.first(where: { $0.name == "state" })?.value == state else {
+                            cont.resume(throwing: SpotifyDisplayError.authFailed)
+                            return
+                        }
                         guard let c = pieces.first(where: { $0.name == "code" })?.value else {
                             cont.resume(throwing: SpotifyDisplayError.authFailed)
                             return
@@ -224,7 +232,9 @@ final class SpotifyManager: ObservableObject {
     }
 
     func signOut() {
-        KeychainHelper.delete(account: kRefresh)
+        if KeychainHelper.delete(account: kRefresh) != errSecSuccess {
+            lastError = "Couldn't remove the saved sign-in; you may still be signed in next launch"
+        }
         accessToken = nil
         accessExpiry = nil
         isAuthenticated = false
@@ -278,8 +288,12 @@ final class SpotifyManager: ObservableObject {
             req.httpMethod = method
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             let (_, response) = try await URLSession.shared.data(for: req)
-            if let http = response as? HTTPURLResponse, http.statusCode == 403 {
-                lastError = "Requires premium or re-sign-in for new permissions"
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 403 {
+                    lastError = "Requires premium or re-sign-in for new permissions"
+                } else if !(200 ... 299).contains(http.statusCode) {
+                    lastError = http.statusCode == 404 ? "No active Spotify device" : "Spotify HTTP \(http.statusCode)"
+                }
             }
             // Pause/play should not force a dedupe reset + resend for the same track/art.
             if endpoint == "pause" || endpoint == "play" {
@@ -315,8 +329,19 @@ final class SpotifyManager: ObservableObject {
         do {
             try await refreshAccessToken(clientId: clientId, refreshToken: refresh)
             isAuthenticated = true
+        } catch SpotifyDisplayError.tokenRejected(let status, let code, let description) {
+            if (status == 400 || status == 401), code == "invalid_grant" || code == "invalid_client" {
+                lastError = "Session expired — sign in again"  // genuinely revoked / rotated away
+            } else {
+                lastError = "Spotify: " + (description ?? code ?? "HTTP \(status)")
+            }
+        } catch is URLError {
+            // Offline / timeout at launch: the saved refresh token is still valid. Stay signed in;
+            // `ensureAccessTokenFresh` refreshes on the first poll once the network is back.
+            lastError = "Can't reach Spotify — will retry"
+            isAuthenticated = true
         } catch {
-            lastError = "Session expired — sign in again"
+            lastError = error.localizedDescription
         }
     }
 
@@ -993,8 +1018,9 @@ final class SpotifyManager: ObservableObject {
 
     /// Refreshes access token before expiry so polling does not rely only on HTTP 401.
     private func ensureAccessTokenFresh() async throws {
-        guard let exp = accessExpiry else { return }
-        guard Date() >= exp else { return }
+        // Refresh when there is no token at all (e.g. launch was offline) or it has expired.
+        if accessToken != nil, let exp = accessExpiry, Date() < exp { return }
+        if accessToken != nil, accessExpiry == nil { return }  // no expires_in: rely on HTTP 401
         let clientId = clientIdStored
         guard let refresh = KeychainHelper.load(account: kRefresh), !clientId.isEmpty else {
             throw SpotifyAPIError.noToken
@@ -1051,8 +1077,16 @@ final class SpotifyManager: ObservableObject {
         req.httpBody = Self.formEncode(body).data(using: .utf8)
 
         let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
-            throw SpotifyDisplayError.authFailed
+        try applyTokenResponse(data, response)
+    }
+
+    /// Shared by code exchange and refresh: surfaces Spotify's error body, stores the tokens, and
+    /// reports a Keychain failure instead of silently signing the user out on the next launch.
+    private func applyTokenResponse(_ data: Data, _ response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse else { throw SpotifyAPIError.badResponse }
+        guard (200 ... 299).contains(http.statusCode) else {
+            let body = try? JSONDecoder().decode(TokenErrorBody.self, from: data)  // non-JSON body: status still surfaces
+            throw SpotifyDisplayError.tokenRejected(status: http.statusCode, code: body?.error, description: body?.error_description)
         }
 
         let tr = try JSONDecoder().decode(TokenResponse.self, from: data)
@@ -1060,9 +1094,14 @@ final class SpotifyManager: ObservableObject {
         if let sec = tr.expires_in {
             accessExpiry = Date().addingTimeInterval(TimeInterval(sec - 60))
         }
-        if let rt = tr.refresh_token {
-            KeychainHelper.save(rt, account: kRefresh)
+        if let rt = tr.refresh_token, KeychainHelper.save(rt, account: kRefresh) != errSecSuccess {
+            lastError = "Couldn't save sign-in; you may need to sign in again next launch"
         }
+    }
+
+    private struct TokenErrorBody: Decodable {
+        let error: String?
+        let error_description: String?
     }
 
     /// In-flight refresh shared by every caller. Spotify rotates refresh tokens, so two concurrent
@@ -1095,18 +1134,7 @@ final class SpotifyManager: ObservableObject {
         req.httpBody = Self.formEncode(body).data(using: .utf8)
 
         let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
-            throw SpotifyDisplayError.authFailed
-        }
-
-        let tr = try JSONDecoder().decode(TokenResponse.self, from: data)
-        accessToken = tr.access_token
-        if let sec = tr.expires_in {
-            accessExpiry = Date().addingTimeInterval(TimeInterval(sec - 60))
-        }
-        if let rt = tr.refresh_token {
-            KeychainHelper.save(rt, account: kRefresh)
-        }
+        try applyTokenResponse(data, response)
     }
 
     private static func formEncode(_ dict: [String: String]) -> String {
@@ -1117,9 +1145,23 @@ final class SpotifyManager: ObservableObject {
         }.joined(separator: "&")
     }
 
+    /// Cryptographic random bytes. Falls back to the system RNG (also CSPRNG-backed on iOS) rather
+    /// than returning zeros, which would make the PKCE verifier / state predictable.
+    private static func secureRandomBytes(_ count: Int) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: count)
+        if SecRandomCopyBytes(kSecRandomDefault, count, &bytes) != errSecSuccess {
+            var rng = SystemRandomNumberGenerator()
+            bytes = (0 ..< count).map { _ in UInt8.random(in: .min ... .max, using: &rng) }
+        }
+        return bytes
+    }
+
+    private static func randomState() -> String {
+        secureRandomBytes(16).map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func codeVerifier() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let bytes = secureRandomBytes(32)
         return Data(bytes).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -1181,4 +1223,15 @@ private enum SpotifyAPIError: Error {
     case noToken
     case badResponse
     case http(Int)
+}
+
+extension SpotifyAPIError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized: return "Spotify rejected the session (401)."
+        case .noToken: return "Not signed in to Spotify."
+        case .badResponse: return "Unexpected response from Spotify."
+        case .http(let code): return "Spotify HTTP \(code)."
+        }
+    }
 }

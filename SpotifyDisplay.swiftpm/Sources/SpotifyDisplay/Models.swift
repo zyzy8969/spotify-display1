@@ -56,6 +56,8 @@ enum SpotifyDisplayError: Error {
     case bleTransferRejected(String)
     case authFailed
     case missingClientId
+    /// Spotify's token endpoint answered non-2xx; `code`/`description` are its `error` / `error_description`.
+    case tokenRejected(status: Int, code: String?, description: String?)
 }
 
 extension SpotifyDisplayError: LocalizedError {
@@ -67,6 +69,8 @@ extension SpotifyDisplayError: LocalizedError {
         case .bleTimeout: return "Timed out waiting for the display."
         case .authFailed: return "Spotify sign-in failed."
         case .missingClientId: return "Spotify Client ID is missing."
+        case .tokenRejected(let status, let code, let description):
+            return "Spotify: " + (description ?? code ?? "HTTP \(status)")
         }
     }
 }

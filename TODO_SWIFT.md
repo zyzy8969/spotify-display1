@@ -4,6 +4,34 @@
 some bugs i forgot to put in this idk if they r solved  (4-byte cache key truncation, awaitWriteWindow lost-wakeup race, the two timeout-task continuation races, the drawHorizontalSplit/drawBarnDoors comment-vs-code mismatch, the per-pixel SPI in the diagonal/circular transitions)
 ---
 
+## 2026-11-22 — what needs device verification
+
+Snapshot in `PROJECT_STATUS.md`. Confirmed on hardware: brightness (2026-11-19) and the 40 MHz SPI clock
+(2026-11-20). Everything below is built but has no recorded on-device pass. Run `docs/VALIDATION_CHECKLIST.md`
+as well. The April "Active now" list below is superseded: brightness is confirmed, art sizing and the full-screen
+layout are fixed in code (21f3473, 92e97fd), and the skip-render artifact is awaiting a hardware check.
+
+1. **Skip stress, 5-10 rapid skips mid-transfer.** No old song's reply answers the new one; no "cache hit"
+   for a song that was never drawn; no frame that draws one line and stops (ac3633d, b0305d8).
+2. **Whole frames only.** A cache hit right after a fresh transfer shows the finished frame, not a mix
+   (e11a890, 7046add).
+3. **Boot.** Panel black, then the white startup screen, then BLE connects before the greeting; the backlight
+   stays off until the panel is cleared (59d5742, e23e7ca).
+4. **Disconnect mid-transfer.** Waiting screen restores cleanly; the current song is resent after reconnect
+   without a skip (d2e8c98).
+5. **Locked phone.** Skip from the lock screen; the display follows within about 1-2 s, and still does after
+   10+ minutes locked. The 1 s `HB` must not be read as a reply (f934323).
+6. **Cache telemetry.** `CACHE_HIT_MS` / `CACHE_MISS_MS` are logged; the app shows a cache-hit state only after
+   `CACHE_RENDERED`; clear-cache count drops.
+7. **Themes** (Crayon, Quiet, Serif): safe areas on Face ID and SE; art does not change size during a fresh
+   send; preview swaps when the keychain does (21f3473, 92e97fd, 465b5d4).
+8. **Link settings.** The serial log shows the 15 ms interval and `BLE: PHY tx=… rx=…` reporting 2M. Time one
+   fresh send before and after (7a3b871, 5e8b523). Not measured yet.
+9. **Prefetch.** The next queued cover lands as a store-only frame, never draws, and never sends SUCCESS; the
+   following song's cache check is then a hit (87cda77, 5e8b523).
+10. **New transitions 28-51.** Each draws once without freezing. Check the slowest against the 8 s SUCCESS wait;
+    a false timeout there would show as a failed send on a good frame.
+
 ## GitHub Current Focus (April 2026)
 
 ### Done recently
@@ -128,15 +156,17 @@ yet verified on a device** — see `docs/VALIDATION_CHECKLIST.md` › "iOS UI (t
 - [ ] No `state` parameter `[app]` — low risk under `ASWebAuthenticationSession`, add anyway.
 
 ### Hygiene / process
-- [ ] **Pin `platform = espressif32`** — unpinned, and core 3.x inverts the meaning of the
-  brightness fix. Highest-value hygiene item.
+- [x] **Pin `platform = espressif32`** — done (748713d): `platformio.ini` pins `espressif32@6.5.0`
+  (Arduino core 2.0.14). Core 3.x would invert the meaning of the brightness fix.
 - [ ] Remove `AgentDebugLog` — dead Cursor instrumentation shipping in the app `[app]`.
 - [ ] CI: fail on Swift warnings; regenerate the Xcode project to catch a forgotten
   `gen_xcodeproj.py`. Both free, repo is public so Actions minutes are free.
 - [ ] `sdkconfig.defaults` is inert under `framework = arduino` — delete or mark as such `[fw]`.
-- [ ] Docs say a 32 s transfer timeout; code says 8 s.
-- [ ] `src/main.cpp:45` claims GPIO1 as LCD bus MISO; the LCD has no MISO and GPIO1 is a free
-  header pin. Pass `GFX_NOT_DEFINED` `[fw]`.
+- [x] Docs say a 32 s transfer timeout; code says 8 s. — Done 2026-11-22: `BLE_PROTOCOL.md` and
+  `DEV_HANDOFF.md` now say 8 s. Still say 32 s: `CLAUDE.md` (owner to fix), the comment at
+  `BLEManager.swift:106`, and the comment at `src/main.cpp:97`.
+- [ ] `src/main.cpp:52` (was :45) claims GPIO1 as LCD bus MISO; the LCD has no MISO and GPIO1 is a free
+  header pin. Pass `GFX_NOT_DEFINED` `[fw]`. **Pin config: ask before changing.**
 - [ ] Perf, no visual change `[app]`: `CIContext.render(toBitmap:)` removes a whole redundant
   rasterisation; `vDSP_vfltu8` replaces the UInt8→Float loop.
 - [ ] Move `SpotifyDisplay_UI_Spec.md` into `docs/` so it is versioned with the code.

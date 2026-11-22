@@ -1,11 +1,16 @@
 # Dev handoff — iOS BLE / background work
 
-Last updated: 2026-04-15
+Last updated: 2026-04-15 — **stale (historical record).** Current state is in `PROJECT_STATUS.md`
+(2026-11-22), and the device checklist is the 2026-11-22 section of `TODO_SWIFT.md`. The "What still needs
+verification" list below is superseded.
+
+Corrected 2026-11-22: the SUCCESS wait is **8 s**, not 32 s (`BLEManager.swift`, `Task.sleep` of
+`8_000_000_000` ns, and `boardIdleTimeoutNs`). The 32 s figure below was wrong when written.
 
 ## What was committed
 
 - **Info.plist:** `UIBackgroundModes` → `bluetooth-central`.
-- **BLEManager:** Core Bluetooth state restoration (`CBCentralManagerOptionRestoreIdentifierKey`, `willRestoreState`, reconnect / rediscover services), `UIApplication.beginBackgroundTask` for the full `processTrack` scope, cancellable 32s post-chunk `SUCCESS` timeout.
+- **BLEManager:** Core Bluetooth state restoration (`CBCentralManagerOptionRestoreIdentifierKey`, `willRestoreState`, reconnect / rediscover services), `UIApplication.beginBackgroundTask` for the full `processTrack` scope, cancellable 8s post-chunk `SUCCESS` timeout.
 - **ContentView:** `scenePhase`-aware copy about limited background Spotify updates + always-visible expectation line.
 - **SpotifyManager:** Display failure cooldown (same track), short global backoff after any display error, and `lastSentToDisplayTrackId` when a transfer completes after the UI track has already changed (avoids 1 Hz resend loops).
 - **Firmware cache (`src/main.cpp`):** startup in-memory cache index, versioned cache filenames (`v1_*.bin` with legacy fallback), atomic temp-write + rename, CRC corruption counters/recovery deletes, deterministic clear flow with immediate count publish and timing telemetry.
@@ -33,5 +38,5 @@ Last updated: 2026-04-15
 
 ## Optional follow-ups if tests fail
 
-- If timeouts persist: measure ESP32 serial from last chunk to post-process `SUCCESS`; tune the 32s ceiling in `BLEManager.sendRGB565`.
+- If timeouts persist: measure ESP32 serial from last chunk to post-process `SUCCESS`; tune the 8s ceiling in `BLEManager.sendRGB565`.
 - If restore misbehaves on a specific OS version: narrow `applyRestoredPeripheral` for `.disconnecting` / edge states.

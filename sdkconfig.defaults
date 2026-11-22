@@ -1,3 +1,7 @@
+# NOTE: INERT. platformio.ini uses `framework = arduino`, which ignores sdkconfig.defaults
+# (it only applies to framework = espidf). PSRAM is enabled by board_build.arduino.memory_type
+# = qio_opi in platformio.ini, not by this file. Kept for reference only.
+#
 # Enable PSRAM (8MB external RAM on ESP32-S3R8)
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y

@@ -15,6 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # gen_xcodeproj.py is deterministic: if regenerating changes the committed project, a Swift
+      # file was added/renamed without re-running it and this build would silently miss that file.
+      - name: Check Xcode project is up to date
+        run: |
+          python3 ios/gen_xcodeproj.py
+          git diff --exit-code -- ios/SpotifyDisplay.xcodeproj || {
+            echo "::error::ios/SpotifyDisplay.xcodeproj is stale. Run: python ios/gen_xcodeproj.py and commit."
+            exit 1
+          }
+
       - name: Build app (no code signing)
         run: |
           xcodebuild \
