@@ -12,6 +12,8 @@ struct LifetimeStatsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 SheetHeader(title: theme.id.text(.lifetimeStats)) { dismiss() }
+                AllTimeStats(bleManager: bleManager)
+                ThemedDivider()
                 GeneralStatsView(bleManager: bleManager, spotifyManager: spotifyManager)
             }
             .padding(.horizontal, theme.margin + 4)
