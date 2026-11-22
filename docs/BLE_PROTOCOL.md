@@ -12,6 +12,9 @@ Changes in 1.13 (more transitions). Additive and backward compatible both ways.
   Infinite Zoom Out, CRT Off, Matrix Rain, Neon Scan, Glass Sweep, Pixelate, VHS Glitch. Names are the
   `TRANSITION:<name>` strings in `getTransitionName`. 52-80 count as quick (used for new songs).
   A forced index the board doesn't know (an older board) still means "random".
+  97 Cube Up and 98 Cube Down were added later in 1.13. **Retired before release:** 75-80 (neon edges)
+  and 92 (Matrix Rain); they are never picked at random and the app no longer lists them.
+  Every play now runs at a random speed of 0.75x-1.3x (firmware only; nothing on the wire changes).
 - **Mask is 128 bits.** Same 20-byte write: magic + mask bits 0-63 (`u64` LE) + bits 64-127 (`u64` LE,
   the former padding). **Bit 127 set** marks a 1.13 mask; without it (a 1.12 app sends zeros) the board
   treats indices 64+ as enabled. 1.12 firmware ignores the upper half, so a 1.13 app works with it.

@@ -91,12 +91,6 @@ enum TransitionCatalog {
         .init(id: 72, name: "Wheel", quick: true, blurb: "Four spokes sweep round"),
         .init(id: 73, name: "Random Bars", quick: true, blurb: "Horizontal bars pop in at random"),
         .init(id: 74, name: "Random Bars V", quick: true, blurb: "Vertical bars pop in at random"),
-        .init(id: 75, name: "Neon Iris", quick: true, blurb: "Iris with an electric-cyan edge"),
-        .init(id: 76, name: "Radar Sweep", quick: true, blurb: "Radar sweep with a green phosphor edge"),
-        .init(id: 77, name: "Laser Wipe", quick: true, blurb: "A magenta laser line wipes across"),
-        .init(id: 78, name: "Aqua Spiral", quick: true, blurb: "Spiral with an Aqua-blue edge"),
-        .init(id: 79, name: "Plasma Diamond", quick: true, blurb: "Diamond iris with a magenta edge"),
-        .init(id: 80, name: "Orange Box", quick: true, blurb: "Square opens with an iPod-orange edge"),
         .init(id: 81, name: "Push Right", quick: false, blurb: "New cover pushes the old one out to the right"),
         .init(id: 82, name: "Card Stack Left", quick: false, blurb: "New cover slides over from the left"),
         .init(id: 83, name: "Cube Turn Reverse", quick: false, blurb: "Cube rotates the other way"),
@@ -108,11 +102,12 @@ enum TransitionCatalog {
         .init(id: 89, name: "Zoom Out", quick: false, blurb: "The old cover shrinks away into the centre"),
         .init(id: 90, name: "Infinite Zoom Out", quick: false, blurb: "Camera pulls back out of the old cover"),
         .init(id: 91, name: "CRT Off", quick: false, blurb: "Old TV switches off to a line, new one switches on"),
-        .init(id: 92, name: "Matrix Rain", quick: false, blurb: "Green code rains the new cover in"),
         .init(id: 93, name: "Neon Scan", quick: false, blurb: "Cyan scan line with a glowing grid"),
         .init(id: 94, name: "Glass Sweep", quick: false, blurb: "Glossy Aero-style glint sweeps across"),
         .init(id: 95, name: "Pixelate", quick: false, blurb: "Breaks into big pixels and sharpens back"),
-        .init(id: 96, name: "VHS Glitch", quick: false, blurb: "Tape-tracking tears and colour fringes")
+        .init(id: 96, name: "VHS Glitch", quick: false, blurb: "Tape-tracking tears and colour fringes"),
+        .init(id: 97, name: "Cube Up", quick: false, blurb: "Cube rolls the old cover away upward"),
+        .init(id: 98, name: "Cube Down", quick: false, blurb: "Cube rolls the old cover away downward")
     ]
 
     /// Themes for the picker, so a whole family (e.g. everything that slides) can be switched at once.
@@ -124,9 +119,8 @@ enum TransitionCatalog {
     }
 
     static let groups: [Group] = [
-        Group(name: "Y2K tech", ids: [91, 92, 93, 94, 95, 96]),
-        Group(name: "Neon edges", ids: [75, 76, 77, 78, 79, 80]),
-        Group(name: "Sliding & pushing", ids: [21, 81, 18, 82, 30, 83, 23, 35, 85]),
+        Group(name: "Y2K tech", ids: [91, 93, 94, 95, 96]),
+        Group(name: "Sliding & pushing", ids: [21, 81, 18, 82, 30, 83, 97, 98, 23, 35, 85]),
         Group(name: "Wipes & sweeps", ids: [0, 52, 1, 2, 6, 7, 66, 67, 9, 28, 84, 43, 56, 72, 48, 61, 51, 69]),
         Group(name: "Splits & blinds", ids: [12, 64, 13, 65, 14, 8, 49, 37, 73, 74]),
         Group(name: "Shapes & irises", ids: [3, 40, 53, 41, 54, 42, 55, 44, 57, 11, 63, 70, 71,
@@ -207,11 +201,12 @@ enum TransitionPrefs {
 /// renderer; the rest move or fade whole covers. The app's versions are approximations of the board's.
 enum TransitionMode {
     case threshold, crossfade, push, cardStack, flip, cube, zoomPunch, infiniteZoom
-    case mirrored, zoomOut, infiniteZoomOut, crt, pixelate, vhs
+    case mirrored, cubeV, zoomOut, infiniteZoomOut, crt, pixelate, vhs
 
     static func of(_ id: Int) -> TransitionMode {
         switch id {
         case 81, 82, 83: return .mirrored
+        case 97, 98: return .cubeV
         case 89: return .zoomOut
         case 90: return .infiniteZoomOut
         case 91: return .crt
@@ -278,18 +273,11 @@ struct PreviewVariant {
         72: .init(base: 1016),
         73: .init(base: 1017),
         74: .init(base: 1017, tr: true),
-        75: .init(base: 40, tint: Color(red: 0, green: 1, blue: 1)),
-        76: .init(base: 43, tint: Color(red: 0, green: 1, blue: 0)),
-        77: .init(base: 1012, tr: true, tint: Color(red: 1, green: 0, blue: 1)),
-        78: .init(base: 50, tint: Color(red: 0, green: 0.8, blue: 1)),
-        79: .init(base: 41, tint: Color(red: 1, green: 0, blue: 1)),
-        80: .init(base: 1013, tint: Color(red: 1, green: 0.55, blue: 0)),
         84: .init(base: 28, mx: true),
         85: .init(base: 35, mx: true),
         86: .init(base: 25, my: true),
         87: .init(base: 26, my: true),
         88: .init(base: 31, my: true),
-        92: .init(base: 1092, tint: Color(red: 0.2, green: 1, blue: 0.3)),
         93: .init(base: 1, tint: Color(red: 0, green: 0.9, blue: 1)),
         94: .init(base: 1019, tint: Color(white: 1))
     ]
@@ -538,6 +526,17 @@ struct TransitionStage<Old: View, New: View>: View {
                     }
                     .scaleEffect(x: -1, y: 1)
                     .frame(width: w, height: h)
+                case .cubeV:
+                    // 97 rolls up, 98 rolls down.
+                    let up: CGFloat = id == 97 ? 1 : -1
+                    old.frame(width: w, height: h)
+                        .rotation3DEffect(.degrees(Double(90 * p * up)), axis: (x: 1, y: 0, z: 0),
+                                          anchor: up > 0 ? .bottom : .top, perspective: 0.4)
+                        .offset(y: -h * p * up)
+                    new.frame(width: w, height: h)
+                        .rotation3DEffect(.degrees(Double(-90 * (1 - p) * up)), axis: (x: 1, y: 0, z: 0),
+                                          anchor: up > 0 ? .top : .bottom, perspective: 0.4)
+                        .offset(y: h * (1 - p) * up)
                 case .zoomOut:
                     // Ease-in-back: grows a touch, then shrinks away.
                     let c: CGFloat = 1.70158

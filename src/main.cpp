@@ -252,12 +252,16 @@ enum TransitionType {
   TRANSITION_GLASS_SWEEP = 94,
   TRANSITION_PIXELATE = 95,
   TRANSITION_VHS_GLITCH = 96,
-  TRANSITION_COUNT               // Total number of slots (including retired)
+  TRANSITION_CUBE_UP = 97,
+  TRANSITION_CUBE_DOWN = 98,
+  TRANSITION_COUNT              // Total number of slots (including retired)
 };
 
 static inline bool isRetiredTransition(TransitionType t) {
   return t == TRANSITION_RETIRED_SLIDE || t == TRANSITION_RETIRED_CURTAIN ||
-         t == TRANSITION_RETIRED_ZIGZAG;
+         t == TRANSITION_RETIRED_ZIGZAG ||
+         (t >= 75 && t <= 80) ||  // neon edges: owner didn't want them (2026-11-22)
+         t == TRANSITION_MATRIX_RAIN;  // owner didn't like it (2026-11-22)
 }
 
 // Track last transition to avoid repeats
@@ -1031,10 +1035,22 @@ static void mirrorFrame(uint16_t* b, uint8_t flip) {
 // mirrored back just for the push, so the picture reads correctly and only the motion is reversed.
 static uint8_t composeFlip = 0;
 
+// Per-play speed (1.13): runTransition picks a random speed in 0.75x-1.3x so repeats don't look canned.
+// Faster drops composed frames evenly; slower holds each frame a little longer. runTransition always
+// draws the exact final cover afterwards, so a dropped last frame never matters.
+static float transSpeed = 1.0f;
+static float pushAcc = 0.0f;
+
 static inline void pushComposedFrame() {
+  if (transSpeed > 1.0f) {
+    pushAcc += 1.0f / transSpeed;
+    if (pushAcc < 1.0f) return;
+    pushAcc -= 1.0f;
+  }
   if (composeFlip) mirrorFrame(composeBuffer, composeFlip);
   gfx->draw16bitRGBBitmap(0, 0, composeBuffer, CW, CH);
   if (composeFlip) mirrorFrame(composeBuffer, composeFlip);  // effects may build on the last frame
+  if (transSpeed < 1.0f) delayMicroseconds((uint32_t)((1.0f / transSpeed - 1.0f) * 13000.0f));
 }
 
 static inline float easeInOut(float t) {
@@ -1404,6 +1420,25 @@ void drawCubeTurn(const uint16_t* oldB, const uint16_t* newB) {
         if (b > 31) b = 31;
         *out = (uint16_t)((r << 11) | (g << 5) | b);
       }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Cube Up (1.13): Cube Turn on the horizontal axis; the old face rolls away upward. Cube Down mirrors it.
+void drawCubeTurnV(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 26;
+  for (int f = 1; f <= frames; f++) {
+    float th = easeInOut((float)f / frames) * (PI / 2), sn = sinf(th), cs = cosf(th), wa = CH * cs;
+    memset(composeBuffer, 0, IMAGE_SIZE);
+    for (int y = 0; y < CH; y++) {
+      const uint16_t* D; float u, h, sh;
+      if (y < wa) { D = oldB; u = y / wa; h = 1.0f - 0.18f * sn * (1.0f - u); sh = 1.0f - 0.55f * sn; }
+      else { D = newB; u = (y - wa) / fmaxf(1.0f, CH - wa); h = 1.0f - 0.18f * cs * u; sh = 1.0f - 0.55f * cs; }
+      const uint16_t* row = D + clampPx((int)(u * CH)) * CW;
+      int x0 = max(0, (int)ceilf(120.0f - 120.0f * h)), x1 = min(CW, (int)ceilf(120.0f + 120.0f * h));
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = x0; x < x1; x++) d[x] = shade565(row[clampPx((int)((x - 120) / h + 120))], sh);
     }
     pushComposedFrame();
   }
@@ -2102,6 +2137,8 @@ String getTransitionName(TransitionType transition) {
     case TRANSITION_GLASS_SWEEP: return "Glass Sweep";
     case TRANSITION_PIXELATE: return "Pixelate";
     case TRANSITION_VHS_GLITCH: return "VHS Glitch";
+    case TRANSITION_CUBE_UP: return "Cube Up";
+    case TRANSITION_CUBE_DOWN: return "Cube Down";
     default:
       if (transition >= TRANSITION_VARIANT_FIRST && transition <= TRANSITION_VARIANT_LAST)
         return VARIANTS[transition - TRANSITION_VARIANT_FIRST].name;
@@ -2144,8 +2181,12 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
     case TRANSITION_BLOCK_RISE: base = TRANSITION_BLOCK_DROP; flip = 2; break;
     case TRANSITION_MELT_UP: base = TRANSITION_MELT; flip = 2; break;
     case TRANSITION_JELLY_RISE: base = TRANSITION_JELLY_DROP; flip = 2; break;
+    case TRANSITION_CUBE_DOWN: base = TRANSITION_CUBE_UP; flip = 2; break;
     default: break;
   }
+  transSpeed = random(75, 131) / 100.0f;
+  pushAcc = 0.0f;
+  Serial.printf("Transition speed %.2fx\n", transSpeed);
   if (flip && canCompose) {
     // prevBuffer is overwritten with the new cover below anyway; `buffer` is mirrored back after.
     mirrorFrame(prevBuffer, flip);
@@ -2164,6 +2205,7 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
     case TRANSITION_GLASS_SWEEP: drawGlassSweep(oldB, buffer); break;
     case TRANSITION_PIXELATE: drawPixelate(oldB, buffer); break;
     case TRANSITION_VHS_GLITCH: drawVhsGlitch(oldB, buffer); break;
+    case TRANSITION_CUBE_UP: drawCubeTurnV(oldB, buffer); break;
     case TRANSITION_WIPE_BOTTOM: drawWipeBottomToTop(buffer, width, height); break;
     case TRANSITION_WIPE_LEFT: drawWipeLeftToRight(buffer, width, height); break;
     case TRANSITION_WIPE_RIGHT: drawWipeRightToLeft(buffer, width, height); break;
