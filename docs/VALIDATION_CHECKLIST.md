@@ -101,3 +101,17 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
 - Stats sheet opens at half height with a grabber and drags to full; Settings opens full height
   with no grabber. Both close by swiping down.
 - Client ID field: tapping it must not offer saved passwords above the keyboard.
+
+## Status LED (WS2812B, GPIO15) — branch feat/status-led
+- Boot: the LED is dark through the greeting and the waiting screen (no stray colour at power-up).
+- Cached song: brief solid blue during the lookup and cache-hit draw, then a green flash that fades
+  out in about 0.7 s.
+- Uncached song: blue blink at the miss, dark while the phone downloads, then an orange pulse that
+  gets brighter as the frame arrives; green flash once the cover is drawn.
+- Prefetch of the next queued cover: the LED stays dark (nothing on screen changes).
+- Skip during an orange pulse: the orange stops (dark or blue), and the new song gets its own colours.
+- Disconnect mid-transfer: the LED goes dark.
+- Brightness: comfortable through the case, not blinding. If too dim or bright, change
+  `STATUS_LED_MAX` (26 of 255) in `src/main.cpp`.
+- A red double blink means the board rejected data (`ERROR:*`). Note when it happens: a red blink right
+  after a skip is the known stale-chunk race, not an LED bug.

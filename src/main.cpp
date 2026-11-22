@@ -29,6 +29,9 @@
 #define SD_MOSI 18
 #define SD_CLK 21
 
+// On-board WS2812B RGB LED (Waveshare schematic: GPIO15). Status light — see ledPoll().
+#define STATUS_LED_PIN 15
+
 #define DISPLAY_WIDTH 240
 #define DISPLAY_HEIGHT 240
 #define IMAGE_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)
@@ -94,8 +97,12 @@ BLECharacteristic* pImageChar = nullptr;
 BLECharacteristic* pMsgChar = nullptr;
 BLECharacteristic* pBrightnessChar = nullptr;
 
+// Set from BLE callbacks (flag only); loop() turns it into the red status-LED blink.
+volatile bool ledErrorPending = false;
+
 /// NOTIFY: Message `ERROR:*` plus Image byte 0x02 so the phone can fail the SUCCESS wait without a 32s timeout.
 static void notifyImageTransferRejected(const char* utf8message) {
+  ledErrorPending = true;
   if (pMsgChar) {
     pMsgChar->setValue(utf8message);
     pMsgChar->notify();
@@ -1950,6 +1957,7 @@ void setup() {
   // Clear the random power-up contents, then turn the light on (low during the ~1 s of SD init).
   gfx->fillScreen(WHITE);
   ledcWrite(TFT_BL_PWM_CHANNEL, 50);
+  neopixelWrite(STATUS_LED_PIN, 0, 0, 0);  // status LED starts dark (it can latch junk at power-up)
 
   // Configure MADCTL register (0x36) for RGB/BGR color order
   // Using 0x00: RGB mode (matches RGB565 format from Python)
@@ -2432,7 +2440,101 @@ void clearCacheDirectory() {
   Serial.printf("Cache clear complete: removed=%lu elapsed=%lums\n", (unsigned long)removed, elapsed);
 }
 
+// ============================================================================
+// Status LED — the board's WS2812B on GPIO15 (Waveshare ESP32-S3; was unused).
+// Driven ONLY from loop(): neopixelWrite() uses the RMT peripheral and must not run on the tiny
+// BTC_TASK stack. Callbacks only set flags / counters that loop() already reads.
+//   cache check / cache hit drawing  -> blue
+//   new cover arriving over BLE      -> orange, pulsing, brighter as the frame fills
+//   frame drawn + saved + ACKed      -> green flash, then fade to off
+//   transfer rejected                -> two dim red blinks
+//   idle / just showing a cover      -> off
+// Prefetch (store-only) transfers and prefetch probes stay dark: the song on screen isn't changing.
+// ============================================================================
+#define STATUS_LED_MAX 26  // ceiling out of 255 (~10%): full WS2812 is blinding through a thin case
+
+#define LED_RGB_BLUE   0x0050FF
+#define LED_RGB_ORANGE 0xFF5A00
+#define LED_RGB_GREEN  0x00FF28
+#define LED_RGB_RED    0xFF0000
+
+enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_TRANSFER, LED_DONE, LED_ERROR };
+static LedMode ledMode = LED_OFF;
+static unsigned long ledModeSince = 0;
+static uint32_t ledLastWritten = 0xFFFFFFFF;
+
+static void ledWriteRaw(uint8_t r, uint8_t g, uint8_t b) {
+  uint32_t c = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+  if (c == ledLastWritten) return;  // skip redundant RMT writes (loop runs ~100x/s)
+  ledLastWritten = c;
+  neopixelWrite(STATUS_LED_PIN, r, g, b);  // core handles the WS2812 GRB byte order
+}
+
+// level 0..255 is scaled into 0..STATUS_LED_MAX.
+static void ledShow(uint32_t rgb, uint16_t level) {
+  uint32_t k = (uint32_t)level * STATUS_LED_MAX / 255;
+  ledWriteRaw((uint8_t)(((rgb >> 16) & 0xFF) * k / 255),
+              (uint8_t)(((rgb >> 8) & 0xFF) * k / 255),
+              (uint8_t)((rgb & 0xFF) * k / 255));
+}
+
+static void ledUpdate() {
+  unsigned long t = millis() - ledModeSince;
+  switch (ledMode) {
+    case LED_OFF:
+      ledWriteRaw(0, 0, 0);
+      break;
+    case LED_CACHE:
+      ledShow(LED_RGB_BLUE, 255);  // solid while the SD lookup / cache-hit draw blocks loop()
+      break;
+    case LED_TRANSFER: {
+      // Base brightness follows progress (40% -> 100%); a 1.2 s triangle pulse rides on top.
+      uint32_t got = receivedBytes;  // written on BTC_TASK; a torn read only nudges brightness
+      if (got > IMAGE_SIZE) got = IMAGE_SIZE;
+      uint32_t base = 100 + (got * 155) / IMAGE_SIZE;
+      uint32_t phase = t % 1200;
+      uint32_t tri = phase < 600 ? phase : 1200 - phase;  // 0..600
+      uint32_t pulse = 150 + (tri * 105) / 600;            // 150..255
+      ledShow(LED_RGB_ORANGE, (uint16_t)(base * pulse / 255));
+      break;
+    }
+    case LED_DONE:
+      if (t < 220) ledShow(LED_RGB_GREEN, 255);
+      else if (t < 720) ledShow(LED_RGB_GREEN, (uint16_t)(255 - (t - 220) * 255 / 500));
+      else { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); }
+      break;
+    case LED_ERROR:
+      if (t < 450) ledShow(LED_RGB_RED, ((t / 150) % 2) ? 0 : 140);  // on-off-on
+      else { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); }
+      break;
+  }
+}
+
+static void ledSetMode(LedMode m) {
+  ledMode = m;
+  ledModeSince = millis();
+  ledUpdate();  // show it now: the caller may be about to block on SD or a transition
+}
+
+// Once per loop(): pick up callback-side state, then animate.
+static void ledPoll() {
+  if (ledErrorPending) {
+    ledErrorPending = false;
+    ledSetMode(LED_ERROR);
+  }
+  bool receiving = deviceConnected && imageState == RECEIVING_DATA &&
+                   pendingTransition != TRANSITION_STORE_ONLY;
+  if (receiving && ledMode != LED_TRANSFER && ledMode != LED_ERROR) {
+    ledSetMode(LED_TRANSFER);
+  } else if (!receiving && ledMode == LED_TRANSFER && !imageTransferComplete) {
+    ledSetMode(LED_OFF);  // frame abandoned (skip / resync / disconnect)
+  }
+  ledUpdate();
+}
+
 void loop() {
+  ledPoll();
+
   // Pulse the red "no" while waiting for connection
   if (showingStartupScreen && !deviceConnected) {
     unsigned long currentMillis = millis();
@@ -2514,6 +2616,8 @@ void loop() {
       pCacheChar->notify();
     } else {
 
+    ledSetMode(LED_CACHE);
+
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
     cacheHit = isCached(currentCacheKey);
@@ -2564,7 +2668,9 @@ void loop() {
         // Send SUCCESS message
         pMsgChar->setValue("SUCCESS");
         pMsgChar->notify();
+        ledSetMode(LED_DONE);
       } else {
+        ledSetMode(LED_OFF);  // a fresh transfer (orange) follows
         Serial.println("ERROR: Cache load failed — reporting miss so the client sends fresh");
         // The client is waiting on the Cache characteristic, not the Image one; without this
         // reply it times out instead of falling back to a normal transfer.
@@ -2574,6 +2680,7 @@ void loop() {
       }
     } else {
       Serial.println("BLE: Cache MISS");
+      ledSetMode(LED_OFF);  // the phone now downloads + converts; orange starts with the first chunk
       String missTiming = "CACHE_MISS_MS:" + String((unsigned long)cacheCheckMs);
       pMsgChar->setValue(missTiming.c_str());
       pMsgChar->notify();
@@ -2638,6 +2745,7 @@ void loop() {
 
     pMsgChar->setValue("SUCCESS");
     pMsgChar->notify();
+    ledSetMode(LED_DONE);
 
     completedImageBytes = 0;
     }  // not store-only
@@ -2646,6 +2754,7 @@ void loop() {
   // Handle BLE connection state changes
   if (!deviceConnected && oldDeviceConnected) {
     // Client just disconnected
+    ledSetMode(LED_OFF);
     resetToWaitingScreen();
     pServer->startAdvertising();  // Restart advertising
     Serial.println("BLE: Restarted advertising after disconnect");
