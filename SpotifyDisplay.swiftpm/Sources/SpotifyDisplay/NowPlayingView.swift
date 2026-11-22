@@ -523,16 +523,6 @@ struct NowPlayingScreen: View {
             Spacer(minLength: nerd ? 2 : ArtMetrics.topGap(for: size))
                 .frame(maxHeight: nerd ? 2 : CGFloat.infinity)
 
-            if nerd {
-                // Nerd mode: the live details come first, right under the header.
-                LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
-                    .padding(.bottom, 10)
-                    .environment(\.themeTextScale, ArtMetrics.compactTextScale)
-                    .transition(.opacity)
-            }
-
             HStack(alignment: .top, spacing: 14) {
                 art(side: side)
                 if nerd {
@@ -542,32 +532,34 @@ struct NowPlayingScreen: View {
             }
             .frame(maxWidth: .infinity, alignment: nerd ? .leading : .center)
 
-            if !nerd {
-                strip
-                    .frame(width: bigSide)
-                    .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 10)
-                    .transition(.opacity)
-            } else {
-                // Nerd mode: the progress line sits right under the small cover, as wide as it.
-                nerdStrip
-                    .frame(width: side)
-                    .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 6)
-                    .transition(.opacity)
-            }
+            // ONE progress line for both modes (it only changes width and thickness), so a mode switch
+            // can never leave the other mode's line behind. Two lines in an if/else used to: normal
+            // mode's full-width line stayed up in nerd mode and pushed the live details down.
+            strip(nerd: nerd)
+                .frame(width: nerd ? nil : bigSide)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, nerd ? 8 : 10)
 
-            if !nerd {
-                normalTrackBlock(side: bigSide)
+            // The two modes' lower areas overlap (top-aligned) instead of stacking: a view on its way
+            // out can never push the other mode's content down. Nerd mode's live details used to sit
+            // ~150 pt low because normal mode's (invisible) track block kept its place above them.
+            ZStack(alignment: .top) {
+                if !nerd {
+                    VStack(spacing: 0) {
+                        normalTrackBlock(side: bigSide)
+                            .transition(.opacity)
+                        normalLowerBlock(size: size)
+                            .transition(lowerTransition)
+                    }
                     .transition(.opacity)
-                normalLowerBlock(size: size)
-                    .transition(lowerTransition)
+                } else {
+                    nerdLowerBlock(size: size, scrolls: scrolls)
+                }
+            }
+            .frame(maxHeight: nerd ? CGFloat.infinity : nil, alignment: .top)
+            if !nerd {
                 Spacer(minLength: 8)
                     .frame(maxHeight: .infinity)
-            } else {
-                nerdLowerBlock(size: size, scrolls: scrolls)
             }
         }
         .padding(.horizontal, theme.margin)
@@ -615,7 +607,7 @@ struct NowPlayingScreen: View {
         .environment(\.themeTextScale, ArtMetrics.compactTextScale)
     }
 
-    /// Nerd mode under the cover and its progress line: the live details (fixed, at the top) + session log.
+    /// Nerd mode under the progress line: the live details (fixed, first) + cache history + session log.
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
         VStack(spacing: 0) {
             if showsLower {
@@ -668,25 +660,16 @@ struct NowPlayingScreen: View {
         .accessibilityAction { coverTapped() }
     }
 
-    /// Nerd mode's thinner progress line, under the small cover.
-    private var nerdStrip: some View {
+    /// The progress line: under the big cover in normal mode; full width and thinner under the cover
+    /// row in nerd mode, with the live details starting right below it.
+    private func strip(nerd: Bool) -> some View {
         LiveStrip(
             state: stripState,
             run: stripRun,
             stage: bleManager.sendStage,
             bleFloor: stripBleFloor,
             failed: stripFailed,
-            thickness: ArtMetrics.nerdStripThickness
-        )
-    }
-
-    private var strip: some View {
-        LiveStrip(
-            state: stripState,
-            run: stripRun,
-            stage: bleManager.sendStage,
-            bleFloor: stripBleFloor,
-            failed: stripFailed
+            thickness: nerd ? ArtMetrics.nerdStripThickness : nil
         )
     }
 
