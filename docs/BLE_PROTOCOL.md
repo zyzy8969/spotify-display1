@@ -2,7 +2,17 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.16** (one-shot transition for the next draw: photo <-> cover swaps flip on the keychain.)
+Version: **1.17** (new-song cache check: songs the keychain has never shown light the orange LED, even from SD.)
+
+Changes in 1.17 (2026-11-22; owner asked for the orange light on every new song, prefetched ones too).
+Additive: the app sends the new magic only to boards that announced `CAPS:newsong`.
+- **New-song cache check** — same 20-byte Cache write as a normal check, magic `0xDEADBEE1`. Identical
+  behaviour and reply; only the status LED differs: solid orange (the transfer colour) instead of blue
+  during the lookup / cache-hit draw, then the usual green. The app uses it when it has never seen the
+  keychain show this cover (its own list of shown covers), so a queue-prefetched new song is orange too.
+- **`CAPS:newsong`** — sent on every stats request after `CAPS:next`.
+
+Changes in 1.16 summary: (one-shot transition for the next draw: photo <-> cover swaps flip on the keychain.)
 
 Changes in 1.16 (swap flip, 2026-11-22; owner asked for the keychain to flip like the app's card). Additive:
 old firmware never announces `CAPS:next`, so the app never sends it the write; old apps ignore `CAPS:next`.
@@ -251,6 +261,7 @@ message they do not recognise.
 | `CAPS:speeds` | Stats request, next to `CAPS:transitions` (1.14) | iOS: may send the transition-speeds write this connection |
 | `CAPS:t128` | Stats request, after `CAPS:speeds` (1.15) | iOS: transitions 52-116 exist; send speeds for all 117 indices |
 | `CAPS:next` | Stats request, after `CAPS:t128` (1.16) | iOS: may send the one-shot next-draw transition (swap flip) |
+| `CAPS:newsong` | Stats request, after `CAPS:next` (1.17) | iOS: may send the new-song cache check (orange LED) |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |

@@ -162,6 +162,11 @@ uint8_t pendingTransition = 0xFF;  // 0xFF means random transition
 #define CACHE_PROBE_MAGIC 0xDEADBEE0u
 #define TRANSITION_STORE_ONLY 0xFE
 volatile bool cacheProbeOnly = false;  // the pending cache check is a probe
+// BLE_PROTOCOL 1.17: CACHE_NEW_SONG_MAGIC = a normal cache check for a song the keychain has never
+// shown (its cover may already be on SD from a queue prefetch). Same reply; the status LED shows the
+// "new song" orange instead of the cache blue, then green.
+#define CACHE_NEW_SONG_MAGIC 0xDEADBEE1u
+volatile bool cacheCheckNewSong = false;
 
 // BLE_PROTOCOL 1.12.
 // - TRANSITION_MASK_MAGIC on the Cache characteristic: 4-byte magic + 8-byte LE bitmask (bit i = header
@@ -437,7 +442,7 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
             return;
         }
 
-        if (magic != 0xDEADBEEF && magic != CACHE_PROBE_MAGIC) {
+        if (magic != 0xDEADBEEF && magic != CACHE_PROBE_MAGIC && magic != CACHE_NEW_SONG_MAGIC) {
             Serial.printf("ERROR: Bad magic 0x%08X\n", magic);
             return;
         }
@@ -446,6 +451,7 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
         // snapshots this key at its header, exactly like a normal miss → transfer.
         memcpy(currentCacheKey, value.data() + 4, 16);
         cacheProbeOnly = (magic == CACHE_PROBE_MAGIC);
+        cacheCheckNewSong = (magic == CACHE_NEW_SONG_MAGIC);
 
         // Set flag for loop() to process
         // CRITICAL: Don't do SD card/display work here - BTC_TASK stack is tiny!
@@ -1684,7 +1690,7 @@ void clearCacheDirectory() {
 #define LED_RGB_GREEN  0x00FF28
 #define LED_RGB_RED    0xFF0000
 
-enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR };
+enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR };
 static LedMode ledMode = LED_OFF;
 static unsigned long ledModeSince = 0;
 static uint32_t ledLastWritten = 0xFFFFFFFF;
@@ -1712,6 +1718,11 @@ static void ledUpdate() {
       break;
     case LED_CACHE:
       ledShow(LED_RGB_BLUE, 255);  // solid while the SD lookup / cache-hit draw blocks loop()
+      break;
+    case LED_NEW:
+      // 1.17: a song new to the person drawn from SD (prefetched): the transfer orange, solid,
+      // because the draw blocks loop() and nothing could animate it.
+      ledShow(LED_RGB_ORANGE, 255);
       break;
     case LED_WAITING:  // same orange pulse at the 0% brightness (receivedBytes is 0 here)
       if (t >= LED_WAITING_TIMEOUT_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); break; }
@@ -1839,6 +1850,9 @@ void loop() {
     // BLE_PROTOCOL 1.16: the board takes the one-shot next-draw transition write.
     pMsgChar->setValue("CAPS:next");
     pMsgChar->notify();
+    // BLE_PROTOCOL 1.17: the board takes the new-song cache check (orange LED).
+    pMsgChar->setValue("CAPS:newsong");
+    pMsgChar->notify();
     publishCacheCount();
     publishCacheStats();
   }
@@ -1891,7 +1905,10 @@ void loop() {
       pCacheChar->notify();
     } else {
 
-    ledSetMode(LED_CACHE);
+    // Orange for a song the keychain has never shown (1.17), even when its cover is on SD.
+    const bool newSong = cacheCheckNewSong;
+    cacheCheckNewSong = false;
+    ledSetMode(newSong ? LED_NEW : LED_CACHE);
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();

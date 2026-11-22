@@ -163,6 +163,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupports128 = false
     /// Board said `CAPS:next` (BLE_PROTOCOL 1.16): it takes the one-shot next-draw transition write.
     @Published private(set) var boardSupportsNextTransition = false
+    /// Board said `CAPS:newsong` (BLE_PROTOCOL 1.17): it takes the new-song cache check.
+    @Published private(set) var boardSupportsNewSong = false
     /// The view set this for a photo <-> cover swap: the next draw this app asks for (the photo, or the
     /// cover coming back) plays Card Flip on the keychain, like the app's card. Cleared once sent.
     var flipNextDraw = false
@@ -204,6 +206,8 @@ final class BLEManager: NSObject, ObservableObject {
     private let cacheMagic = UInt32(0xDEADBEEF)
     /// BLE_PROTOCOL 1.8 prefetch: "is this cover on SD?" without drawing it.
     private let cacheProbeMagic = UInt32(0xDEADBEE0)
+    /// BLE_PROTOCOL 1.17: a normal cache check for a song the keychain has never shown (orange LED).
+    private let cacheNewSongMagic = UInt32(0xDEADBEE1)
     /// BLE_PROTOCOL 1.8 prefetch: image header transition byte meaning "save to SD, don't draw".
     private let storeOnlyTransition: UInt8 = 0xFE
     /// BLE_PROTOCOL 1.12: header byte meaning "draw it, don't save it to SD" (photo upload).
@@ -296,8 +300,11 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     /// Cache-only check (same 20-byte packet as Python). On a hit the board draws the cover.
-    func checkCacheHit(cacheKey: Data) async throws -> Bool {
-        try await sendCacheQuery(magic: cacheMagic, cacheKey: cacheKey)
+    /// `newSong`: the keychain has never shown this cover, so its status LED lights the new-song orange
+    /// even when the cover is already on SD (queue prefetch). Older boards get the plain check.
+    func checkCacheHit(cacheKey: Data, newSong: Bool = false) async throws -> Bool {
+        let magic = newSong && boardSupportsNewSong ? cacheNewSongMagic : cacheMagic
+        return try await sendCacheQuery(magic: magic, cacheKey: cacheKey)
     }
 
     /// Normal check (`cacheMagic`, draws on a hit) or prefetch probe (`cacheProbeMagic`, never draws).
@@ -312,7 +319,7 @@ final class BLEManager: NSObject, ObservableObject {
         var packet = Data()
         withUnsafeBytes(of: magic.littleEndian) { packet.append(contentsOf: $0) }
         packet.append(cacheKey)
-        log("tx      cache \(magic == cacheProbeMagic ? "probe" : "check") key=\(cacheKey.prefix(4).map { String(format: "%02x", $0) }.joined())…", kind: .tx)
+        log("tx      cache \(magic == cacheProbeMagic ? "probe" : (magic == cacheNewSongMagic ? "check (new song)" : "check")) key=\(cacheKey.prefix(4).map { String(format: "%02x", $0) }.joined())…", kind: .tx)
 
         cacheCheckGen &+= 1
         let myGen = cacheCheckGen
@@ -600,7 +607,7 @@ final class BLEManager: NSObject, ObservableObject {
         noteDrawRequest(.cacheCheck(frameTask))
         let hitDrawGen = drawRequestGen
         do {
-            cacheHit = try await checkCacheHit(cacheKey: cacheKey)
+            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: !shownCoverSet.contains(cacheKeySource))
         } catch {
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
@@ -1012,6 +1019,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardSupportsSpeeds = false
         boardSupports128 = false
         boardSupportsNextTransition = false
+        boardSupportsNewSong = false
         flipNextDraw = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
         // Waiting screen: nothing of ours is on the panel any more.
@@ -1124,6 +1132,7 @@ final class BLEManager: NSObject, ObservableObject {
             if firstTime { applyTransitionSpeeds() }
         }
         if text == "CAPS:next" { boardSupportsNextTransition = true }
+        if text == "CAPS:newsong" { boardSupportsNewSong = true }
         if text == "CAPS:t128" {
             // Arrives after CAPS:speeds: send the speeds again, now for every index.
             let firstTime = !boardSupports128
