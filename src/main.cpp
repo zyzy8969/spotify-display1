@@ -2548,7 +2548,8 @@ void clearCacheDirectory() {
 //   idle / just showing a cover      -> off
 // Prefetch (store-only) transfers and prefetch probes stay dark: the song on screen isn't changing.
 // ============================================================================
-#define STATUS_LED_MAX 26  // ceiling out of 255 (~10%): full WS2812 is blinding through a thin case
+#define STATUS_LED_MAX 64  // ceiling out of 255 (~25%; was 26). Owner wanted it brighter 2026-11-22.
+                           // Full WS2812 is blinding through a thin case.
 
 #define LED_RGB_BLUE   0x0050FF
 #define LED_RGB_ORANGE 0xFF5A00
