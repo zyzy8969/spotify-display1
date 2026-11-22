@@ -172,6 +172,10 @@ volatile bool cacheProbeOnly = false;  // the pending cache check is a probe
 // complete masks, which is harmless.
 static volatile uint32_t transitionMaskLo = 0xFFFFFFFFu;
 static volatile uint32_t transitionMaskHi = 0xFFFFFFFFu;
+// BLE_PROTOCOL 1.13: bits 64-127 live in the former padding. Only trusted when bit 127 is set (the app's
+// "this is a 128-bit mask" flag); a 1.12 app sends zeros there and must not switch indices 64+ off.
+static volatile uint32_t transitionMaskW2 = 0xFFFFFFFFu;
+static volatile uint32_t transitionMaskW3 = 0xFFFFFFFFu;
 
 // Transition effects enum. Values are the BLE header's transitionIndex (docs/BLE_PROTOCOL.md),
 // so they are fixed: never renumber. Retired slots stay reserved and draw their twin when forced.
@@ -228,7 +232,27 @@ enum TransitionType {
   TRANSITION_VENETIAN_H = 49,  // Venetian H (quick)
   TRANSITION_SPIRAL_IN = 50,  // Spiral In (quick)
   TRANSITION_LUMA_WIPE = 51,  // Luma Wipe (quick)
-  TRANSITION_COUNT                // Total number of slots (including retired)
+  // 1.13: 52-80 are threshold-map variants (VARIANTS table: inverses, mirrors, neon edges; quick),
+  // 81-88 mirrored frame-composed effects, 89-96 zoom-outs and 2000s-tech effects.
+  TRANSITION_VARIANT_FIRST = 52,
+  TRANSITION_VARIANT_LAST = 80,
+  TRANSITION_PUSH_RIGHT = 81,
+  TRANSITION_CARD_STACK_LEFT = 82,
+  TRANSITION_CUBE_TURN_REVERSE = 83,
+  TRANSITION_CORNER_PEEL_REVERSE = 84,
+  TRANSITION_ACCORDION_REVERSE = 85,
+  TRANSITION_BLOCK_RISE = 86,
+  TRANSITION_MELT_UP = 87,
+  TRANSITION_JELLY_RISE = 88,
+  TRANSITION_ZOOM_OUT = 89,
+  TRANSITION_INFINITE_ZOOM_OUT = 90,
+  TRANSITION_CRT_OFF = 91,
+  TRANSITION_MATRIX_RAIN = 92,
+  TRANSITION_NEON_SCAN = 93,
+  TRANSITION_GLASS_SWEEP = 94,
+  TRANSITION_PIXELATE = 95,
+  TRANSITION_VHS_GLITCH = 96,
+  TRANSITION_COUNT               // Total number of slots (including retired)
 };
 
 static inline bool isRetiredTransition(TransitionType t) {
@@ -435,6 +459,13 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
             };
             transitionMaskLo = word(4);
             transitionMaskHi = word(8);
+            if (value.length() >= 20 && (word(16) & 0x80000000u)) {  // 1.13 extended mask
+                transitionMaskW2 = word(12);
+                transitionMaskW3 = word(16);
+            } else {
+                transitionMaskW2 = 0xFFFFFFFFu;
+                transitionMaskW3 = 0xFFFFFFFFu;
+            }
             return;
         }
 
@@ -979,8 +1010,31 @@ void drawCheckerCascade(uint16_t* buffer, int width, int height) {
 
 static const int CW = DISPLAY_WIDTH, CH = DISPLAY_HEIGHT;
 
+// Mirror a full frame in place: bit 0 = left/right, bit 1 = top/bottom.
+static void mirrorFrame(uint16_t* b, uint8_t flip) {
+  if (flip & 1)
+    for (int y = 0; y < CH; y++) {
+      uint16_t* r = b + y * CW;
+      for (int a = 0, c = CW - 1; a < c; a++, c--) { uint16_t t = r[a]; r[a] = r[c]; r[c] = t; }
+    }
+  if (flip & 2) {
+    static uint16_t tmp[DISPLAY_WIDTH];
+    for (int a = 0, c = CH - 1; a < c; a++, c--) {
+      memcpy(tmp, b + a * CW, CW * 2);
+      memcpy(b + a * CW, b + c * CW, CW * 2);
+      memcpy(b + c * CW, tmp, CW * 2);
+    }
+  }
+}
+
+// Mirrored transitions (1.13, 81-88) run an existing effect on mirrored covers; each composed frame is
+// mirrored back just for the push, so the picture reads correctly and only the motion is reversed.
+static uint8_t composeFlip = 0;
+
 static inline void pushComposedFrame() {
+  if (composeFlip) mirrorFrame(composeBuffer, composeFlip);
   gfx->draw16bitRGBBitmap(0, 0, composeBuffer, CW, CH);
+  if (composeFlip) mirrorFrame(composeBuffer, composeFlip);  // effects may build on the last frame
 }
 
 static inline float easeInOut(float t) {
@@ -1638,7 +1692,8 @@ void drawImageLineByLine(uint16_t* buffer, int16_t x, int16_t y, int16_t width, 
 // ==================================================
 
 #define QUICK_FRAMES 10
-static uint8_t* quickMaps[12] = {nullptr};
+#define QUICK_MAP_COUNT 20
+static uint8_t* quickMaps[QUICK_MAP_COUNT] = {nullptr};
 
 static float quickThreshold(int id, int x, int y) {
   float dx = x + 0.5f - 120, dy = y + 0.5f - 120, r = sqrtf(dx * dx + dy * dy);
@@ -1668,6 +1723,18 @@ static float quickThreshold(int id, int x, int y) {
       int ring = min(min(x, y), min(CW - 1 - x, CH - 1 - y)) / 8;
       return ring + ang / (2 * PI);
     }
+    // 1.13 base maps, used only through the VARIANTS table (flips / inverses / neon edges).
+    case 12: return y;                                           // Linear, top first
+    case 13: return fmaxf(fabsf(dx), fabsf(dy));                 // Box from the centre
+    case 14: return fabsf(dy);                                   // Split from the middle row
+    case 15: return fminf(fabsf(dx), fabsf(dy));                 // Plus
+    case 16: return fmodf(ang, PI / 2);                          // Wheel, 4 spokes
+    case 17: return cellHash(y >> 2, 21);                        // Random Bars, 4 px rows
+    case 18: {                                                   // Halftone, 20 px dots
+      float fx = (x % 20) - 9.5f, fy = (y % 20) - 9.5f;
+      return sqrtf(fx * fx + fy * fy);
+    }
+    case 19: return x + y;                                       // Diagonal, top-left first
     default: return 0;                                           // 11 = Luma Wipe (per image)
   }
 }
@@ -1691,21 +1758,279 @@ static uint8_t* getQuickMap(int id) {
   return m;
 }
 
-void drawQuickMask(int id, const uint16_t* oldB, const uint16_t* newB) {
+// Variant flags for a threshold map: read it reversed (INV), mirrored, or transposed; GLOW paints a
+// coloured leading edge on the reveal front.
+#define QV_INV  1
+#define QV_MX   2
+#define QV_MY   4
+#define QV_TR   8
+#define QV_GLOW 16
+#define QV_GLOW_BAND 24  // edge width in threshold units (map runs 0..250)
+
+static const uint8_t* lumaMapFor(const uint16_t* newB) {
   static uint8_t* lumaMap = nullptr;
-  const uint8_t* m;
-  if (id == 11) {  // Luma Wipe: dark parts of the new cover arrive first, highlights last
-    if (!lumaMap) lumaMap = (uint8_t*)ps_malloc(CW * CH);
-    if (!lumaMap) { drawPushLeft(oldB, newB); return; }
-    for (int i = 0; i < CW * CH; i++) lumaMap[i] = (uint8_t)(luma565(newB[i]) * 250.0f);
-    m = lumaMap;
-  } else {
-    m = getQuickMap(id);
-    if (!m) { drawPushLeft(oldB, newB); return; }
-  }
+  if (!lumaMap) lumaMap = (uint8_t*)ps_malloc(CW * CH);
+  if (!lumaMap) return nullptr;
+  for (int i = 0; i < CW * CH; i++) lumaMap[i] = (uint8_t)(luma565(newB[i]) * 250.0f);
+  return lumaMap;
+}
+
+void drawQuickMaskEx(int id, uint8_t flags, uint16_t tint, const uint16_t* oldB, const uint16_t* newB) {
+  // 11 = Luma Wipe: dark parts of the new cover arrive first, highlights last.
+  const uint8_t* m = (id == 11) ? lumaMapFor(newB) : getQuickMap(id);
+  if (!m) { drawPushLeft(oldB, newB); return; }
+  const bool glow = flags & QV_GLOW, plain = (flags & (QV_MX | QV_MY | QV_TR)) == 0;
+  const int top = glow ? 256 + QV_GLOW_BAND : 256;  // glow needs extra travel so the edge leaves the frame
   for (int f = 1; f <= QUICK_FRAMES; f++) {
-    int level = (f * 256) / QUICK_FRAMES;
-    for (int i = 0; i < CW * CH; i++) composeBuffer[i] = m[i] < level ? newB[i] : oldB[i];
+    int level = (f * top) / QUICK_FRAMES;
+    for (int y = 0; y < CH; y++) {
+      int sy = (flags & QV_MY) ? CH - 1 - y : y;
+      uint16_t* d = composeBuffer + y * CW;
+      const uint16_t* o = oldB + y * CW;
+      const uint16_t* n = newB + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int v;
+        if (plain) v = m[y * CW + x];
+        else {
+          int sx = (flags & QV_MX) ? CW - 1 - x : x;
+          v = (flags & QV_TR) ? m[sx * CW + sy] : m[sy * CW + sx];
+        }
+        if (flags & QV_INV) v = 250 - v;
+        if (v >= level) { d[x] = o[x]; continue; }
+        int lag = level - v;
+        d[x] = (glow && lag < QV_GLOW_BAND) ? blend565(n[x], tint, 32 - (lag * 32) / QV_GLOW_BAND) : n[x];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+void drawQuickMask(int id, const uint16_t* oldB, const uint16_t* newB) {
+  drawQuickMaskEx(id, 0, 0, oldB, newB);
+}
+
+// Indices 52-80, in order. Each is an existing or new threshold map read a different way.
+struct QuickVariant { uint8_t map, flags; uint16_t tint; const char* name; };
+static const QuickVariant VARIANTS[] = {
+  {12, 0, 0, "Wipe Down"},
+  {0, QV_INV, 0, "Iris Close"},
+  {1, QV_INV, 0, "Diamond Close"},
+  {2, QV_INV, 0, "Heart Close"},
+  {3, QV_MX, 0, "Clock Reverse"},
+  {4, QV_INV, 0, "Bow Tie Close"},
+  {5, QV_MX, 0, "Wind Reverse"},
+  {6, QV_MX, 0, "Polka Dots Reverse"},
+  {7, QV_MY, 0, "Rain Rise"},
+  {8, QV_MX, 0, "Wave Wipe Reverse"},
+  {10, QV_INV, 0, "Spiral Out"},
+  {13, QV_INV, 0, "Box Close"},
+  {14, QV_INV, 0, "Split Close H"},
+  {14, QV_TR | QV_INV, 0, "Split Close V"},
+  {19, QV_MY, 0, "Diagonal Up"},
+  {19, QV_MX, 0, "Diagonal Down Left"},
+  {18, QV_INV, 0, "Halftone Shrink"},
+  {11, QV_INV, 0, "Luma Wipe Reverse"},
+  {15, 0, 0, "Plus Wipe"},
+  {15, QV_INV, 0, "Plus Close"},
+  {16, 0, 0, "Wheel"},
+  {17, 0, 0, "Random Bars"},
+  {17, QV_TR, 0, "Random Bars V"},
+  // Neon edges: 2000s-UI colours on the reveal front.
+  {0, QV_GLOW, 0x07FF, "Neon Iris"},        // electric cyan
+  {3, QV_GLOW, 0x07E0, "Radar Sweep"},      // phosphor green
+  {12, QV_TR | QV_GLOW, 0xF81F, "Laser Wipe"},  // magenta, left to right
+  {10, QV_GLOW, 0x067F, "Aqua Spiral"},     // Aqua blue
+  {1, QV_GLOW, 0xF81F, "Plasma Diamond"},   // magenta
+  {13, QV_GLOW, 0xFC60, "Orange Box"},      // iPod orange
+};
+static_assert(sizeof(VARIANTS) / sizeof(VARIANTS[0]) == TRANSITION_VARIANT_LAST - TRANSITION_VARIANT_FIRST + 1,
+              "VARIANTS must cover indices 52-80 exactly");
+
+// ==================================================
+// 1.13 ZOOM-OUTS AND 2000s-TECH EFFECTS (indices 89-96). Same compose pattern.
+// ==================================================
+
+// Zoom Out: the old cover pulls back a touch, then shrinks into the centre with a drop shadow.
+void drawZoomOut(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 24;
+  for (int f = 1; f <= frames; f++) {
+    float u = (float)f / frames;
+    float e = 2.70158f * u * u * u - 1.70158f * u * u;  // easeInBack: dips below 0 first
+    float s = CW * (1.0f - e), o = (CW - s) / 2;
+    memcpy(composeBuffer, newB, IMAGE_SIZE);
+    if (s >= 1.0f) {
+      int sh = 6;  // shadow offset
+      int x0 = max(0, (int)(o + sh)), x1 = min(CW, (int)(o + s + sh));
+      int y0 = max(0, (int)(o + sh)), y1 = min(CH, (int)(o + s + sh));
+      for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) composeBuffer[y * CW + x] = shade565(composeBuffer[y * CW + x], 0.5f);
+      blitScaled(oldB, o, o, s, s);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Infinite Zoom Out: the camera pulls back; the old cover becomes a small framed picture inside the new one.
+void drawInfiniteZoomOut(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 30;
+  for (int f = 1; f <= frames; f++) {
+    float t = easeInOut((float)f / frames), k = powf(6.0f, 1.0f - t), sa = CW * k;
+    float sb = 40.0f * k * (1.0f - clamp01((t - 0.8f) / 0.2f));  // the inner picture vanishes at the end
+    blitScaled(newB, 120 - sa / 2, 120 - sa / 2, sa, sa);
+    if (sb >= 2.0f) {
+      int f0 = max(0, (int)(120 - sb / 2 - 2)), f1 = min(CW, (int)(120 + sb / 2 + 2));
+      for (int y = f0; y < f1; y++)
+        for (int x = f0; x < f1; x++) composeBuffer[y * CW + x] = 0xFFFF;
+      blitScaled(oldB, 120 - sb / 2, 120 - sb / 2, sb, sb);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Vertically squash src into an h-row band centred on the screen, brightened toward white by k (0..32).
+static void crtBand(const uint16_t* src, float h, uint32_t k) {
+  memset(composeBuffer, 0, IMAGE_SIZE);
+  int hh = max(2, (int)h), y0 = (CH - hh) / 2;
+  for (int y = 0; y < hh; y++) {
+    const uint16_t* s = src + ((y * CH) / hh) * CW;
+    uint16_t* d = composeBuffer + (y0 + y) * CW;
+    for (int x = 0; x < CW; x++) d[x] = blend565(s[x], 0xFFFF, k);
+  }
+}
+
+// CRT Off: the old picture collapses to a glowing line, then a dot; the new one switches on from a line.
+void drawCrtOff(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 32;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    if (t < 0.4f) {
+      float a = t / 0.4f;
+      crtBand(oldB, CH * (1 - a) * (1 - a), (uint32_t)(a * 30));
+    } else if (t < 0.6f) {
+      float b = (t - 0.4f) / 0.2f;
+      memset(composeBuffer, 0, IMAGE_SIZE);
+      int w = max(4, (int)(CW * (1 - b))), x0 = (CW - w) / 2, hh = b > 0.8f ? 4 : 2;
+      for (int y = 120 - hh / 2; y < 120 + hh / 2; y++)
+        for (int x = x0; x < x0 + w; x++) composeBuffer[y * CW + x] = 0xDFFF;  // blue-white phosphor
+    } else {
+      float c = (t - 0.6f) / 0.4f, e = 1 - (1 - c) * (1 - c) * (1 - c);
+      crtBand(newB, CH * e, (uint32_t)((1 - c) * 28));
+    }
+    pushComposedFrame();
+  }
+}
+
+// Matrix Rain: green code columns fall; behind each head the new cover appears, tinted green at first.
+void drawMatrixRain(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 32, col = 8, trail = 64;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    for (int x0 = 0; x0 < CW; x0 += col) {
+      float delay = cellHash(x0, 5) / 255.0f * 0.3f;
+      int head = (int)(clamp01((t - delay) / 0.7f) * (CH + trail + 8)) - 8;
+      for (int y = 0; y < CH; y++) {
+        const uint16_t* o = oldB + y * CW + x0;
+        const uint16_t* n = newB + y * CW + x0;
+        uint16_t* d = composeBuffer + y * CW + x0;
+        int dist = head - y;
+        for (int x = 0; x < col; x++) {
+          if (dist < 0) d[x] = o[x];
+          else if (dist < 3) d[x] = 0xDFFB;  // white-green head
+          else if (dist < trail) {
+            uint16_t g = shade565(0x07E0, 0.25f + luma565(n[x]));
+            if ((cellHash(x0 + 1000, (y >> 3) + f) & 7) == 0) g = 0xAFF5;  // flickering glyph
+            d[x] = blend565(g, n[x], (uint32_t)((dist * 32) / trail));
+          } else d[x] = n[x];
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Neon Scan: a cyan scan line sweeps across with a glowing grid in its wake (light-cycle style).
+void drawNeonScan(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 24;
+  for (int f = 1; f <= frames; f++) {
+    float p = easeInOut((float)f / frames) * (CW + 80) - 10;
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int i = y * CW + x;
+        float dx = x - p;
+        uint16_t c = dx < 0 ? newB[i] : oldB[i];
+        if (dx < 0 && dx > -70 && (x % 20 == 0 || y % 20 == 0))
+          c = blend565(c, 0x07FF, (uint32_t)(24 + dx * 24 / 70));  // grid fades behind the line
+        float a = fabsf(dx);
+        if (a < 2) c = 0xFFFF;
+        else if (a < 10) c = blend565(c, 0x07FF, (uint32_t)(30 - a * 3));
+        d[x] = c;
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Glass Sweep: a glossy diagonal glint (Aero / Aqua) sweeps across, swapping covers underneath.
+void drawGlassSweep(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 22;
+  for (int f = 1; f <= frames; f++) {
+    float P = easeInOut((float)f / frames) * (478 + 120) - 60;
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int i = y * CW + x;
+        float q = x + y - P, a = fabsf(q);
+        uint16_t c = q < 0 ? newB[i] : oldB[i];
+        if (a < 3) c = blend565(c, 0xFFFF, 28);
+        else if (a < 40) c = blend565(c, 0xEFBF, (uint32_t)(20 - a / 2));
+        d[x] = c;
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Pixelate: the old cover breaks into big pixels, switches, and the new one sharpens back.
+void drawPixelate(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 20;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    int bs = 1 + (int)(sinf(PI * t) * 23);
+    const uint16_t* src = t < 0.5f ? oldB : newB;
+    for (int y = 0; y < CH; y++) {
+      const uint16_t* s = src + min(CH - 1, (y / bs) * bs + bs / 2) * CW;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) d[x] = s[min(CW - 1, (x / bs) * bs + bs / 2)];
+    }
+    pushComposedFrame();
+  }
+}
+
+// VHS Glitch: tracking bands tear sideways with cyan/magenta fringes and noise lines.
+void drawVhsGlitch(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = 20;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames, amp = sinf(PI * t);
+    const uint16_t* src = t < 0.5f ? oldB : newB;
+    int chroma = (int)(amp * 6), bar = (f * 23) % CH;
+    for (int y = 0; y < CH; y++) {
+      int band = y >> 3, off = 0;
+      if (cellHash(band, f + 99) < 90) off = (int)((cellHash(band, f) - 128) * amp * 0.25f);
+      const uint16_t* row = src + y * CW;
+      uint16_t* d = composeBuffer + y * CW;
+      if (cellHash(y, f * 7) < (uint8_t)(10 * amp)) {  // noise line
+        for (int x = 0; x < CW; x++) d[x] = (cellHash(x, y + f) & 1) ? 0xFFFF : 0x8410;
+        continue;
+      }
+      bool tracking = y >= bar && y < bar + 10 && amp > 0.2f;
+      for (int x = 0; x < CW; x++) {
+        int sx = x - off;
+        uint16_t c = (row[clampPx(sx - chroma)] & 0xF800) | (row[clampPx(sx)] & 0x07E0) |
+                     (row[clampPx(sx + chroma)] & 0x001F);
+        d[x] = tracking ? blend565(c, 0xFFFF, 10) : c;
+      }
+    }
     pushComposedFrame();
   }
 }
@@ -1761,7 +2086,26 @@ String getTransitionName(TransitionType transition) {
     case TRANSITION_VENETIAN_H: return "Venetian H";
     case TRANSITION_SPIRAL_IN: return "Spiral In";
     case TRANSITION_LUMA_WIPE: return "Luma Wipe";
-    default: return "Unknown";
+    case TRANSITION_PUSH_RIGHT: return "Push Right";
+    case TRANSITION_CARD_STACK_LEFT: return "Card Stack Left";
+    case TRANSITION_CUBE_TURN_REVERSE: return "Cube Turn Reverse";
+    case TRANSITION_CORNER_PEEL_REVERSE: return "Corner Peel Reverse";
+    case TRANSITION_ACCORDION_REVERSE: return "Accordion Reverse";
+    case TRANSITION_BLOCK_RISE: return "Block Rise";
+    case TRANSITION_MELT_UP: return "Melt Up";
+    case TRANSITION_JELLY_RISE: return "Jelly Rise";
+    case TRANSITION_ZOOM_OUT: return "Zoom Out";
+    case TRANSITION_INFINITE_ZOOM_OUT: return "Infinite Zoom Out";
+    case TRANSITION_CRT_OFF: return "CRT Off";
+    case TRANSITION_MATRIX_RAIN: return "Matrix Rain";
+    case TRANSITION_NEON_SCAN: return "Neon Scan";
+    case TRANSITION_GLASS_SWEEP: return "Glass Sweep";
+    case TRANSITION_PIXELATE: return "Pixelate";
+    case TRANSITION_VHS_GLITCH: return "VHS Glitch";
+    default:
+      if (transition >= TRANSITION_VARIANT_FIRST && transition <= TRANSITION_VARIANT_LAST)
+        return VARIANTS[transition - TRANSITION_VARIANT_FIRST].name;
+      return "Unknown";
   }
 }
 
@@ -1788,7 +2132,38 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
   // differently-sized draw happened. A 1x1 write here makes the next draw resend both. The pixel is
   // the new cover's own (0,0), which the transition paints anyway.
   gfx->drawPixel(0, 0, buffer[0]);
+  // 81-88: an existing effect run mirrored (1 = left/right, 2 = top/bottom).
+  TransitionType base = t;
+  uint8_t flip = 0;
   switch (t) {
+    case TRANSITION_PUSH_RIGHT: base = TRANSITION_PUSH_LEFT; flip = 1; break;
+    case TRANSITION_CARD_STACK_LEFT: base = TRANSITION_CARD_STACK; flip = 1; break;
+    case TRANSITION_CUBE_TURN_REVERSE: base = TRANSITION_CUBE_TURN; flip = 1; break;
+    case TRANSITION_CORNER_PEEL_REVERSE: base = TRANSITION_CORNER_PEEL; flip = 1; break;
+    case TRANSITION_ACCORDION_REVERSE: base = TRANSITION_ACCORDION; flip = 1; break;
+    case TRANSITION_BLOCK_RISE: base = TRANSITION_BLOCK_DROP; flip = 2; break;
+    case TRANSITION_MELT_UP: base = TRANSITION_MELT; flip = 2; break;
+    case TRANSITION_JELLY_RISE: base = TRANSITION_JELLY_DROP; flip = 2; break;
+    default: break;
+  }
+  if (flip && canCompose) {
+    // prevBuffer is overwritten with the new cover below anyway; `buffer` is mirrored back after.
+    mirrorFrame(prevBuffer, flip);
+    mirrorFrame(buffer, flip);
+    composeFlip = flip;
+  }
+  if (t >= TRANSITION_VARIANT_FIRST && t <= TRANSITION_VARIANT_LAST) {
+    const QuickVariant& v = VARIANTS[t - TRANSITION_VARIANT_FIRST];
+    drawQuickMaskEx(v.map, v.flags, v.tint, oldB, buffer);
+  } else switch (base) {
+    case TRANSITION_ZOOM_OUT: drawZoomOut(oldB, buffer); break;
+    case TRANSITION_INFINITE_ZOOM_OUT: drawInfiniteZoomOut(oldB, buffer); break;
+    case TRANSITION_CRT_OFF: drawCrtOff(oldB, buffer); break;
+    case TRANSITION_MATRIX_RAIN: drawMatrixRain(oldB, buffer); break;
+    case TRANSITION_NEON_SCAN: drawNeonScan(oldB, buffer); break;
+    case TRANSITION_GLASS_SWEEP: drawGlassSweep(oldB, buffer); break;
+    case TRANSITION_PIXELATE: drawPixelate(oldB, buffer); break;
+    case TRANSITION_VHS_GLITCH: drawVhsGlitch(oldB, buffer); break;
     case TRANSITION_WIPE_BOTTOM: drawWipeBottomToTop(buffer, width, height); break;
     case TRANSITION_WIPE_LEFT: drawWipeLeftToRight(buffer, width, height); break;
     case TRANSITION_WIPE_RIGHT: drawWipeRightToLeft(buffer, width, height); break;
@@ -1840,6 +2215,10 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
     case TRANSITION_LUMA_WIPE: drawQuickMask(11, oldB, buffer); break;
     default: drawWipeBottomToTop(buffer, width, height); break;
   }
+  if (composeFlip) {
+    composeFlip = 0;
+    mirrorFrame(buffer, flip);
+  }
   // Every frame-composed transition ends on the exact new frame.
   if (canCompose && t >= TRANSITION_CARD_STACK) gfx->draw16bitRGBBitmap(0, 0, buffer, width, height);
   if (canCompose) memcpy(prevBuffer, buffer, IMAGE_SIZE);
@@ -1850,7 +2229,10 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
 // True if the app left transition `t` switched on (BLE_PROTOCOL 1.12 mask).
 static bool transitionEnabled(int t) {
   if (t < 0 || t >= TRANSITION_COUNT) return false;
-  return t < 32 ? ((transitionMaskLo >> t) & 1u) : ((transitionMaskHi >> (t - 32)) & 1u);
+  if (t < 32) return (transitionMaskLo >> t) & 1u;
+  if (t < 64) return (transitionMaskHi >> (t - 32)) & 1u;
+  if (t < 96) return (transitionMaskW2 >> (t - 64)) & 1u;
+  return (transitionMaskW3 >> (t - 96)) & 1u;
 }
 
 static TransitionType pickEnabledTransition(bool quickOnly);  // defined after QUICK_TRANSITIONS
@@ -1897,6 +2279,8 @@ static const TransitionType QUICK_TRANSITIONS[] = {
 static TransitionType pickEnabledTransition(bool quickOnly) {
   const int quickN = sizeof(QUICK_TRANSITIONS) / sizeof(QUICK_TRANSITIONS[0]);
   auto isQuick = [quickN](int t) {
+    // 1.13 threshold-map variants cost the same as the quick set's own maps.
+    if (t >= TRANSITION_VARIANT_FIRST && t <= TRANSITION_VARIANT_LAST) return true;
     for (int i = 0; i < quickN; i++) if ((int)QUICK_TRANSITIONS[i] == t) return true;
     return false;
   };

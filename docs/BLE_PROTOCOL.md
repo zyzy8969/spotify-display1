@@ -2,7 +2,19 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.12** (Enabled-transitions mask; fresh draws announce their transition; display-only photo frames.)
+Version: **1.13** (45 more transitions, indices 52-96; enabled-transitions mask widened to 128 bits.)
+
+Changes in 1.13 (more transitions). Additive and backward compatible both ways.
+- **Transition indices 52-96 are valid.** 52-80 are quick threshold-map variants (inverses, mirrors and
+  neon-edged versions of the quick set plus new Box/Plus/Wheel/Random Bars/Halftone maps; firmware
+  `VARIANTS` table), 81-88 are mirrored versions of frame effects (Push Right, Card Stack Left, Cube Turn
+  Reverse, Corner Peel Reverse, Accordion Reverse, Block Rise, Melt Up, Jelly Rise), 89-96 are Zoom Out,
+  Infinite Zoom Out, CRT Off, Matrix Rain, Neon Scan, Glass Sweep, Pixelate, VHS Glitch. Names are the
+  `TRANSITION:<name>` strings in `getTransitionName`. 52-80 count as quick (used for new songs).
+  A forced index the board doesn't know (an older board) still means "random".
+- **Mask is 128 bits.** Same 20-byte write: magic + mask bits 0-63 (`u64` LE) + bits 64-127 (`u64` LE,
+  the former padding). **Bit 127 set** marks a 1.13 mask; without it (a 1.12 app sends zeros) the board
+  treats indices 64+ as enabled. 1.12 firmware ignores the upper half, so a 1.13 app works with it.
 
 Changes in 1.12 (transition picker + photo upload). Additive: old clients, old firmware and the Python
 sender are unaffected.

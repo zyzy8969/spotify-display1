@@ -355,10 +355,11 @@ final class BLEManager: NSObject, ObservableObject {
         let mask = TransitionPrefs.currentMask
         var packet = Data()
         withUnsafeBytes(of: transitionMaskMagic.littleEndian) { packet.append(contentsOf: $0) }
-        withUnsafeBytes(of: mask.littleEndian) { packet.append(contentsOf: $0) }
-        packet.append(Data(count: 8))
+        // 1.13: low 64 bits, then the high 64 (bit 127 set) in what 1.12 called padding.
+        withUnsafeBytes(of: mask.lo.littleEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: mask.hi.littleEndian) { packet.append(contentsOf: $0) }
         p.writeValue(packet, for: c, type: .withResponse)
-        let on = TransitionCatalog.all.filter { mask & (UInt64(1) << UInt64($0.id)) != 0 }.count
+        let on = TransitionCatalog.all.filter { mask.contains($0.id) }.count
         log("tx      transition mask: \(on) of \(TransitionCatalog.all.count) on", kind: .tx)
     }
 

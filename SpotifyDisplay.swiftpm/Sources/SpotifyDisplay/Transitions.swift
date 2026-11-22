@@ -66,7 +66,53 @@ enum TransitionCatalog {
         .init(id: 48, name: "Wave Wipe", quick: true, blurb: "A wavy edge sweeps across"),
         .init(id: 49, name: "Venetian H", quick: true, blurb: "Horizontal blinds open"),
         .init(id: 50, name: "Spiral In", quick: true, blurb: "Spirals in from the edge"),
-        .init(id: 51, name: "Luma Wipe", quick: true, blurb: "Brightness-style soft wipe")
+        .init(id: 51, name: "Luma Wipe", quick: true, blurb: "Brightness-style soft wipe"),
+        // BLE_PROTOCOL 1.13
+        .init(id: 52, name: "Wipe Down", quick: true, blurb: "Reveals from the top edge downward"),
+        .init(id: 53, name: "Iris Close", quick: true, blurb: "A ring closes in to the centre"),
+        .init(id: 54, name: "Diamond Close", quick: true, blurb: "A diamond closes in to the centre"),
+        .init(id: 55, name: "Heart Close", quick: true, blurb: "The old cover shrinks to a heart"),
+        .init(id: 56, name: "Clock Reverse", quick: true, blurb: "The clock hand sweeps anticlockwise"),
+        .init(id: 57, name: "Bow Tie Close", quick: true, blurb: "Bow tie closes from the sides"),
+        .init(id: 58, name: "Wind Reverse", quick: true, blurb: "Rows blow in from the left"),
+        .init(id: 59, name: "Polka Dots Reverse", quick: true, blurb: "Dots grow, right to left"),
+        .init(id: 60, name: "Rain Rise", quick: true, blurb: "Columns rise up from the bottom"),
+        .init(id: 61, name: "Wave Wipe Reverse", quick: true, blurb: "A wavy edge sweeps right to left"),
+        .init(id: 62, name: "Spiral Out", quick: true, blurb: "Spirals out from the centre"),
+        .init(id: 63, name: "Box Close", quick: true, blurb: "A square closes in to the centre"),
+        .init(id: 64, name: "Split Close H", quick: true, blurb: "Top and bottom close to the middle"),
+        .init(id: 65, name: "Split Close V", quick: true, blurb: "Left and right close to the middle"),
+        .init(id: 66, name: "Diagonal Up", quick: true, blurb: "Wipes from bottom-left to top-right"),
+        .init(id: 67, name: "Diagonal Down Left", quick: true, blurb: "Wipes from top-right to bottom-left"),
+        .init(id: 68, name: "Halftone Shrink", quick: true, blurb: "The old cover shrinks into dots"),
+        .init(id: 69, name: "Luma Wipe Reverse", quick: true, blurb: "Highlights arrive first, shadows last"),
+        .init(id: 70, name: "Plus Wipe", quick: true, blurb: "A plus sign opens from the centre"),
+        .init(id: 71, name: "Plus Close", quick: true, blurb: "Corners close in to a plus"),
+        .init(id: 72, name: "Wheel", quick: true, blurb: "Four spokes sweep round"),
+        .init(id: 73, name: "Random Bars", quick: true, blurb: "Horizontal bars pop in at random"),
+        .init(id: 74, name: "Random Bars V", quick: true, blurb: "Vertical bars pop in at random"),
+        .init(id: 75, name: "Neon Iris", quick: true, blurb: "Iris with an electric-cyan edge"),
+        .init(id: 76, name: "Radar Sweep", quick: true, blurb: "Radar sweep with a green phosphor edge"),
+        .init(id: 77, name: "Laser Wipe", quick: true, blurb: "A magenta laser line wipes across"),
+        .init(id: 78, name: "Aqua Spiral", quick: true, blurb: "Spiral with an Aqua-blue edge"),
+        .init(id: 79, name: "Plasma Diamond", quick: true, blurb: "Diamond iris with a magenta edge"),
+        .init(id: 80, name: "Orange Box", quick: true, blurb: "Square opens with an iPod-orange edge"),
+        .init(id: 81, name: "Push Right", quick: false, blurb: "New cover pushes the old one out to the right"),
+        .init(id: 82, name: "Card Stack Left", quick: false, blurb: "New cover slides over from the left"),
+        .init(id: 83, name: "Cube Turn Reverse", quick: false, blurb: "Cube rotates the other way"),
+        .init(id: 84, name: "Corner Peel Reverse", quick: false, blurb: "Peels back from the other corner"),
+        .init(id: 85, name: "Accordion Reverse", quick: false, blurb: "Folds into the left edge"),
+        .init(id: 86, name: "Block Rise", quick: false, blurb: "Blocks fly up into place, top row first"),
+        .init(id: 87, name: "Melt Up", quick: false, blurb: "The old cover drips upward"),
+        .init(id: 88, name: "Jelly Rise", quick: false, blurb: "Wobbly rise from the bottom"),
+        .init(id: 89, name: "Zoom Out", quick: false, blurb: "The old cover shrinks away into the centre"),
+        .init(id: 90, name: "Infinite Zoom Out", quick: false, blurb: "Camera pulls back out of the old cover"),
+        .init(id: 91, name: "CRT Off", quick: false, blurb: "Old TV switches off to a line, new one switches on"),
+        .init(id: 92, name: "Matrix Rain", quick: false, blurb: "Green code rains the new cover in"),
+        .init(id: 93, name: "Neon Scan", quick: false, blurb: "Cyan scan line with a glowing grid"),
+        .init(id: 94, name: "Glass Sweep", quick: false, blurb: "Glossy Aero-style glint sweeps across"),
+        .init(id: 95, name: "Pixelate", quick: false, blurb: "Breaks into big pixels and sharpens back"),
+        .init(id: 96, name: "VHS Glitch", quick: false, blurb: "Tape-tracking tears and colour fringes")
     ]
 
     /// Themes for the picker, so a whole family (e.g. everything that slides) can be switched at once.
@@ -78,14 +124,17 @@ enum TransitionCatalog {
     }
 
     static let groups: [Group] = [
-        Group(name: "Sliding & pushing", ids: [21, 18, 30, 23, 35]),
-        Group(name: "Wipes & sweeps", ids: [0, 1, 2, 6, 7, 9, 28, 43, 48, 51]),
-        Group(name: "Splits & blinds", ids: [12, 13, 14, 8, 49, 37]),
-        Group(name: "Shapes & irises", ids: [3, 40, 41, 42, 44, 11, 50, 39, 46]),
-        Group(name: "Blocks & tiles", ids: [4, 15, 17, 24, 25, 29, 32]),
+        Group(name: "Y2K tech", ids: [91, 92, 93, 94, 95, 96]),
+        Group(name: "Neon edges", ids: [75, 76, 77, 78, 79, 80]),
+        Group(name: "Sliding & pushing", ids: [21, 81, 18, 82, 30, 83, 23, 35, 85]),
+        Group(name: "Wipes & sweeps", ids: [0, 52, 1, 2, 6, 7, 66, 67, 9, 28, 84, 43, 56, 72, 48, 61, 51, 69]),
+        Group(name: "Splits & blinds", ids: [12, 64, 13, 65, 14, 8, 49, 37, 73, 74]),
+        Group(name: "Shapes & irises", ids: [3, 40, 53, 41, 54, 42, 55, 44, 57, 11, 63, 70, 71,
+                                             50, 62, 39, 68, 46, 59]),
+        Group(name: "Blocks & tiles", ids: [4, 15, 17, 24, 25, 86, 29, 32]),
         Group(name: "Fades & dissolves", ids: [22, 19, 20, 34, 36]),
-        Group(name: "Drips & falls", ids: [26, 31, 38, 47, 45]),
-        Group(name: "Zooms", ids: [27, 33])
+        Group(name: "Drips & falls", ids: [26, 87, 31, 88, 38, 47, 60, 45, 58]),
+        Group(name: "Zooms", ids: [27, 89, 33, 90])
     ]
 
     static func info(named name: String) -> TransitionInfo? {
@@ -116,20 +165,37 @@ enum TransitionPrefs {
         return TransitionCatalog.all.filter { !off.contains($0.id) }.count
     }
 
-    /// Bit i set = transition index i may be picked. All off means all on (the board never has nothing to draw).
-    static func mask(disabledRaw: String) -> UInt64 {
+    /// 128-bit enabled mask (BLE_PROTOCOL 1.13) as two 64-bit halves. Bit i set = transition index i may
+    /// be picked. All off means all on (the board never has nothing to draw).
+    struct Mask128: Equatable {
+        var lo: UInt64 = 0
+        var hi: UInt64 = 0
+        /// Bit 127: tells 1.13 firmware the upper half is real (a 1.12 app sends zeros there).
+        static let extendedFlag: UInt64 = 1 << 63
+
+        mutating func set(_ i: Int) {
+            if i < 64 { lo |= UInt64(1) << UInt64(i) } else { hi |= UInt64(1) << UInt64(i - 64) }
+        }
+
+        func contains(_ i: Int) -> Bool {
+            i < 64 ? (lo >> UInt64(i)) & 1 == 1 : (hi >> UInt64(i - 64)) & 1 == 1
+        }
+
+        var isEmpty: Bool { lo == 0 && hi & ~Mask128.extendedFlag == 0 }
+    }
+
+    static func mask(disabledRaw: String) -> Mask128 {
         let off = disabledSet(from: disabledRaw)
-        var mask: UInt64 = 0
-        for t in TransitionCatalog.all where !off.contains(t.id) {
-            mask |= (UInt64(1) << UInt64(t.id))
+        var mask = Mask128()
+        for t in TransitionCatalog.all where !off.contains(t.id) { mask.set(t.id) }
+        if mask.isEmpty {
+            for t in TransitionCatalog.all { mask.set(t.id) }
         }
-        if mask == 0 {
-            for t in TransitionCatalog.all { mask |= (UInt64(1) << UInt64(t.id)) }
-        }
+        mask.hi |= Mask128.extendedFlag
         return mask
     }
 
-    static var currentMask: UInt64 {
+    static var currentMask: Mask128 {
         mask(disabledRaw: UserDefaults.standard.string(forKey: storageKey) ?? "")
     }
 }
@@ -141,9 +207,16 @@ enum TransitionPrefs {
 /// renderer; the rest move or fade whole covers. The app's versions are approximations of the board's.
 enum TransitionMode {
     case threshold, crossfade, push, cardStack, flip, cube, zoomPunch, infiniteZoom
+    case mirrored, zoomOut, infiniteZoomOut, crt, pixelate, vhs
 
     static func of(_ id: Int) -> TransitionMode {
         switch id {
+        case 81, 82, 83: return .mirrored
+        case 89: return .zoomOut
+        case 90: return .infiniteZoomOut
+        case 91: return .crt
+        case 95: return .pixelate
+        case 96: return .vhs
         case 18: return .cardStack
         case 21: return .push
         case 22, 34: return .crossfade
@@ -169,6 +242,57 @@ private final class ThresholdGridCache {
         grids[id] = g
         return g
     }
+}
+
+/// 1.13 transitions that the app previews as another effect read differently, as the firmware does
+/// (its VARIANTS table and mirrored effects). `base` is a raw() id; 1012+ are the board's new base maps.
+struct PreviewVariant {
+    let base: Int
+    var inv = false, mx = false, my = false, tr = false
+    var tint: Color? = nil
+
+    /// Mirrored motion effects (81-83) are drawn as their base with both covers and the stage flipped.
+    static let mirroredBase: [Int: Int] = [81: 21, 82: 18, 83: 30]
+
+    static let table: [Int: PreviewVariant] = [
+        52: .init(base: 1012),
+        53: .init(base: 40, inv: true),
+        54: .init(base: 41, inv: true),
+        55: .init(base: 42, inv: true),
+        56: .init(base: 43, mx: true),
+        57: .init(base: 44, inv: true),
+        58: .init(base: 45, mx: true),
+        59: .init(base: 46, mx: true),
+        60: .init(base: 47, my: true),
+        61: .init(base: 48, mx: true),
+        62: .init(base: 50, inv: true),
+        63: .init(base: 1013, inv: true),
+        64: .init(base: 1014, inv: true),
+        65: .init(base: 1014, inv: true, tr: true),
+        66: .init(base: 1019, my: true),
+        67: .init(base: 1019, mx: true),
+        68: .init(base: 1018, inv: true),
+        69: .init(base: 51, inv: true),
+        70: .init(base: 1015),
+        71: .init(base: 1015, inv: true),
+        72: .init(base: 1016),
+        73: .init(base: 1017),
+        74: .init(base: 1017, tr: true),
+        75: .init(base: 40, tint: Color(red: 0, green: 1, blue: 1)),
+        76: .init(base: 43, tint: Color(red: 0, green: 1, blue: 0)),
+        77: .init(base: 1012, tr: true, tint: Color(red: 1, green: 0, blue: 1)),
+        78: .init(base: 50, tint: Color(red: 0, green: 0.8, blue: 1)),
+        79: .init(base: 41, tint: Color(red: 1, green: 0, blue: 1)),
+        80: .init(base: 1013, tint: Color(red: 1, green: 0.55, blue: 0)),
+        84: .init(base: 28, mx: true),
+        85: .init(base: 35, mx: true),
+        86: .init(base: 25, my: true),
+        87: .init(base: 26, my: true),
+        88: .init(base: 31, my: true),
+        92: .init(base: 1092, tint: Color(red: 0.2, green: 1, blue: 0.3)),
+        93: .init(base: 1, tint: Color(red: 0, green: 0.9, blue: 1)),
+        94: .init(base: 1019, tint: Color(white: 1))
+    ]
 }
 
 enum TransitionMaskMath {
@@ -269,25 +393,50 @@ enum TransitionMaskMath {
             if ang < 0 { ang += 2 * Float.pi }
             return (1 - r) * 0.8 + (ang / (2 * Float.pi)) * 0.2
         case 51: return x * 0.5 + 0.5 * (0.5 + 0.5 * sin(x * 9) * cos(y * 7))
+        // 1.13 base maps (firmware quickThreshold 12-19) and Matrix Rain's column fall.
+        case 1012: return y
+        case 1013: return max(abs(dx), abs(dy))
+        case 1014: return abs(dy)
+        case 1015: return min(abs(dx), abs(dy))
+        case 1016:
+            var ang = atan2(dx, -dy)
+            if ang < 0 { ang += 2 * Float.pi }
+            return ang.truncatingRemainder(dividingBy: Float.pi / 2)
+        case 1017: return hash(iy, 21)
+        case 1018:
+            let fx = frac(x * 12) - 0.5
+            let fy = frac(y * 12) - 0.5
+            return (fx * fx + fy * fy).squareRoot()
+        case 1019: return x + y
+        case 1092: return y * 0.6 + hash(ix / 2, 0, 92) * 0.4
         default: return y
         }
     }
 
     /// n*n reveal times, normalised so the first cell is 0 and the last is 1.
     static func buildGrid(id: Int) -> [Float] {
+        let variant = PreviewVariant.table[id]
+        let base = variant?.base ?? id
         var g = [Float](repeating: 0, count: n * n)
         var lo = Float.greatestFiniteMagnitude
         var hi = -Float.greatestFiniteMagnitude
         for iy in 0..<n {
             for ix in 0..<n {
-                let v = raw(id: id, ix: ix, iy: iy, x: (Float(ix) + 0.5) / Float(n), y: (Float(iy) + 0.5) / Float(n))
+                var sx = variant?.mx == true ? n - 1 - ix : ix
+                var sy = variant?.my == true ? n - 1 - iy : iy
+                if variant?.tr == true { swap(&sx, &sy) }
+                let v = raw(id: base, ix: sx, iy: sy, x: (Float(sx) + 0.5) / Float(n), y: (Float(sy) + 0.5) / Float(n))
                 g[iy * n + ix] = v
                 lo = min(lo, v)
                 hi = max(hi, v)
             }
         }
         let span = max(0.0001, hi - lo)
-        for i in 0..<g.count { g[i] = (g[i] - lo) / span }
+        let inv = variant?.inv == true
+        for i in 0..<g.count {
+            let t = (g[i] - lo) / span
+            g[i] = inv ? 1 - t : t
+        }
         return g
     }
 
@@ -320,6 +469,35 @@ struct ThresholdMask: View {
     }
 }
 
+/// The coloured leading edge of a neon reveal: cells revealed within the last `band` of progress.
+struct ThresholdGlow: View {
+    let id: Int
+    let progress: CGFloat
+    let tint: Color
+    static let band: Float = 0.1
+
+    var body: some View {
+        let grid = TransitionMaskMath.grid(for: id)
+        let p = Float(progress)
+        return Canvas { context, size in
+            let n = TransitionMaskMath.n
+            let cw = size.width / CGFloat(n)
+            let ch = size.height / CGFloat(n)
+            var path = Path()
+            for iy in 0..<n {
+                for ix in 0..<n {
+                    let g = grid[iy * n + ix]
+                    if g <= p && g > p - ThresholdGlow.band {
+                        path.addRect(CGRect(x: CGFloat(ix) * cw - 0.25, y: CGFloat(iy) * ch - 0.25,
+                                            width: cw + 0.5, height: ch + 0.5))
+                    }
+                }
+            }
+            context.fill(path, with: .color(tint.opacity(0.85)))
+        }
+    }
+}
+
 /// Draws `old` turning into `new` using transition `id` at `progress` (0 = all old, 1 = all new).
 struct TransitionStage<Old: View, New: View>: View {
     let id: Int
@@ -342,8 +520,73 @@ struct TransitionStage<Old: View, New: View>: View {
             ZStack {
                 switch TransitionMode.of(id) {
                 case .threshold:
+                    if let tint = PreviewVariant.table[id]?.tint {
+                        // Overshoot so the glowing edge travels off the frame before the end.
+                        let q = p * CGFloat(1 + ThresholdGlow.band)
+                        old.frame(width: w, height: h)
+                        new.frame(width: w, height: h).mask(ThresholdMask(id: id, progress: q))
+                        ThresholdGlow(id: id, progress: q, tint: tint).frame(width: w, height: h)
+                    } else {
+                        old.frame(width: w, height: h)
+                        new.frame(width: w, height: h).mask(ThresholdMask(id: id, progress: p))
+                    }
+                case .mirrored:
+                    TransitionStage<AnyView, AnyView>(id: PreviewVariant.mirroredBase[id] ?? 21, progress: p) {
+                        AnyView(old.scaleEffect(x: -1, y: 1))
+                    } new: {
+                        AnyView(new.scaleEffect(x: -1, y: 1))
+                    }
+                    .scaleEffect(x: -1, y: 1)
+                    .frame(width: w, height: h)
+                case .zoomOut:
+                    // Ease-in-back: grows a touch, then shrinks away.
+                    let c: CGFloat = 1.70158
+                    let e = (c + 1) * p * p * p - c * p * p
+                    new.frame(width: w, height: h)
                     old.frame(width: w, height: h)
-                    new.frame(width: w, height: h).mask(ThresholdMask(id: id, progress: p))
+                        .shadow(color: .black.opacity(0.5), radius: 6, x: 5, y: 5)
+                        .scaleEffect(max(0.001, 1 - e))
+                        .opacity(p > 0.98 ? 0 : 1)
+                case .infiniteZoomOut:
+                    new.frame(width: w, height: h)
+                        .scaleEffect(1 + 2 * (1 - p))
+                        .opacity(Double(p))
+                    old.frame(width: w, height: h)
+                        .scaleEffect(1 - 0.6 * p)
+                        .opacity(Double(1 - p))
+                case .crt:
+                    Color.black.frame(width: w, height: h)
+                    if p < 0.5 {
+                        let a = p / 0.5
+                        old.frame(width: w, height: h)
+                            .brightness(Double(a) * 0.6)
+                            .scaleEffect(x: max(0.02, a > 0.7 ? 1 - (a - 0.7) / 0.3 : 1),
+                                         y: max(0.01, (1 - a) * (1 - a)))
+                    } else {
+                        let b = (p - 0.5) / 0.5
+                        new.frame(width: w, height: h)
+                            .brightness(Double(1 - b) * 0.6)
+                            .scaleEffect(x: 1, y: max(0.01, 1 - (1 - b) * (1 - b) * (1 - b)))
+                    }
+                case .pixelate:
+                    let r = sin(Double(p) * .pi) * 8
+                    (p < 0.5 ? AnyView(old) : AnyView(new))
+                        .frame(width: w, height: h)
+                        .blur(radius: r)
+                case .vhs:
+                    let amp = sin(Double(p) * .pi)
+                    let jitter = CGFloat(sin(Double(p) * 47) * 14 * amp)
+                    ZStack {
+                        (p < 0.5 ? AnyView(old) : AnyView(new))
+                            .frame(width: w, height: h)
+                            .colorMultiply(Color(red: 1, green: 0.4, blue: 1))
+                            .offset(x: jitter + CGFloat(amp * 4))
+                        (p < 0.5 ? AnyView(old) : AnyView(new))
+                            .frame(width: w, height: h)
+                            .colorMultiply(Color(red: 0.4, green: 1, blue: 1))
+                            .offset(x: jitter - CGFloat(amp * 4))
+                            .blendMode(.screen)
+                    }
                 case .crossfade:
                     old.frame(width: w, height: h)
                     new.frame(width: w, height: h).opacity(Double(p))
