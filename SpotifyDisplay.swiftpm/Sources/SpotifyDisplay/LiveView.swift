@@ -22,7 +22,7 @@ struct NerdLogView: View {
         let lines = bleManager.eventLog
         VStack(alignment: .leading, spacing: 0) {
             LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-                .padding(.top, 6)
+                .padding(.top, 8)
             ThemedDivider()
                 .padding(.vertical, 8)
             CacheHistory(entries: bleManager.transferLog) {

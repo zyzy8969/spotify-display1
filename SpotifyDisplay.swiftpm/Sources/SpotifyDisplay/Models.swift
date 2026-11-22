@@ -51,6 +51,24 @@ struct TransferLogEntry: Identifiable, Codable, Equatable {
     /// song is new to the person even though the board drew it from its card. Optional so older
     /// saved entries still decode.
     var prefetched: Bool? = nil
+    /// A cache hit on a cover the keychain had never shown before (it was only saved ahead, this
+    /// launch or an earlier one): the "new" pop-up, not "cache". Optional so older entries decode.
+    var firstShow: Bool? = nil
+}
+
+/// Covers the keychain has actually shown (cache-key sources), saved on the phone so a cache hit can
+/// tell "seen before" from "only prefetched". Newest last, capped so it stays small (~100 KB at most).
+enum ShownCovers {
+    static let storageKey = "shownCoverKeys.v1"
+    static let cap = 3000
+
+    static func load() -> [String] {
+        UserDefaults.standard.stringArray(forKey: storageKey) ?? []
+    }
+
+    static func save(_ keys: [String]) {
+        UserDefaults.standard.set(Array(keys.suffix(cap)), forKey: storageKey)
+    }
 }
 
 /// All-time totals for Settings > Lifetime stats. Saved on the phone (UserDefaults, a few hundred

@@ -170,7 +170,7 @@ struct NowPlayingScreen: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .overlay {
-                ResultPopups(lastEntry: bleManager.transferLog.last, area: geo.size)
+                ResultPopups(lastEntry: bleManager.transferLog.last, photoUp: bleManager.photoHold, area: geo.size)
             }
         }
         .alert("Photo", isPresented: Binding(
@@ -531,6 +531,15 @@ struct NowPlayingScreen: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 10)
                     .transition(.opacity)
+            } else {
+                // Nerd mode: the progress line sits right under the small cover, as wide as it,
+                // with the live details straight below (no divider line in between).
+                nerdStrip
+                    .frame(width: side)
+                    .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 6)
+                    .transition(.opacity)
             }
 
             if !nerd {
@@ -575,7 +584,7 @@ struct NowPlayingScreen: View {
         }
     }
 
-    /// Nerd mode, right of the cover: title and artist, the controls centred under them, then a thin strip.
+    /// Nerd mode, right of the cover: title and artist, the controls centred under them.
     private func nerdTrackColumn(side: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: true, leading: true)
@@ -583,26 +592,15 @@ struct NowPlayingScreen: View {
             PlaybackControls(spotifyManager: spotifyManager, compact: true)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
-            LiveStrip(
-                state: stripState,
-                run: stripRun,
-                stage: bleManager.sendStage,
-                bleFloor: stripBleFloor,
-                failed: stripFailed,
-                thickness: ArtMetrics.nerdStripThickness
-            )
-            .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, minHeight: side, alignment: .topLeading)
         .environment(\.themeTextScale, ArtMetrics.compactTextScale)
     }
 
-    /// Nerd mode under the cover row: the live details (fixed) + session log.
+    /// Nerd mode under the cover and its progress line: the live details (fixed, at the top) + session log.
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
         VStack(spacing: 0) {
-            ThemedDivider()
-                .padding(.top, 6)
             if showsLower {
                 NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
                     .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
@@ -625,7 +623,7 @@ struct NowPlayingScreen: View {
         let back = backImage
         return ZStack {
             if let back {
-                PeekCard(image: back, side: side, flipKey: 0)
+                PeekCard(image: back, side: side)
                     .rotationEffect(.degrees(4))
                     .offset(x: PeekCard.peek(for: side))
                     .transition(.opacity)
@@ -651,6 +649,18 @@ struct NowPlayingScreen: View {
                 : (canReshow ? "Double-tap to show your last photo on the display" : "")
         )
         .accessibilityAction { coverTapped() }
+    }
+
+    /// Nerd mode's thinner progress line, under the small cover.
+    private var nerdStrip: some View {
+        LiveStrip(
+            state: stripState,
+            run: stripRun,
+            stage: bleManager.sendStage,
+            bleFloor: stripBleFloor,
+            failed: stripFailed,
+            thickness: ArtMetrics.nerdStripThickness
+        )
     }
 
     private var strip: some View {
@@ -751,11 +761,16 @@ private struct ScrollIf<Content: View>: View {
     }
 }
 
-/// Little words that pop up at a random spot when a cover lands: "cache" in the status LED's blue for
-/// a cover drawn from the SD card, "new" in its orange for one sent fresh. Purely decorative: no hit
-/// testing, hidden from VoiceOver (the strip already says the same). Reduce Motion: fade only.
+/// Little words that pop up at a random spot when a song cover lands: "cache" in the status LED's blue
+/// for a cover the keychain has shown before (drawn from its SD card), "new" in its orange for a song
+/// it is showing for the first time, even when that cover was saved ahead (prefetch) and so also comes
+/// off the card. Photos never pop anything: album -> photo is silent; photo -> album is the song's
+/// cover coming back, so it says "cache". Purely decorative: no hit testing, hidden from VoiceOver
+/// (the strip already says the same). Reduce Motion: fade only.
 private struct ResultPopups: View {
     let lastEntry: TransferLogEntry?
+    /// A photo is on the display: nothing pops.
+    let photoUp: Bool
     let area: CGSize
 
     @Environment(\.theme) private var theme
@@ -790,9 +805,9 @@ private struct ResultPopups: View {
         .allowsHitTesting(false)
         .accessibilityHidden(true)
         .onChange(of: lastEntry?.id) { _ in
-            guard let entry = lastEntry, entry.outcome == "cache hit" || entry.outcome == "ok" else { return }
-            // A cover saved ahead of time (queue prefetch) comes off the card, but the song is new.
-            spawn(cached: entry.cacheHit && entry.prefetched != true)
+            guard !photoUp, let entry = lastEntry,
+                  entry.outcome == "cache hit" || entry.outcome == "ok" else { return }
+            spawn(cached: entry.cacheHit && entry.firstShow != true)
         }
     }
 
@@ -825,29 +840,15 @@ private struct ResultPopups: View {
     }
 }
 
-/// The picture that is not on the display, tucked behind the cover. A tap (`flipKey` changes) flips
-/// it over on its vertical axis to the new picture; any other change of `image` (the same picture
-/// re-decoded once the board confirms, a newer song cover) just updates it. Reduce Motion: a crossfade.
+/// The picture that is not on the display, tucked behind the cover. It never flips (the front card
+/// does): it always draws the picture it is given, so after a swap it shows the other picture at once.
+/// (It used to keep its own copy, refreshed from an `onChange`; on iOS that closure could still see the
+/// previous picture, so the back card lagged one swap behind and showed the same picture as the front.)
 private struct PeekCard: View {
     let image: UIImage
     let side: CGFloat
-    let flipKey: Int
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// What the card shows right now (changes halfway through a flip).
-    @State private var face: UIImage?
-    @State private var angle: Double = 0
-    @State private var gen = 0
-    @State private var seenFlipKey = 0
-
-    private static let half = 0.17
-
-    /// One change token, so a tap's new image and new key are handled together, in one place.
-    private struct Token: Equatable {
-        let flipKey: Int
-        let imageID: ObjectIdentifier
-    }
 
     /// How far the card sticks out to the right of the cover.
     static func peek(for side: CGFloat) -> CGFloat {
@@ -856,7 +857,7 @@ private struct PeekCard: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous)
-        Image(uiImage: face ?? image)
+        Image(uiImage: image)
             .resizable()
             .scaledToFill()
             .frame(width: side, height: side)
@@ -865,43 +866,6 @@ private struct PeekCard: View {
             .overlay(shape.stroke(theme.ringOff.opacity(0.6), lineWidth: 1))
             .brightness(-0.04)
             .shadow(color: theme.artShadowColor, radius: theme.artShadowRadius, x: 0, y: theme.artShadowY)
-            .rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
-            .onAppear {
-                face = image
-                seenFlipKey = flipKey
-            }
-            .onChange(of: Token(flipKey: flipKey, imageID: ObjectIdentifier(image))) { token in
-                if token.flipKey != seenFlipKey {
-                    seenFlipKey = token.flipKey
-                    flip()
-                } else if angle == 0 {
-                    // Not mid-flip: show the refreshed picture as is.
-                    face = image
-                }
-            }
-    }
-
-    private func flip() {
-        gen &+= 1
-        let g = gen
-        if reduceMotion {
-            withAnimation(.easeInOut(duration: 0.2)) { face = image }
-            return
-        }
-        withAnimation(.easeIn(duration: Self.half)) { angle = 90 }
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.half) {
-            guard g == gen else { return }
-            var cut = Transaction()
-            cut.disablesAnimations = true
-            withTransaction(cut) {
-                face = image
-                angle = -90
-            }
-            DispatchQueue.main.async {
-                guard g == gen else { return }
-                withAnimation(.easeOut(duration: Self.half + 0.05)) { angle = 0 }
-            }
-        }
     }
 }
 

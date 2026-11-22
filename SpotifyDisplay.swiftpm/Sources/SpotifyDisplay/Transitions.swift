@@ -17,7 +17,7 @@ struct TransitionInfo: Identifiable, Hashable {
 }
 
 enum TransitionCatalog {
-    /// Every live transition (retired indices 5, 10 and 16 are not listed), in header-index order.
+    /// Every live transition (retired indices 5, 10, 16, 75-80 and 92 are not listed), in header-index order.
     static let all: [TransitionInfo] = [
         .init(id: 0, name: "Wipe Up", quick: true, blurb: "Reveals from the bottom edge upward"),
         .init(id: 1, name: "Wipe Right", quick: false, blurb: "Reveals from left to right"),
@@ -67,7 +67,67 @@ enum TransitionCatalog {
         .init(id: 48, name: "Wave Wipe", quick: true, blurb: "A wavy edge sweeps across"),
         .init(id: 49, name: "Venetian H", quick: true, blurb: "Horizontal blinds open"),
         .init(id: 50, name: "Spiral In", quick: true, blurb: "Spirals in from the edge"),
-        .init(id: 51, name: "Luma Wipe", quick: true, blurb: "Brightness-style soft wipe")
+        .init(id: 51, name: "Luma Wipe", quick: true, blurb: "Brightness-style soft wipe"),
+        // BLE_PROTOCOL 1.15 (build 46). 75-80 and 92 are retired (not listed).
+        .init(id: 52, name: "Wipe Down", quick: true, blurb: "Reveals from the top edge downward"),
+        .init(id: 53, name: "Iris Close", quick: true, blurb: "A ring closes in to the centre"),
+        .init(id: 54, name: "Diamond Close", quick: true, blurb: "A diamond closes in to the centre"),
+        .init(id: 55, name: "Heart Close", quick: true, blurb: "The old cover shrinks to a heart"),
+        .init(id: 56, name: "Clock Reverse", quick: true, blurb: "The clock hand sweeps anticlockwise"),
+        .init(id: 57, name: "Bow Tie Close", quick: true, blurb: "Bow tie closes from the sides"),
+        .init(id: 58, name: "Wind Reverse", quick: true, blurb: "Rows blow in from the left"),
+        .init(id: 59, name: "Polka Dots Reverse", quick: true, blurb: "Dots grow, right to left"),
+        .init(id: 60, name: "Rain Rise", quick: true, blurb: "Columns rise up from the bottom"),
+        .init(id: 61, name: "Wave Wipe Reverse", quick: true, blurb: "A wavy edge sweeps right to left"),
+        .init(id: 62, name: "Spiral Out", quick: true, blurb: "Spirals out from the centre"),
+        .init(id: 63, name: "Box Close", quick: true, blurb: "A square closes in to the centre"),
+        .init(id: 64, name: "Split Close H", quick: true, blurb: "Top and bottom close to the middle"),
+        .init(id: 65, name: "Split Close V", quick: true, blurb: "Left and right close to the middle"),
+        .init(id: 66, name: "Diagonal Up", quick: true, blurb: "Wipes from bottom-left to top-right"),
+        .init(id: 67, name: "Diagonal Down Left", quick: true, blurb: "Wipes from top-right to bottom-left"),
+        .init(id: 68, name: "Halftone Shrink", quick: true, blurb: "The old cover shrinks into dots"),
+        .init(id: 69, name: "Luma Wipe Reverse", quick: true, blurb: "Highlights arrive first, shadows last"),
+        .init(id: 70, name: "Plus Wipe", quick: true, blurb: "A plus sign opens from the centre"),
+        .init(id: 71, name: "Plus Close", quick: true, blurb: "Corners close in to a plus"),
+        .init(id: 72, name: "Wheel", quick: true, blurb: "Four spokes sweep round"),
+        .init(id: 73, name: "Random Bars", quick: true, blurb: "Horizontal bars pop in at random"),
+        .init(id: 74, name: "Random Bars V", quick: true, blurb: "Vertical bars pop in at random"),
+        .init(id: 81, name: "Push Right", quick: false, blurb: "New cover pushes the old one out to the right"),
+        .init(id: 82, name: "Card Stack Left", quick: false, blurb: "New cover slides over from the left"),
+        .init(id: 83, name: "Cube Turn Reverse", quick: false, blurb: "Cube rotates the other way"),
+        .init(id: 84, name: "Corner Peel Reverse", quick: false, blurb: "Peels back from the other corner"),
+        .init(id: 85, name: "Accordion Reverse", quick: false, blurb: "Folds into the left edge"),
+        .init(id: 86, name: "Block Rise", quick: false, blurb: "Blocks fly up into place, top row first"),
+        .init(id: 87, name: "Melt Up", quick: false, blurb: "The old cover drips upward"),
+        .init(id: 88, name: "Jelly Rise", quick: false, blurb: "Wobbly rise from the bottom"),
+        .init(id: 89, name: "Zoom Out", quick: false, blurb: "The old cover shrinks away into the centre"),
+        .init(id: 90, name: "Infinite Zoom Out", quick: false, blurb: "Camera pulls back out of the old cover"),
+        .init(id: 91, name: "CRT Off", quick: false, blurb: "Old TV switches off to a line, new one switches on"),
+        .init(id: 93, name: "Neon Scan", quick: false, blurb: "Cyan scan line with a glowing grid"),
+        .init(id: 94, name: "Glass Sweep", quick: false, blurb: "Glossy Aero-style glint sweeps across"),
+        .init(id: 95, name: "Pixelate", quick: false, blurb: "Breaks into big pixels and sharpens back"),
+        .init(id: 96, name: "VHS Glitch", quick: false, blurb: "Tape-tracking tears and colour fringes"),
+        .init(id: 97, name: "Cube Up", quick: false, blurb: "Cube rolls the old cover away upward"),
+        .init(id: 98, name: "Cube Down", quick: false, blurb: "Cube rolls the old cover away downward"),
+        // Slideshow set (PowerPoint 2003 / 2010, Google Slides)
+        .init(id: 99, name: "Comb Horizontal", quick: false, blurb: "Alternate strips slide in from left and right"),
+        .init(id: 100, name: "Comb Vertical", quick: false, blurb: "Alternate strips slide in from top and bottom"),
+        .init(id: 101, name: "Cover Down", quick: false, blurb: "New cover drops down over the old one"),
+        .init(id: 102, name: "Uncover Left", quick: false, blurb: "Old cover slides off left, revealing the new one"),
+        .init(id: 103, name: "Uncover Down", quick: false, blurb: "Old cover slides down and out"),
+        .init(id: 104, name: "Fade Through Black", quick: false, blurb: "Fade out to black, then fade up"),
+        .init(id: 105, name: "Newsflash", quick: false, blurb: "New cover spins in from the centre, twice round"),
+        .init(id: 106, name: "Strips", quick: true, blurb: "Stair-step blocks wipe from the top-left"),
+        .init(id: 107, name: "Wedge", quick: true, blurb: "Two hands sweep down both sides from 12 o'clock"),
+        .init(id: 108, name: "Checkerboard Across", quick: true, blurb: "Checker squares fill left to right, staggered"),
+        .init(id: 109, name: "Honeycomb", quick: true, blurb: "Hexagons pop in with a warm edge"),
+        .init(id: 110, name: "Glitter", quick: true, blurb: "Diamonds sparkle in, left to right"),
+        .init(id: 111, name: "Shred", quick: false, blurb: "Old cover cut into strips that slide apart"),
+        .init(id: 112, name: "Gallery", quick: false, blurb: "Covers glide past on a reflective floor"),
+        .init(id: 113, name: "Doors", quick: false, blurb: "Two doors swing open toward you"),
+        .init(id: 114, name: "Ripple", quick: false, blurb: "A water ripple spreads from the centre"),
+        .init(id: 115, name: "Flash", quick: false, blurb: "Camera-flash white-out into the new cover"),
+        .init(id: 116, name: "Fly Through", quick: false, blurb: "Fly through the old cover into the new one")
     ]
 
     /// Themes for the picker, so a whole family (e.g. everything that slides) can be switched at once.
@@ -79,14 +139,18 @@ enum TransitionCatalog {
     }
 
     static let groups: [Group] = [
-        Group(name: "Sliding & pushing", ids: [21, 18, 30, 23, 35]),
-        Group(name: "Wipes & sweeps", ids: [0, 1, 2, 6, 7, 9, 28, 43, 48, 51]),
-        Group(name: "Splits & blinds", ids: [12, 13, 14, 8, 49, 37]),
-        Group(name: "Shapes & irises", ids: [3, 40, 41, 42, 44, 11, 50, 39, 46]),
-        Group(name: "Blocks & tiles", ids: [4, 15, 17, 24, 25, 29, 32]),
+        Group(name: "Y2K tech", ids: [91, 93, 94, 95, 96]),
+        Group(name: "PowerPoint & Slides", ids: [99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
+                                                 109, 110, 111, 112, 113, 114, 115, 116]),
+        Group(name: "Sliding & pushing", ids: [21, 81, 18, 82, 30, 83, 97, 98, 23, 35, 85]),
+        Group(name: "Wipes & sweeps", ids: [0, 52, 1, 2, 6, 7, 66, 67, 9, 28, 84, 43, 56, 72, 48, 61, 51, 69]),
+        Group(name: "Splits & blinds", ids: [12, 64, 13, 65, 14, 8, 49, 37, 73, 74]),
+        Group(name: "Shapes & irises", ids: [3, 40, 53, 41, 54, 42, 55, 44, 57, 11, 63, 70, 71,
+                                             50, 62, 39, 68, 46, 59]),
+        Group(name: "Blocks & tiles", ids: [4, 15, 17, 24, 25, 86, 29, 32]),
         Group(name: "Fades & dissolves", ids: [22, 19, 20, 34, 36]),
-        Group(name: "Drips & falls", ids: [26, 31, 38, 47, 45]),
-        Group(name: "Zooms", ids: [27, 33])
+        Group(name: "Drips & falls", ids: [26, 87, 31, 88, 38, 47, 60, 45, 58]),
+        Group(name: "Zooms", ids: [27, 89, 33, 90])
     ]
 
     static func info(named name: String) -> TransitionInfo? {
@@ -117,18 +181,32 @@ enum TransitionPrefs {
         return TransitionCatalog.all.filter { !off.contains($0.id) }.count
     }
 
-    /// Bit i set = transition index i may be picked. All off = 0: the board (BLE_PROTOCOL 1.13) then
-    /// shows new covers at once, with no transition.
-    static func mask(disabledRaw: String) -> UInt64 {
-        let off = disabledSet(from: disabledRaw)
-        var mask: UInt64 = 0
-        for t in TransitionCatalog.all where !off.contains(t.id) {
-            mask |= (UInt64(1) << UInt64(t.id))
+    /// 128-bit enabled mask (BLE_PROTOCOL 1.15) as two 64-bit halves. Bit i set = transition index i
+    /// may be picked. Nothing on (bit 127 aside) = the board shows new covers at once, no transition.
+    struct Mask128: Equatable {
+        var lo: UInt64 = 0
+        var hi: UInt64 = 0
+        /// Bit 127: tells 1.15 firmware the upper half is real (a 1.12-1.14 app sends zeros there).
+        static let extendedFlag: UInt64 = 1 << 63
+
+        mutating func set(_ i: Int) {
+            if i < 64 { lo |= UInt64(1) << UInt64(i) } else { hi |= UInt64(1) << UInt64(i - 64) }
         }
+
+        func contains(_ i: Int) -> Bool {
+            i < 64 ? (lo >> UInt64(i)) & 1 == 1 : (hi >> UInt64(i - 64)) & 1 == 1
+        }
+    }
+
+    static func mask(disabledRaw: String) -> Mask128 {
+        let off = disabledSet(from: disabledRaw)
+        var mask = Mask128()
+        for t in TransitionCatalog.all where !off.contains(t.id) { mask.set(t.id) }
+        mask.hi |= Mask128.extendedFlag
         return mask
     }
 
-    static var currentMask: UInt64 {
+    static var currentMask: Mask128 {
         mask(disabledRaw: UserDefaults.standard.string(forKey: storageKey) ?? "")
     }
 }
@@ -136,14 +214,14 @@ enum TransitionPrefs {
 // MARK: - Transition speeds (BLE_PROTOCOL 1.14)
 
 /// Per-transition speed and the "random speed" switch. Every transition runs at its normal speed (1x)
-/// unless the person sets one; with random speed on, each draw of a transition left at normal picks
-/// a speed between 0.5x and 2x on the board.
+/// unless the person sets one; with random speed on (the default), each draw of a transition left at
+/// normal picks a speed between 0.4x and 1.3x on the board (owner's range, 2026-11-22).
 enum TransitionSpeeds {
     /// Only the transitions the person changed: "id:percent" pairs, e.g. "22:150,35:60".
     static let storageKey = "transitionSpeeds"
     static let randomKey = "transitionSpeedRandom"
-    static let minPercent = 50
-    static let maxPercent = 200
+    static let minPercent = 40
+    static let maxPercent = 130
     static let normal = 100
 
     static func parse(_ raw: String) -> [Int: Int] {
@@ -167,8 +245,10 @@ enum TransitionSpeeds {
         parse(UserDefaults.standard.string(forKey: storageKey) ?? "")
     }
 
+    /// On unless the person switched it off.
+    static let randomDefault = true
     static var randomOn: Bool {
-        UserDefaults.standard.bool(forKey: randomKey)
+        UserDefaults.standard.object(forKey: randomKey) as? Bool ?? randomDefault
     }
 
     /// "1.5x", "0.75x", "1x".
@@ -180,12 +260,13 @@ enum TransitionSpeeds {
         return s + "x"
     }
 
-    /// The 1.14 write: magic, flags (bit 0 = random), then one byte per header index 0-51
-    /// (0 = default, otherwise percent).
+    /// The 1.14 write: magic, flags (bit 0 = random), then one byte per header index
+    /// (0 = default, otherwise percent): 0-51 for 1.14 boards, 0-116 for 1.15 (`CAPS:t128`).
     static let magic = UInt32(0xCAC4E1EC)
     static let slots = 52
+    static let slots128 = 117
 
-    static func packet(speeds: [Int: Int], random: Bool) -> Data {
+    static func packet(speeds: [Int: Int], random: Bool, slots: Int = TransitionSpeeds.slots) -> Data {
         var data = Data()
         withUnsafeBytes(of: magic.littleEndian) { data.append(contentsOf: $0) }
         data.append(random ? 1 : 0)

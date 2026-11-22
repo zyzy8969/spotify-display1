@@ -372,8 +372,31 @@ void drawCheckerCascade(uint16_t* buffer, int width, int height) {
 
 static const int CW = DISPLAY_WIDTH, CH = DISPLAY_HEIGHT;
 
+// Mirror a full frame in place: bit 0 = left/right, bit 1 = top/bottom.
+static void mirrorFrame(uint16_t* b, uint8_t flip) {
+  if (flip & 1)
+    for (int y = 0; y < CH; y++) {
+      uint16_t* r = b + y * CW;
+      for (int a = 0, c = CW - 1; a < c; a++, c--) { uint16_t t = r[a]; r[a] = r[c]; r[c] = t; }
+    }
+  if (flip & 2) {
+    static uint16_t tmp[DISPLAY_WIDTH];
+    for (int a = 0, c = CH - 1; a < c; a++, c--) {
+      memcpy(tmp, b + a * CW, CW * 2);
+      memcpy(b + a * CW, b + c * CW, CW * 2);
+      memcpy(b + c * CW, tmp, CW * 2);
+    }
+  }
+}
+
+// Mirrored transitions (1.13, 81-88) run an existing effect on mirrored covers; each composed frame is
+// mirrored back just for the push, so the picture reads correctly and only the motion is reversed.
+static uint8_t composeFlip = 0;
+
 static inline void pushComposedFrame() {
+  if (composeFlip) mirrorFrame(composeBuffer, composeFlip);
   gfx->draw16bitRGBBitmap(0, 0, composeBuffer, CW, CH);
+  if (composeFlip) mirrorFrame(composeBuffer, composeFlip);  // effects may build on the last frame
 }
 
 static inline float easeInOut(float t) {
@@ -782,6 +805,25 @@ void drawCubeTurn(const uint16_t* oldB, const uint16_t* newB) {
   }
 }
 
+// Cube Up (1.13): Cube Turn on the horizontal axis; the old face rolls away upward. Cube Down mirrors it.
+void drawCubeTurnV(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(26);
+  for (int f = 1; f <= frames; f++) {
+    float th = easeInOut((float)f / frames) * (PI / 2), sn = sinf(th), cs = cosf(th), wa = CH * cs;
+    memset(composeBuffer, 0, IMAGE_SIZE);
+    for (int y = 0; y < CH; y++) {
+      const uint16_t* D; float u, h, sh;
+      if (y < wa) { D = oldB; u = y / wa; h = 1.0f - 0.18f * sn * (1.0f - u); sh = 1.0f - 0.55f * sn; }
+      else { D = newB; u = (y - wa) / fmaxf(1.0f, CH - wa); h = 1.0f - 0.18f * cs * u; sh = 1.0f - 0.55f * cs; }
+      const uint16_t* row = D + clampPx((int)(u * CH)) * CW;
+      int x0 = max(0, (int)ceilf(120.0f - 120.0f * h)), x1 = min(CW, (int)ceilf(120.0f + 120.0f * h));
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = x0; x < x1; x++) d[x] = shade565(row[clampPx((int)((x - 120) / h + 120))], sh);
+    }
+    pushComposedFrame();
+  }
+}
+
 // Jelly Drop: new cover falls in, squashes on impact and wobbles until it settles.
 void drawJellyDrop(const uint16_t* oldB, const uint16_t* newB) {
   const int frames = tx_frames(34);
@@ -1038,7 +1080,8 @@ void drawHalftone(const uint16_t* oldB, const uint16_t* newB) {
 // ==================================================
 
 #define QUICK_FRAMES tx_frames(10)
-static uint8_t* quickMaps[12] = {nullptr};
+#define QUICK_MAP_COUNT 25
+static uint8_t* quickMaps[QUICK_MAP_COUNT] = {nullptr};
 
 static float quickThreshold(int id, int x, int y) {
   float dx = x + 0.5f - 120, dy = y + 0.5f - 120, r = sqrtf(dx * dx + dy * dy);
@@ -1068,6 +1111,41 @@ static float quickThreshold(int id, int x, int y) {
       int ring = min(min(x, y), min(CW - 1 - x, CH - 1 - y)) / 8;
       return ring + ang / (2 * PI);
     }
+    // 1.13 base maps, used only through the VARIANTS table (flips / inverses / neon edges).
+    case 12: return y;                                           // Linear, top first
+    case 13: return fmaxf(fabsf(dx), fabsf(dy));                 // Box from the centre
+    case 14: return fabsf(dy);                                   // Split from the middle row
+    case 15: return fminf(fabsf(dx), fabsf(dy));                 // Plus
+    case 16: return fmodf(ang, PI / 2);                          // Wheel, 4 spokes
+    case 17: return cellHash(y >> 2, 21);                        // Random Bars, 4 px rows
+    case 18: {                                                   // Halftone, 20 px dots
+      float fx = (x % 20) - 9.5f, fy = (y % 20) - 9.5f;
+      return sqrtf(fx * fx + fy * fy);
+    }
+    case 19: return x + y;                                       // Diagonal, top-left first
+    // Slideshow set (99-116)
+    case 20: return (x / 20) + (y / 20);                         // Strips: stair-step blocks
+    case 21: return fminf(ang, 2 * PI - ang);                    // Wedge: two hands from 12 o'clock
+    case 22: return (x % 30) + (((x / 30) + (y / 30)) & 1) * 30 + (x / 30) * 8;  // Checkerboard Across
+    case 23: {                                                   // Honeycomb: hex cells, random order
+      const float w = 26, h = 22;
+      float best = 1e9f; int bc = 0, br = 0;
+      int row = (int)floorf(y / h);
+      for (int r = row - 1; r <= row + 1; r++) {
+        float off = (r & 1) ? w / 2 : 0;
+        int col = (int)floorf((x - off) / w);
+        for (int c = col - 1; c <= col + 1; c++) {
+          float d = hypotf(x - (c * w + off + w / 2), y - (r * h + h / 2));
+          if (d < best) { best = d; bc = c + 50; br = r + 50; }
+        }
+      }
+      return cellHash(bc, br) / 255.0f * 0.85f + best / 15.0f * 0.15f;
+    }
+    case 24: {                                                   // Glitter: diamond cells, left to right
+      int u = (x + y) / 17, w = (x - y + 240) / 17;
+      float lu = ((x + y) % 17) - 8.5f, lw = ((x - y + 240) % 17) - 8.5f;
+      return cellHash(u, w + 300) / 255.0f * 0.8f + (fabsf(lu) + fabsf(lw)) / 17.0f * 0.2f + x / 240.0f * 0.25f;
+    }
     default: return 0;                                           // 11 = Luma Wipe (per image)
   }
 }
@@ -1091,21 +1169,502 @@ static uint8_t* getQuickMap(int id) {
   return m;
 }
 
-void drawQuickMask(int id, const uint16_t* oldB, const uint16_t* newB) {
+// Variant flags for a threshold map: read it reversed (INV), mirrored, or transposed; GLOW paints a
+// coloured leading edge on the reveal front.
+#define QV_INV  1
+#define QV_MX   2
+#define QV_MY   4
+#define QV_TR   8
+#define QV_GLOW 16
+#define QV_GLOW_BAND 24  // edge width in threshold units (map runs 0..250)
+
+static const uint8_t* lumaMapFor(const uint16_t* newB) {
   static uint8_t* lumaMap = nullptr;
-  const uint8_t* m;
-  if (id == 11) {  // Luma Wipe: dark parts of the new cover arrive first, highlights last
-    if (!lumaMap) lumaMap = (uint8_t*)ps_malloc(CW * CH);
-    if (!lumaMap) { drawPushLeft(oldB, newB); return; }
-    for (int i = 0; i < CW * CH; i++) lumaMap[i] = (uint8_t)(luma565(newB[i]) * 250.0f);
-    m = lumaMap;
-  } else {
-    m = getQuickMap(id);
-    if (!m) { drawPushLeft(oldB, newB); return; }
-  }
+  if (!lumaMap) lumaMap = (uint8_t*)ps_malloc(CW * CH);
+  if (!lumaMap) return nullptr;
+  for (int i = 0; i < CW * CH; i++) lumaMap[i] = (uint8_t)(luma565(newB[i]) * 250.0f);
+  return lumaMap;
+}
+
+void drawQuickMaskEx(int id, uint8_t flags, uint16_t tint, const uint16_t* oldB, const uint16_t* newB) {
+  // 11 = Luma Wipe: dark parts of the new cover arrive first, highlights last.
+  const uint8_t* m = (id == 11) ? lumaMapFor(newB) : getQuickMap(id);
+  if (!m) { drawPushLeft(oldB, newB); return; }
+  const bool glow = flags & QV_GLOW, plain = (flags & (QV_MX | QV_MY | QV_TR)) == 0;
+  const int top = glow ? 256 + QV_GLOW_BAND : 256;  // glow needs extra travel so the edge leaves the frame
   for (int f = 1; f <= QUICK_FRAMES; f++) {
-    int level = (f * 256) / QUICK_FRAMES;
-    for (int i = 0; i < CW * CH; i++) composeBuffer[i] = m[i] < level ? newB[i] : oldB[i];
+    int level = (f * top) / QUICK_FRAMES;
+    for (int y = 0; y < CH; y++) {
+      int sy = (flags & QV_MY) ? CH - 1 - y : y;
+      uint16_t* d = composeBuffer + y * CW;
+      const uint16_t* o = oldB + y * CW;
+      const uint16_t* n = newB + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int v;
+        if (plain) v = m[y * CW + x];
+        else {
+          int sx = (flags & QV_MX) ? CW - 1 - x : x;
+          v = (flags & QV_TR) ? m[sx * CW + sy] : m[sy * CW + sx];
+        }
+        if (flags & QV_INV) v = 250 - v;
+        if (v >= level) { d[x] = o[x]; continue; }
+        int lag = level - v;
+        d[x] = (glow && lag < QV_GLOW_BAND) ? blend565(n[x], tint, 32 - (lag * 32) / QV_GLOW_BAND) : n[x];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+void drawQuickMask(int id, const uint16_t* oldB, const uint16_t* newB) {
+  drawQuickMaskEx(id, 0, 0, oldB, newB);
+}
+
+// Indices 52-80, in order. Each is an existing or new threshold map read a different way.
+struct QuickVariant { uint8_t map, flags; uint16_t tint; const char* name; };
+static const QuickVariant VARIANTS[] = {
+  {12, 0, 0, "Wipe Down"},
+  {0, QV_INV, 0, "Iris Close"},
+  {1, QV_INV, 0, "Diamond Close"},
+  {2, QV_INV, 0, "Heart Close"},
+  {3, QV_MX, 0, "Clock Reverse"},
+  {4, QV_INV, 0, "Bow Tie Close"},
+  {5, QV_MX, 0, "Wind Reverse"},
+  {6, QV_MX, 0, "Polka Dots Reverse"},
+  {7, QV_MY, 0, "Rain Rise"},
+  {8, QV_MX, 0, "Wave Wipe Reverse"},
+  {10, QV_INV, 0, "Spiral Out"},
+  {13, QV_INV, 0, "Box Close"},
+  {14, QV_INV, 0, "Split Close H"},
+  {14, QV_TR | QV_INV, 0, "Split Close V"},
+  {19, QV_MY, 0, "Diagonal Up"},
+  {19, QV_MX, 0, "Diagonal Down Left"},
+  {18, QV_INV, 0, "Halftone Shrink"},
+  {11, QV_INV, 0, "Luma Wipe Reverse"},
+  {15, 0, 0, "Plus Wipe"},
+  {15, QV_INV, 0, "Plus Close"},
+  {16, 0, 0, "Wheel"},
+  {17, 0, 0, "Random Bars"},
+  {17, QV_TR, 0, "Random Bars V"},
+  // Neon edges: 2000s-UI colours on the reveal front.
+  {0, QV_GLOW, 0x07FF, "Neon Iris"},        // electric cyan
+  {3, QV_GLOW, 0x07E0, "Radar Sweep"},      // phosphor green
+  {12, QV_TR | QV_GLOW, 0xF81F, "Laser Wipe"},  // magenta, left to right
+  {10, QV_GLOW, 0x067F, "Aqua Spiral"},     // Aqua blue
+  {1, QV_GLOW, 0xF81F, "Plasma Diamond"},   // magenta
+  {13, QV_GLOW, 0xFC60, "Orange Box"},      // iPod orange
+};
+static_assert(sizeof(VARIANTS) / sizeof(VARIANTS[0]) == TRANSITION_VARIANT_LAST - TRANSITION_VARIANT_FIRST + 1,
+              "VARIANTS must cover indices 52-80 exactly");
+
+// ==================================================
+// 1.13 ZOOM-OUTS AND 2000s-TECH EFFECTS (indices 89-96). Same compose pattern.
+// ==================================================
+
+// Zoom Out: the old cover pulls back a touch, then shrinks into the centre with a drop shadow.
+void drawZoomOut(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(24);
+  for (int f = 1; f <= frames; f++) {
+    float u = (float)f / frames;
+    float e = 2.70158f * u * u * u - 1.70158f * u * u;  // easeInBack: dips below 0 first
+    float s = CW * (1.0f - e), o = (CW - s) / 2;
+    memcpy(composeBuffer, newB, IMAGE_SIZE);
+    if (s >= 1.0f) {
+      int sh = 6;  // shadow offset
+      int x0 = max(0, (int)(o + sh)), x1 = min(CW, (int)(o + s + sh));
+      int y0 = max(0, (int)(o + sh)), y1 = min(CH, (int)(o + s + sh));
+      for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) composeBuffer[y * CW + x] = shade565(composeBuffer[y * CW + x], 0.5f);
+      blitScaled(oldB, o, o, s, s);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Infinite Zoom Out: the camera pulls back; the old cover becomes a small framed picture inside the new one.
+void drawInfiniteZoomOut(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(30);
+  for (int f = 1; f <= frames; f++) {
+    float t = easeInOut((float)f / frames), k = powf(6.0f, 1.0f - t), sa = CW * k;
+    float sb = 40.0f * k * (1.0f - clamp01((t - 0.8f) / 0.2f));  // the inner picture vanishes at the end
+    blitScaled(newB, 120 - sa / 2, 120 - sa / 2, sa, sa);
+    if (sb >= 2.0f) {
+      int f0 = max(0, (int)(120 - sb / 2 - 2)), f1 = min(CW, (int)(120 + sb / 2 + 2));
+      for (int y = f0; y < f1; y++)
+        for (int x = f0; x < f1; x++) composeBuffer[y * CW + x] = 0xFFFF;
+      blitScaled(oldB, 120 - sb / 2, 120 - sb / 2, sb, sb);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Vertically squash src into an h-row band centred on the screen, brightened toward white by k (0..32).
+static void crtBand(const uint16_t* src, float h, uint32_t k) {
+  memset(composeBuffer, 0, IMAGE_SIZE);
+  int hh = max(2, (int)h), y0 = (CH - hh) / 2;
+  for (int y = 0; y < hh; y++) {
+    const uint16_t* s = src + ((y * CH) / hh) * CW;
+    uint16_t* d = composeBuffer + (y0 + y) * CW;
+    for (int x = 0; x < CW; x++) d[x] = blend565(s[x], 0xFFFF, k);
+  }
+}
+
+// CRT Off: the old picture collapses to a glowing line, then a dot; the new one switches on from a line.
+void drawCrtOff(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(32);
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    if (t < 0.4f) {
+      float a = t / 0.4f;
+      crtBand(oldB, CH * (1 - a) * (1 - a), (uint32_t)(a * 30));
+    } else if (t < 0.6f) {
+      float b = (t - 0.4f) / 0.2f;
+      memset(composeBuffer, 0, IMAGE_SIZE);
+      int w = max(4, (int)(CW * (1 - b))), x0 = (CW - w) / 2, hh = b > 0.8f ? 4 : 2;
+      for (int y = 120 - hh / 2; y < 120 + hh / 2; y++)
+        for (int x = x0; x < x0 + w; x++) composeBuffer[y * CW + x] = 0xDFFF;  // blue-white phosphor
+    } else {
+      float c = (t - 0.6f) / 0.4f, e = 1 - (1 - c) * (1 - c) * (1 - c);
+      crtBand(newB, CH * e, (uint32_t)((1 - c) * 28));
+    }
+    pushComposedFrame();
+  }
+}
+
+// Neon Scan: a cyan scan line sweeps across with a glowing grid in its wake (light-cycle style).
+void drawNeonScan(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(24);
+  for (int f = 1; f <= frames; f++) {
+    float p = easeInOut((float)f / frames) * (CW + 80) - 10;
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int i = y * CW + x;
+        float dx = x - p;
+        uint16_t c = dx < 0 ? newB[i] : oldB[i];
+        if (dx < 0 && dx > -70 && (x % 20 == 0 || y % 20 == 0))
+          c = blend565(c, 0x07FF, (uint32_t)(24 + dx * 24 / 70));  // grid fades behind the line
+        float a = fabsf(dx);
+        if (a < 2) c = 0xFFFF;
+        else if (a < 10) c = blend565(c, 0x07FF, (uint32_t)(30 - a * 3));
+        d[x] = c;
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Glass Sweep: a glossy diagonal glint (Aero / Aqua) sweeps across, swapping covers underneath.
+void drawGlassSweep(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(22);
+  for (int f = 1; f <= frames; f++) {
+    float P = easeInOut((float)f / frames) * (478 + 120) - 60;
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        int i = y * CW + x;
+        float q = x + y - P, a = fabsf(q);
+        uint16_t c = q < 0 ? newB[i] : oldB[i];
+        if (a < 3) c = blend565(c, 0xFFFF, 28);
+        else if (a < 40) c = blend565(c, 0xEFBF, (uint32_t)(20 - a / 2));
+        d[x] = c;
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Pixelate: the old cover breaks into big pixels, switches, and the new one sharpens back.
+void drawPixelate(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(20);
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    int bs = 1 + (int)(sinf(PI * t) * 23);
+    const uint16_t* src = t < 0.5f ? oldB : newB;
+    for (int y = 0; y < CH; y++) {
+      const uint16_t* s = src + min(CH - 1, (y / bs) * bs + bs / 2) * CW;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) d[x] = s[min(CW - 1, (x / bs) * bs + bs / 2)];
+    }
+    pushComposedFrame();
+  }
+}
+
+// ---------- Slideshow set (99-116), after PowerPoint 2003 / 2010 and Google Slides ----------
+
+// Comb: alternate 24 px strips slide in from opposite sides (rows for H, columns for V).
+void drawComb(const uint16_t* oldB, const uint16_t* newB, bool vertical) {
+  const int frames = tx_frames(22);
+  for (int f = 1; f <= frames; f++) {
+    int sh = (int)((1.0f - easeInOut((float)f / frames)) * CW);
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        if (!vertical) {
+          int sx = ((y / 24) & 1) == 0 ? x + sh : x - sh;
+          d[x] = (sx >= 0 && sx < CW) ? newB[y * CW + sx] : oldB[y * CW + x];
+        } else {
+          int sy = ((x / 24) & 1) == 0 ? y + sh : y - sh;
+          d[x] = (sy >= 0 && sy < CH) ? newB[sy * CW + x] : oldB[y * CW + x];
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Cover Down: the new cover drops in over the old one, with a short shadow under its edge.
+void drawCoverDown(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(24);
+  for (int f = 1; f <= frames; f++) {
+    int s = (int)(easeInOut((float)f / frames) * CH);
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      if (y < s) { memcpy(d, newB + (y + CH - s) * CW, CW * 2); continue; }
+      const uint16_t* src = oldB + y * CW;
+      if (y - s < 5) for (int x = 0; x < CW; x++) d[x] = shade565(src[x], 0.55f + (y - s) * 0.09f);
+      else memcpy(d, src, CW * 2);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Uncover Left: the old cover slides off to the left, showing the new one underneath.
+void drawUncoverLeft(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(24);
+  for (int f = 1; f <= frames; f++) {
+    int s = (int)(easeInOut((float)f / frames) * CW);
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      memcpy(d, oldB + y * CW + s, (CW - s) * 2);
+      for (int x = CW - s; x < CW; x++) {
+        int k = x - (CW - s);
+        d[x] = k < 5 ? shade565(newB[y * CW + x], 0.55f + k * 0.09f) : newB[y * CW + x];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Uncover Down: the old cover slides down and out.
+void drawUncoverDown(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(24);
+  for (int f = 1; f <= frames; f++) {
+    int s = (int)(easeInOut((float)f / frames) * CH);
+    for (int y = 0; y < CH; y++) {
+      uint16_t* d = composeBuffer + y * CW;
+      if (y >= s) { memcpy(d, oldB + (y - s) * CW, CW * 2); continue; }
+      int k = s - y;
+      for (int x = 0; x < CW; x++) d[x] = k < 6 ? shade565(newB[y * CW + x], 0.55f + k * 0.075f) : newB[y * CW + x];
+    }
+    pushComposedFrame();
+  }
+}
+
+// Fade Through Black: out to black, then up on the new cover.
+void drawFadeBlack(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(18);
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    const uint16_t* src = t < 0.5f ? oldB : newB;
+    float k = t < 0.5f ? 1.0f - 2 * t : 2 * t - 1.0f;
+    for (int i = 0; i < CW * CH; i++) composeBuffer[i] = shade565(src[i], k);
+    pushComposedFrame();
+  }
+}
+
+// Newsflash: the new cover spins twice while zooming in from the centre.
+void drawNewsflash(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(28);
+  for (int f = 1; f <= frames; f++) {
+    float e = easeInOut((float)f / frames), s = fmaxf(0.03f, e), a = (1 - e) * 4 * PI;
+    float ca = cosf(-a) / s, sa = sinf(-a) / s;
+    for (int y = 0; y < CH; y++) {
+      float dy = y + 0.5f - 120;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        float dx = x + 0.5f - 120, sx = dx * ca - dy * sa + 120, sy = dx * sa + dy * ca + 120;
+        d[x] = (sx >= 0 && sx < CW && sy >= 0 && sy < CH) ? newB[(int)sy * CW + (int)sx] : oldB[y * CW + x];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Shred: the old cover is cut into 20 px strips that slide apart, alternately up and down.
+void drawShred(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(26);
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    memcpy(composeBuffer, newB, IMAGE_SIZE);
+    for (int s = 0; s < 12; s++) {
+      int x0 = s * 20;
+      bool up = s & 1;
+      float lt = clamp01((t - cellHash(s, 9) / 255.0f * 0.25f) / 0.75f);
+      int dd = (int)(lt * lt * CH * 1.15f);
+      for (int y = 0; y < CH; y++) {
+        int sy = up ? y + dd : y - dd;
+        if (sy < 0 || sy >= CH) continue;
+        const uint16_t* src = oldB + sy * CW + x0;
+        uint16_t* d = composeBuffer + y * CW + x0;
+        for (int x = 0; x < 20; x++) d[x] = (x == 0 || x == 19) ? shade565(src[x], 0.6f) : src[x];
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Gallery: covers glide past on a dark reflective floor (Google Slides / PowerPoint 2010).
+static void galleryPic(const uint16_t* src, float cx, float size) {
+  float top = (CH - size) / 2 - size * 0.12f, left = cx - size / 2;
+  blitScaled(src, left, top, size, size);
+  int y0 = (int)ceilf(top + size), rows = min(CH - y0, (int)(size * 0.35f));
+  int xa = max(0, (int)ceilf(left)), xb = min(CW, (int)(left + size));
+  for (int r = 0; r < rows; r++) {
+    int y = y0 + r;
+    if (y < 0 || y >= CH) continue;
+    const uint16_t* srow = src + clampPx((int)((size - 1 - r) * CH / size)) * CW;
+    uint32_t k = 20 + (uint32_t)(r * 12 / max(1, rows));
+    for (int x = xa; x < xb; x++)
+      composeBuffer[y * CW + x] = blend565(srow[clampPx((int)((x - left) * CW / size))], composeBuffer[y * CW + x], k);
+  }
+}
+
+void drawGallery(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(34);
+  const float sm = CW * 0.7f;
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    for (int y = 0; y < CH; y++) {
+      uint16_t c = shade565(0x3A0A, 0.55f + y / 480.0f);
+      for (int x = 0; x < CW; x++) composeBuffer[y * CW + x] = c;
+    }
+    if (t < 0.2f) {
+      float a = easeInOut(t / 0.2f);
+      if (a < 0.05f) memcpy(composeBuffer, oldB, IMAGE_SIZE);
+      else galleryPic(oldB, 120, CW - (CW - sm) * a);
+    } else if (t < 0.8f) {
+      float off = easeInOut((t - 0.2f) / 0.6f) * sm * 1.15f;
+      galleryPic(oldB, 120 - off, sm);
+      galleryPic(newB, 120 - off + sm * 1.15f, sm);
+    } else {
+      galleryPic(newB, 120, sm + (CW - sm) * easeInOut((t - 0.8f) / 0.2f));
+    }
+    pushComposedFrame();
+  }
+}
+
+// Doors: the old cover splits into two doors that swing open toward you; the new one settles behind.
+void drawDoors(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(26);
+  for (int f = 1; f <= frames; f++) {
+    float e = easeInOut((float)f / frames), th = e * PI / 2, s = 0.86f + 0.14f * e;
+    memset(composeBuffer, 0, IMAGE_SIZE);
+    blitScaled(newB, 120 - 120 * s, 120 - 120 * s, CW * s, CH * s);
+    float dw = 120 * cosf(th), sn = sinf(th), shd = 1 - 0.5f * sn;
+    if (dw >= 1) {
+      for (int side = 0; side < 2; side++) {
+        for (int x = 0; x < (int)dw; x++) {
+          float u = x / dw, grow = 1 + 0.22f * sn * (side ? 1 - u : u);
+          int sx = side ? 120 + (int)(u * 120) : (int)(u * 120);
+          int dx = side ? (int)roundf(CW - dw + x) : x;
+          if (dx < 0 || dx >= CW) continue;
+          for (int y = 0; y < CH; y++)
+            composeBuffer[y * CW + dx] = shade565(oldB[clampPx((int)((y - 120) / grow + 120)) * CW + clampPx(sx)], shd);
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Ripple: a water ring spreads from the centre, bending the picture and swapping covers as it passes.
+void drawRipple(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(26);
+  for (int f = 1; f <= frames; f++) {
+    float R = easeInOut((float)f / frames) * 200 - 10;
+    for (int y = 0; y < CH; y++) {
+      float dy = y + 0.5f - 120;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        float dx = x + 0.5f - 120, r = sqrtf(dx * dx + dy * dy) + 0.001f, dd = r - R;
+        int i = y * CW + x;
+        if (fabsf(dd) < 22) {
+          float k = sinf(dd / 22 * PI) * 7;
+          const uint16_t* src = dd < 0 ? newB : oldB;
+          uint16_t c = src[clampPx((int)(y + dy / r * k)) * CW + clampPx((int)(x + dx / r * k))];
+          d[x] = blend565(c, 0xFFFF, (uint32_t)((1 - fabsf(dd) / 22) * 9));
+        } else {
+          d[x] = dd < 0 ? newB[i] : oldB[i];
+        }
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// Flash: camera-flash white-out into the new cover.
+void drawFlash(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(18);
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames;
+    if (t < 0.3f) {
+      uint32_t k = (uint32_t)(t / 0.3f * 32);
+      for (int i = 0; i < CW * CH; i++) composeBuffer[i] = blend565(oldB[i], 0xFFFF, k);
+    } else {
+      uint32_t k = (uint32_t)((t - 0.3f) / 0.7f * 32);
+      for (int i = 0; i < CW * CH; i++) composeBuffer[i] = blend565(0xFFFF, newB[i], k);
+    }
+    pushComposedFrame();
+  }
+}
+
+// Fly Through: the camera flies through the old cover (growing, fading) into the new one.
+void drawFlyThrough(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(26);
+  for (int f = 1; f <= frames; f++) {
+    float t = easeInOut((float)f / frames), io = 1.0f / (1 + 1.4f * t), in = 1.0f / (0.55f + 0.45f * t);
+    uint32_t k = (uint32_t)(t * 32);
+    for (int y = 0; y < CH; y++) {
+      float dy = y + 0.5f - 120;
+      int oy = clampPx((int)(dy * io + 120));
+      float ny = dy * in + 120;
+      uint16_t* d = composeBuffer + y * CW;
+      for (int x = 0; x < CW; x++) {
+        float dx = x + 0.5f - 120, nx = dx * in + 120;
+        uint16_t oc = oldB[oy * CW + clampPx((int)(dx * io + 120))];
+        uint16_t nc = (nx >= 0 && nx < CW && ny >= 0 && ny < CH) ? newB[(int)ny * CW + (int)nx] : 0;
+        d[x] = blend565(oc, nc, k);
+      }
+    }
+    pushComposedFrame();
+  }
+}
+
+// VHS Glitch: tracking bands tear sideways with cyan/magenta fringes and noise lines.
+void drawVhsGlitch(const uint16_t* oldB, const uint16_t* newB) {
+  const int frames = tx_frames(20);
+  for (int f = 1; f <= frames; f++) {
+    float t = (float)f / frames, amp = sinf(PI * t);
+    const uint16_t* src = t < 0.5f ? oldB : newB;
+    int chroma = (int)(amp * 6), bar = (f * 23) % CH;
+    for (int y = 0; y < CH; y++) {
+      int band = y >> 3, off = 0;
+      if (cellHash(band, f + 99) < 90) off = (int)((cellHash(band, f) - 128) * amp * 0.25f);
+      const uint16_t* row = src + y * CW;
+      uint16_t* d = composeBuffer + y * CW;
+      if (cellHash(y, f * 7) < (uint8_t)(10 * amp)) {  // noise line
+        for (int x = 0; x < CW; x++) d[x] = (cellHash(x, y + f) & 1) ? 0xFFFF : 0x8410;
+        continue;
+      }
+      bool tracking = y >= bar && y < bar + 10 && amp > 0.2f;
+      for (int x = 0; x < CW; x++) {
+        int sx = x - off;
+        uint16_t c = (row[clampPx(sx - chroma)] & 0xF800) | (row[clampPx(sx)] & 0x07E0) |
+                     (row[clampPx(sx + chroma)] & 0x001F);
+        d[x] = tracking ? blend565(c, 0xFFFF, 10) : c;
+      }
+    }
     pushComposedFrame();
   }
 }
@@ -1162,7 +1721,46 @@ static const char* txNameOf(TransitionType transition) {
     case TRANSITION_VENETIAN_H: return "Venetian H";
     case TRANSITION_SPIRAL_IN: return "Spiral In";
     case TRANSITION_LUMA_WIPE: return "Luma Wipe";
-    default: return "Unknown";
+    case TRANSITION_PUSH_RIGHT: return "Push Right";
+    case TRANSITION_CARD_STACK_LEFT: return "Card Stack Left";
+    case TRANSITION_CUBE_TURN_REVERSE: return "Cube Turn Reverse";
+    case TRANSITION_CORNER_PEEL_REVERSE: return "Corner Peel Reverse";
+    case TRANSITION_ACCORDION_REVERSE: return "Accordion Reverse";
+    case TRANSITION_BLOCK_RISE: return "Block Rise";
+    case TRANSITION_MELT_UP: return "Melt Up";
+    case TRANSITION_JELLY_RISE: return "Jelly Rise";
+    case TRANSITION_ZOOM_OUT: return "Zoom Out";
+    case TRANSITION_INFINITE_ZOOM_OUT: return "Infinite Zoom Out";
+    case TRANSITION_CRT_OFF: return "CRT Off";
+    case TRANSITION_MATRIX_RAIN: return "Matrix Rain";
+    case TRANSITION_NEON_SCAN: return "Neon Scan";
+    case TRANSITION_GLASS_SWEEP: return "Glass Sweep";
+    case TRANSITION_PIXELATE: return "Pixelate";
+    case TRANSITION_VHS_GLITCH: return "VHS Glitch";
+    case TRANSITION_CUBE_UP: return "Cube Up";
+    case TRANSITION_CUBE_DOWN: return "Cube Down";
+    case TRANSITION_COMB_H: return "Comb Horizontal";
+    case TRANSITION_COMB_V: return "Comb Vertical";
+    case TRANSITION_COVER_DOWN: return "Cover Down";
+    case TRANSITION_UNCOVER_LEFT: return "Uncover Left";
+    case TRANSITION_UNCOVER_DOWN: return "Uncover Down";
+    case TRANSITION_FADE_BLACK: return "Fade Through Black";
+    case TRANSITION_NEWSFLASH: return "Newsflash";
+    case TRANSITION_STRIPS: return "Strips";
+    case TRANSITION_WEDGE: return "Wedge";
+    case TRANSITION_CHECKER_ACROSS: return "Checkerboard Across";
+    case TRANSITION_HONEYCOMB: return "Honeycomb";
+    case TRANSITION_GLITTER: return "Glitter";
+    case TRANSITION_SHRED: return "Shred";
+    case TRANSITION_GALLERY: return "Gallery";
+    case TRANSITION_DOORS: return "Doors";
+    case TRANSITION_RIPPLE: return "Ripple";
+    case TRANSITION_FLASH: return "Flash";
+    case TRANSITION_FLY_THROUGH: return "Fly Through";
+    default:
+      if (transition >= TRANSITION_VARIANT_FIRST && transition <= TRANSITION_VARIANT_LAST)
+        return VARIANTS[transition - TRANSITION_VARIANT_FIRST].name;
+      return "Unknown";
   }
 }
 
@@ -1172,12 +1770,18 @@ static TransitionType resolveRetiredCore(TransitionType t) {
     case TRANSITION_RETIRED_SLIDE: return TRANSITION_WIPE_RIGHT;
     case TRANSITION_RETIRED_CURTAIN: return TRANSITION_VERTICAL_SPLIT;
     case TRANSITION_RETIRED_ZIGZAG: return TRANSITION_BARN_DOORS;
-    default: return t;
+    case TRANSITION_MATRIX_RAIN: return TRANSITION_RAIN_COLUMNS;    // retired 2026-11-22
+    default:
+      if (t >= 75 && t <= 80) return TRANSITION_QUICK_IRIS;      // neon edges, retired 2026-11-22
+      return t;
   }
 }
 
 
 }  // namespace
+
+// The app's TransitionRenderer hard-codes this slot count; change both together.
+static_assert(TRANSITION_COUNT == 117, "update TransitionRenderer.swift's index bound");
 
 // ==================================================
 // Public API
@@ -1209,7 +1813,68 @@ extern "C" int tx_run(const TxPanel* panel, int ti, const uint16_t* oldFrame, co
   const uint16_t* oldB = oldFrame;
   uint16_t* buffer = (uint16_t*)newFrame;  // the moved code takes it non-const; it never writes it
   const int width = DISPLAY_WIDTH, height = DISPLAY_HEIGHT;
+  // 81-88, 98 (1.15): an existing effect run on mirrored covers (1 = left/right, 2 = top/bottom);
+  // pushComposedFrame mirrors each frame back, so the picture reads correctly and only the motion
+  // is reversed. The inputs are const here, so the mirrored copies go to two scratch frames.
+  TransitionType base = t;
+  uint8_t flip = 0;
   switch (t) {
+    case TRANSITION_PUSH_RIGHT: base = TRANSITION_PUSH_LEFT; flip = 1; break;
+    case TRANSITION_CARD_STACK_LEFT: base = TRANSITION_CARD_STACK; flip = 1; break;
+    case TRANSITION_CUBE_TURN_REVERSE: base = TRANSITION_CUBE_TURN; flip = 1; break;
+    case TRANSITION_CORNER_PEEL_REVERSE: base = TRANSITION_CORNER_PEEL; flip = 1; break;
+    case TRANSITION_ACCORDION_REVERSE: base = TRANSITION_ACCORDION; flip = 1; break;
+    case TRANSITION_BLOCK_RISE: base = TRANSITION_BLOCK_DROP; flip = 2; break;
+    case TRANSITION_MELT_UP: base = TRANSITION_MELT; flip = 2; break;
+    case TRANSITION_JELLY_RISE: base = TRANSITION_JELLY_DROP; flip = 2; break;
+    case TRANSITION_CUBE_DOWN: base = TRANSITION_CUBE_UP; flip = 2; break;
+    default: break;
+  }
+  if (flip && canCompose) {
+    static uint16_t* mirOld = nullptr;
+    static uint16_t* mirNew = nullptr;
+    if (!mirOld) mirOld = (uint16_t*)tx_alloc_large(IMAGE_SIZE);
+    if (!mirNew) mirNew = (uint16_t*)tx_alloc_large(IMAGE_SIZE);
+    if (mirOld && mirNew) {
+      memcpy(mirOld, oldB, IMAGE_SIZE);
+      memcpy(mirNew, buffer, IMAGE_SIZE);
+      mirrorFrame(mirOld, flip);
+      mirrorFrame(mirNew, flip);
+      oldB = mirOld;
+      buffer = mirNew;
+      composeFlip = flip;
+    }  // no memory: the twin draws unmirrored
+  }
+  if (t >= TRANSITION_VARIANT_FIRST && t <= TRANSITION_VARIANT_LAST) {
+    const QuickVariant& v = VARIANTS[t - TRANSITION_VARIANT_FIRST];
+    drawQuickMaskEx(v.map, v.flags, v.tint, oldB, buffer);
+  } else switch (base) {
+    case TRANSITION_ZOOM_OUT: drawZoomOut(oldB, buffer); break;
+    case TRANSITION_INFINITE_ZOOM_OUT: drawInfiniteZoomOut(oldB, buffer); break;
+    case TRANSITION_CRT_OFF: drawCrtOff(oldB, buffer); break;
+    case TRANSITION_NEON_SCAN: drawNeonScan(oldB, buffer); break;
+    case TRANSITION_GLASS_SWEEP: drawGlassSweep(oldB, buffer); break;
+    case TRANSITION_PIXELATE: drawPixelate(oldB, buffer); break;
+    case TRANSITION_VHS_GLITCH: drawVhsGlitch(oldB, buffer); break;
+    case TRANSITION_CUBE_UP: drawCubeTurnV(oldB, buffer); break;
+    case TRANSITION_COMB_H: drawComb(oldB, buffer, false); break;
+    case TRANSITION_COMB_V: drawComb(oldB, buffer, true); break;
+    case TRANSITION_COVER_DOWN: drawCoverDown(oldB, buffer); break;
+    case TRANSITION_UNCOVER_LEFT: drawUncoverLeft(oldB, buffer); break;
+    case TRANSITION_UNCOVER_DOWN: drawUncoverDown(oldB, buffer); break;
+    case TRANSITION_FADE_BLACK: drawFadeBlack(oldB, buffer); break;
+    case TRANSITION_NEWSFLASH: drawNewsflash(oldB, buffer); break;
+    case TRANSITION_STRIPS: drawQuickMaskEx(20, 0, 0, oldB, buffer); break;
+    case TRANSITION_WEDGE: drawQuickMaskEx(21, 0, 0, oldB, buffer); break;
+    case TRANSITION_CHECKER_ACROSS: drawQuickMaskEx(22, 0, 0, oldB, buffer); break;
+    case TRANSITION_HONEYCOMB: drawQuickMaskEx(23, QV_GLOW, 0xFF55, oldB, buffer); break;  // warm edge
+    case TRANSITION_GLITTER: drawQuickMaskEx(24, QV_GLOW, 0xFFFF, oldB, buffer); break;    // white sparkle
+    case TRANSITION_SHRED: drawShred(oldB, buffer); break;
+    case TRANSITION_GALLERY: drawGallery(oldB, buffer); break;
+    case TRANSITION_DOORS: drawDoors(oldB, buffer); break;
+    case TRANSITION_RIPPLE: drawRipple(oldB, buffer); break;
+    case TRANSITION_FLASH: drawFlash(oldB, buffer); break;
+    case TRANSITION_FLY_THROUGH: drawFlyThrough(oldB, buffer); break;
     case TRANSITION_WIPE_BOTTOM: drawWipeBottomToTop(buffer, width, height); break;
     case TRANSITION_WIPE_LEFT: drawWipeLeftToRight(buffer, width, height); break;
     case TRANSITION_WIPE_RIGHT: drawWipeRightToLeft(buffer, width, height); break;
@@ -1261,8 +1926,9 @@ extern "C" int tx_run(const TxPanel* panel, int ti, const uint16_t* oldFrame, co
     case TRANSITION_LUMA_WIPE: drawQuickMask(11, oldB, buffer); break;
     default: drawWipeBottomToTop(buffer, width, height); break;
   }
-  // Every frame-composed transition ends on the exact new frame.
-  if (canCompose && t >= TRANSITION_CARD_STACK) gfx->draw16bitRGBBitmap(0, 0, buffer, width, height);
+  composeFlip = 0;
+  // Every frame-composed transition ends on the exact new frame (the caller's, never a mirrored copy).
+  if (canCompose && t >= TRANSITION_CARD_STACK) gfx->draw16bitRGBBitmap(0, 0, newFrame, width, height);
   g_panel = nullptr;
   return (int)t;
 }

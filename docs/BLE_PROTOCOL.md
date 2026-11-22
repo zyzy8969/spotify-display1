@@ -2,7 +2,34 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.14** (transition speeds: the app sets a speed per transition or random speeds; the board reports the speed it used.)
+Version: **1.15** (65 more transitions, indices 52-116; enabled-transitions mask widened to 128 bits; speeds for every index.)
+
+Changes in 1.15 (build-46 transitions merged into the shared core, 2026-11-22; owner asked for them).
+Additive and backward compatible both ways. This is what the `feat/y2k-transitions` branch (build 46) called
+"1.13"; that number was already taken here by `TRANSITION_START`, so the same wire format ships as 1.15.
+- **Transition indices 52-116 are valid.** 52-80 are quick threshold-map variants (inverses, mirrors and
+  new Box/Plus/Wheel/Random Bars/Halftone maps; core `VARIANTS` table), 81-88 are mirrored versions of frame
+  effects (Push Right, Card Stack Left, Cube Turn Reverse, Corner Peel Reverse, Accordion Reverse, Block Rise,
+  Melt Up, Jelly Rise), 89-98 are Zoom Out, Infinite Zoom Out, CRT Off, (92 retired), Neon Scan, Glass
+  Sweep, Pixelate, VHS Glitch, Cube Up, Cube Down, and 99-116 a slideshow set after PowerPoint 2003/2010 and
+  Google Slides: Comb Horizontal, Comb Vertical, Cover Down, Uncover Left, Uncover Down, Fade Through Black,
+  Newsflash, Strips, Wedge, Checkerboard Across, Honeycomb, Glitter, Shred, Gallery, Doors, Ripple, Flash,
+  Fly Through. Names are `tx_name()` in the shared core. 52-80 and 106-110 count as quick.
+  **Retired:** 75-80 (neon edges) and 92 (Matrix Rain): never picked at random, not listed in the app; forced,
+  they draw Quick Iris / Rain Columns. All of them run in the shared core, so the app's live mirror plays
+  them exactly too.
+- **Mask is 128 bits.** Same 20-byte write: magic + mask bits 0-63 (`u64` LE) + bits 64-127 (`u64` LE, the
+  former padding). **Bit 127 set** marks a 1.15 mask; without it (a 1.12-1.14 app sends zeros) the board
+  treats indices 64+ as enabled. Older firmware ignores the upper half, so a 1.15 app works with it. An
+  all-off mask still means "no transition" (1.13).
+- **Speeds write may carry 117 slots** (122 bytes: magic + flags + one byte per index 0-116). 1.15 firmware
+  also still takes the 57-byte 1.14 write (indices 52+ then run at the default). The app sends 117 slots
+  only after `CAPS:t128`.
+- **Random speed range is 0.4x-1.3x** (uniform; was 0.5x-2x log-uniform), and the app's per-transition
+  slider is 40..130. The app now turns random speed on by default.
+- **`CAPS:t128`** — sent on every stats request after `CAPS:speeds`.
+- Firmware note (no wire change): the shuffle bag covers all 128 indices and picks with the hardware RNG;
+  each pick logs `Transition pick: <name> (<index>) from <n> left in this round` on serial.
 
 Changes in 1.14 (transition speeds, 2026-11-22; owner-approved). Additive: old firmware never announces
 `CAPS:speeds`, so the app never sends it the new write; old apps ignore `CAPS:speeds` and the extra field.
@@ -211,6 +238,7 @@ message they do not recognise.
 | `CACHE_HIT_MS:<ms>` | Cache hit, after SD load + transition | Telemetry only |
 | `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>[:<speedPct>]` | Right before every drawn transition starts (cache hit, fresh frame, `0xFD` photo; not `0xFE`) (1.13; `speedPct` since 1.14) | iOS: start the live mirror of the board's transition with the shared core, at that speed |
 | `CAPS:speeds` | Stats request, next to `CAPS:transitions` (1.14) | iOS: may send the transition-speeds write this connection |
+| `CAPS:t128` | Stats request, after `CAPS:speeds` (1.15) | iOS: transitions 52-116 exist; send speeds for all 117 indices |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |

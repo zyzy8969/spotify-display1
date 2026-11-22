@@ -131,6 +131,23 @@ final class BLEManager: NSObject, ObservableObject {
     /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
     /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
     private var prefetchedKeySources: Set<String> = []
+    /// Covers the keychain has shown (`ShownCovers`), in order, plus a set for lookups.
+    private var shownCoverOrder: [String] = ShownCovers.load()
+    private lazy var shownCoverSet: Set<String> = Set(shownCoverOrder)
+
+    /// Records that the keychain showed this cover; true if it had never shown it before.
+    @discardableResult
+    private func markCoverShown(_ keySource: String) -> Bool {
+        guard !shownCoverSet.contains(keySource) else { return false }
+        shownCoverSet.insert(keySource)
+        shownCoverOrder.append(keySource)
+        if shownCoverOrder.count > ShownCovers.cap + 200 {
+            shownCoverOrder.removeFirst(shownCoverOrder.count - ShownCovers.cap)
+            shownCoverSet = Set(shownCoverOrder)
+        }
+        ShownCovers.save(shownCoverOrder)
+        return true
+    }
     private var mirror: TransitionMirror { TransitionMirror.shared }
     /// Rolling terminal-style log for the Live tab (newest last).
     @Published private(set) var eventLog: [LogLine] = []
@@ -141,6 +158,9 @@ final class BLEManager: NSObject, ObservableObject {
     /// Board said `CAPS:speeds` (BLE_PROTOCOL 1.14): it takes the transition-speeds write and appends
     /// the speed it used to `TRANSITION_START`.
     @Published private(set) var boardSupportsSpeeds = false
+    /// Board said `CAPS:t128` (BLE_PROTOCOL 1.15): transitions 52-116 exist, it reads the 128-bit mask
+    /// and takes speeds for all 117 indices.
+    @Published private(set) var boardSupports128 = false
     /// A photo the person uploaded is on the display: Spotify sends are paused until `endPhotoHold()`.
     @Published private(set) var photoHold = false
     /// The last photo the person uploaded (square JPEG), so tapping the cover can show it again.
@@ -406,10 +426,11 @@ final class BLEManager: NSObject, ObservableObject {
         let mask = TransitionPrefs.currentMask
         var packet = Data()
         withUnsafeBytes(of: transitionMaskMagic.littleEndian) { packet.append(contentsOf: $0) }
-        withUnsafeBytes(of: mask.littleEndian) { packet.append(contentsOf: $0) }
-        packet.append(Data(count: 8))
+        // 1.13: low 64 bits, then the high 64 (bit 127 set) in what 1.12 called padding.
+        withUnsafeBytes(of: mask.lo.littleEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: mask.hi.littleEndian) { packet.append(contentsOf: $0) }
         p.writeValue(packet, for: c, type: .withResponse)
-        let on = TransitionCatalog.all.filter { mask & (UInt64(1) << UInt64($0.id)) != 0 }.count
+        let on = TransitionCatalog.all.filter { mask.contains($0.id) }.count
         log("tx      transition mask: \(on) of \(TransitionCatalog.all.count) on", kind: .tx)
         applyTransitionSpeeds()
     }
@@ -420,8 +441,9 @@ final class BLEManager: NSObject, ObservableObject {
         guard boardSupportsSpeeds, isConnected, let p = peripheral, let c = cacheChar else { return }
         let speeds = TransitionSpeeds.current
         let random = TransitionSpeeds.randomOn
-        p.writeValue(TransitionSpeeds.packet(speeds: speeds, random: random), for: c, type: .withResponse)
-        log("tx      transition speeds: \(speeds.count) custom, random \(random ? "on" : "off")", kind: .tx)
+        let slots = boardSupports128 ? TransitionSpeeds.slots128 : TransitionSpeeds.slots
+        p.writeValue(TransitionSpeeds.packet(speeds: speeds, random: random, slots: slots), for: c, type: .withResponse)
+        log("tx      transition speeds: \(speeds.count) custom, random \(random ? "on 0.4-1.3x" : "off"), \(slots) slots", kind: .tx)
     }
 
     /// Photo upload is over (or failed before the board drew it): let Spotify drive the display again.
@@ -590,11 +612,14 @@ final class BLEManager: NSObject, ObservableObject {
                 boardAckStatus = "Board ACK: cache hit"
                 lastConfirmedTrackId = trackId
                 let wasPrefetched = prefetchedKeySources.remove(cacheKeySource) != nil
+                // A new song whose cover was only saved ahead (prefetch) is still new to the person.
+                let firstShow = markCoverShown(cacheKeySource)
                 appendLog(TransferLogEntry(
                     cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
                     downloadMs: nil, convertMs: nil, uploadMs: 0,
                     totalMs: totalMs, outcome: "cache hit",
-                    prefetched: wasPrefetched ? true : nil
+                    prefetched: wasPrefetched ? true : nil,
+                    firstShow: firstShow ? true : nil
                 ))
                 setLivePhase("last: cache hit \(secondsLabel(fromMs: totalMs))")
                 return
@@ -650,6 +675,7 @@ final class BLEManager: NSObject, ObservableObject {
         lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)), \(wireLabel))"
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
+        markCoverShown(cacheKeySource)
         appendLog(TransferLogEntry(
             cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
             downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,
@@ -959,6 +985,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardSupportsDeflate = false
         boardSupportsTransitionMask = false
         boardSupportsSpeeds = false
+        boardSupports128 = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
         // Waiting screen: nothing of ours is on the panel any more.
         boardFrame = nil
@@ -1067,6 +1094,12 @@ final class BLEManager: NSObject, ObservableObject {
         if text == "CAPS:speeds" {
             let firstTime = !boardSupportsSpeeds
             boardSupportsSpeeds = true
+            if firstTime { applyTransitionSpeeds() }
+        }
+        if text == "CAPS:t128" {
+            // Arrives after CAPS:speeds: send the speeds again, now for every index.
+            let firstTime = !boardSupports128
+            boardSupports128 = true
             if firstTime { applyTransitionSpeeds() }
         }
         if text.hasPrefix("ERROR: Decompress") {

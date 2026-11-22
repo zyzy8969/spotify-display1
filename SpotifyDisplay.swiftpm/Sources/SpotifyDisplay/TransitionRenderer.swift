@@ -110,7 +110,7 @@ final class TransitionRenderer {
 
         // Index 255 (no transition: every one switched off) or anything else outside the board's
         // table: the board shows the new frame at once, so the mirror cuts straight to it.
-        if index < 0 || index >= 52 {
+        if index < 0 || index >= 117 {  // TRANSITION_COUNT (BLE_PROTOCOL 1.15)
             var pixels = [UInt16](repeating: 0, count: n)
             Self.load(new, into: &pixels)
             guard let image = Self.makeImage(pixels, factor: 1) else { return .empty(index: index) }

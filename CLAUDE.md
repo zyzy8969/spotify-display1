@@ -8,7 +8,7 @@ Spotify Display (`zyzy8969/spotify-display1`) — a digital keychain that shows 
 listening as album art. Three cooperating parts:
 
 - **ESP32-S3 firmware** (`src/main.cpp`, C++/Arduino via PlatformIO) — BLE GATT peripheral,
-  SD-card album-art cache, 240x240 ST7789 LCD, 49 animated transitions (frame-composed ones use
+  SD-card album-art cache, 240x240 ST7789 LCD, 107 animated transitions (indices 0-116, shared core; BLE 1.15) (frame-composed ones use
   two extra PSRAM buffers, `prevBuffer`/`composeBuffer`).
 - **iOS app** (`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/`, Swift/SwiftUI) — the active
   client: Spotify PKCE auth, ~1 Hz now-playing poll, art download, RGB565 conversion, BLE send.

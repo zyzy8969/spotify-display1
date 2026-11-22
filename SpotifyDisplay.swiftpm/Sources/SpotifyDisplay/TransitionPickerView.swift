@@ -11,7 +11,7 @@ struct TransitionPickerView: View {
     @AppStorage(TransitionPrefs.storageKey) private var disabledRaw = ""
     /// Custom speeds ("id:percent") and the random-speed switch (BLE_PROTOCOL 1.14).
     @AppStorage(TransitionSpeeds.storageKey) private var speedsRaw = ""
-    @AppStorage(TransitionSpeeds.randomKey) private var randomSpeed = false
+    @AppStorage(TransitionSpeeds.randomKey) private var randomSpeed = TransitionSpeeds.randomDefault
     /// The row whose speed slider is open (only one at a time).
     @State private var speedEditing: Int?
 
@@ -101,7 +101,7 @@ struct TransitionPickerView: View {
         }
     }
 
-    /// Random speed: every transition left at normal speed plays somewhere between 0.5x and 2x.
+    /// Random speed: every transition left at normal speed plays somewhere between 0.4x and 1.3x.
     private var randomSpeedRow: some View {
         VStack(alignment: .leading, spacing: 4) {
             Toggle(isOn: $randomSpeed) {
@@ -111,7 +111,7 @@ struct TransitionPickerView: View {
             }
             .toggleStyle(ThemedToggleStyle())
             Text(randomSpeed
-                 ? "Each time, a transition at normal speed plays somewhere between 0.5x and 2x. Ones you set yourself keep their speed."
+                 ? "Each time, a transition at normal speed plays somewhere between 0.4x and 1.3x. Ones you set yourself keep their speed."
                  : "Every transition plays at normal speed unless you set its own with the speed button.")
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)
@@ -165,7 +165,7 @@ struct TransitionPickerView: View {
         .accessibilityHint(open ? "Closes the speed slider" : "Opens a speed slider")
     }
 
-    /// 0.5x...2x slider for one transition; the example above plays at the chosen speed.
+    /// 0.4x...1.3x slider for one transition; the example above plays at the chosen speed.
     private func speedSlider(_ info: TransitionInfo) -> some View {
         let pct = speedPercent(info.id)
         let binding = Binding<Double>(
@@ -174,7 +174,7 @@ struct TransitionPickerView: View {
         )
         return VStack(alignment: .leading, spacing: 2) {
             HStack {
-                Text("0.5x").themeText(.statCaption).foregroundStyle(theme.inkFaint)
+                Text("0.4x").themeText(.statCaption).foregroundStyle(theme.inkFaint)
                 Slider(
                     value: binding,
                     in: Double(TransitionSpeeds.minPercent)...Double(TransitionSpeeds.maxPercent),
@@ -186,7 +186,7 @@ struct TransitionPickerView: View {
                 .tint(theme.sliderTint)
                 .accessibilityLabel("\(info.name) speed")
                 .accessibilityValue(TransitionSpeeds.label(pct))
-                Text("2x").themeText(.statCaption).foregroundStyle(theme.inkFaint)
+                Text("1.3x").themeText(.statCaption).foregroundStyle(theme.inkFaint)
             }
             HStack {
                 Text(TransitionSpeeds.label(pct))

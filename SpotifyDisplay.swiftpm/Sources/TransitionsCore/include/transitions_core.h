@@ -68,12 +68,55 @@ typedef enum TransitionType {
   TRANSITION_VENETIAN_H = 49,  // Venetian H (quick)
   TRANSITION_SPIRAL_IN = 50,  // Spiral In (quick)
   TRANSITION_LUMA_WIPE = 51,  // Luma Wipe (quick)
+  // 1.15 (build 46): 52-80 are threshold-map variants (VARIANTS table: inverses, mirrors, neon edges; quick),
+  // 81-88 mirrored frame-composed effects, 89-96 zoom-outs and 2000s-tech effects.
+  TRANSITION_VARIANT_FIRST = 52,
+  TRANSITION_VARIANT_LAST = 80,
+  TRANSITION_PUSH_RIGHT = 81,
+  TRANSITION_CARD_STACK_LEFT = 82,
+  TRANSITION_CUBE_TURN_REVERSE = 83,
+  TRANSITION_CORNER_PEEL_REVERSE = 84,
+  TRANSITION_ACCORDION_REVERSE = 85,
+  TRANSITION_BLOCK_RISE = 86,
+  TRANSITION_MELT_UP = 87,
+  TRANSITION_JELLY_RISE = 88,
+  TRANSITION_ZOOM_OUT = 89,
+  TRANSITION_INFINITE_ZOOM_OUT = 90,
+  TRANSITION_CRT_OFF = 91,
+  TRANSITION_MATRIX_RAIN = 92,
+  TRANSITION_NEON_SCAN = 93,
+  TRANSITION_GLASS_SWEEP = 94,
+  TRANSITION_PIXELATE = 95,
+  TRANSITION_VHS_GLITCH = 96,
+  TRANSITION_CUBE_UP = 97,
+  TRANSITION_CUBE_DOWN = 98,
+  // 1.15 slideshow set, after PowerPoint 2003 / 2010 and Google Slides. 106-110 are quick (threshold maps).
+  TRANSITION_COMB_H = 99,
+  TRANSITION_COMB_V = 100,
+  TRANSITION_COVER_DOWN = 101,
+  TRANSITION_UNCOVER_LEFT = 102,
+  TRANSITION_UNCOVER_DOWN = 103,
+  TRANSITION_FADE_BLACK = 104,
+  TRANSITION_NEWSFLASH = 105,
+  TRANSITION_STRIPS = 106,
+  TRANSITION_WEDGE = 107,
+  TRANSITION_CHECKER_ACROSS = 108,
+  TRANSITION_HONEYCOMB = 109,
+  TRANSITION_GLITTER = 110,
+  TRANSITION_SHRED = 111,
+  TRANSITION_GALLERY = 112,
+  TRANSITION_DOORS = 113,
+  TRANSITION_RIPPLE = 114,
+  TRANSITION_FLASH = 115,
+  TRANSITION_FLY_THROUGH = 116,
   TRANSITION_COUNT                // Total number of slots (including retired)
 } TransitionType;
 
 static inline bool isRetiredTransition(TransitionType t) {
   return t == TRANSITION_RETIRED_SLIDE || t == TRANSITION_RETIRED_CURTAIN ||
-         t == TRANSITION_RETIRED_ZIGZAG;
+         t == TRANSITION_RETIRED_ZIGZAG ||
+         (t >= 75 && t <= 80) ||          // neon edges: owner didn't want them (2026-11-22)
+         t == TRANSITION_MATRIX_RAIN;     // owner didn't like it (2026-11-22)
 }
 
 

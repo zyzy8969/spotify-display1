@@ -175,14 +175,22 @@ volatile bool cacheProbeOnly = false;  // the pending cache check is a probe
 // complete masks, which is harmless.
 static volatile uint32_t transitionMaskLo = 0xFFFFFFFFu;
 static volatile uint32_t transitionMaskHi = 0xFFFFFFFFu;
+// BLE_PROTOCOL 1.15: bits 64-127 live in the former padding. Only trusted when bit 127 is set (the app's
+// "this is a 128-bit mask" flag); a 1.12-1.14 app sends zeros there and must not switch indices 64+ off.
+static volatile uint32_t transitionMaskW2 = 0xFFFFFFFFu;
+static volatile uint32_t transitionMaskW3 = 0xFFFFFFFFu;
 
-// BLE_PROTOCOL 1.14 transition speeds, Cache characteristic write of TRANSITION_SPEEDS_LEN bytes:
-// 4-byte magic + flags (bit 0 = random speed) + one byte per header index 0-51: 0 = default,
+// BLE_PROTOCOL 1.14 transition speeds, Cache characteristic write of 5 + N bytes:
+// 4-byte magic + flags (bit 0 = random speed) + one byte per header index 0..N-1: 0 = default,
 // 25...250 = that transition always runs at value/100 speed. Default = 1x, or a random speed in
-// 0.5x...2x when the random flag is on. RAM only; the app re-sends it on every connect.
+// 0.4x...1.3x (owner's range, 2026-11-22) when the random flag is on. RAM only; the app re-sends it
+// on every connect. N = 52 (1.14 apps) or 117 (1.15: every index through Fly Through).
 #define TRANSITION_SPEEDS_MAGIC 0xCAC4E1ECu
-#define TRANSITION_SPEEDS_COUNT 52
+#define TRANSITION_SPEEDS_COUNT 117
+#define TRANSITION_SPEEDS_LEN_114 (5 + 52)
 #define TRANSITION_SPEEDS_LEN (5 + TRANSITION_SPEEDS_COUNT)
+#define TRANSITION_SPEED_RANDOM_MIN 0.4f
+#define TRANSITION_SPEED_RANDOM_MAX 1.3f
 static volatile uint8_t transitionSpeedPct[TRANSITION_SPEEDS_COUNT] = {0};
 static volatile bool transitionSpeedRandom = false;
 
@@ -366,9 +374,12 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
 
         // Transition speeds (iOS app, 1.14): the one cache-characteristic write longer than 20 bytes.
         // Only copies bytes, so it is safe on this task.
-        if (value.length() == TRANSITION_SPEEDS_LEN && decodeLE32(value) == TRANSITION_SPEEDS_MAGIC) {
+        if ((value.length() == TRANSITION_SPEEDS_LEN || value.length() == TRANSITION_SPEEDS_LEN_114) &&
+            decodeLE32(value) == TRANSITION_SPEEDS_MAGIC) {
             transitionSpeedRandom = ((uint8_t)value[4] & 1u) != 0;
-            for (int i = 0; i < TRANSITION_SPEEDS_COUNT; i++) transitionSpeedPct[i] = (uint8_t)value[5 + i];
+            const size_t n = value.length() - 5;
+            for (int i = 0; i < TRANSITION_SPEEDS_COUNT; i++)
+                transitionSpeedPct[i] = (size_t)i < n ? (uint8_t)value[5 + i] : 0;
             return;
         }
 
@@ -394,6 +405,13 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
             };
             transitionMaskLo = word(4);
             transitionMaskHi = word(8);
+            if (word(16) & 0x80000000u) {  // 1.15 extended mask: bits 64-127 in bytes 12-19
+                transitionMaskW2 = word(12);
+                transitionMaskW3 = word(16);
+            } else {
+                transitionMaskW2 = 0xFFFFFFFFu;
+                transitionMaskW3 = 0xFFFFFFFFu;
+            }
             return;
         }
 
@@ -705,8 +723,8 @@ static const TxPanel FW_PANEL = { nullptr, fwBitmap, fwPixel, fwWaitUs, fwAllocL
 // drawn). TRANSITION_START's expectedMs is this divided by the speed used, so the app paces its mirror.
 static uint16_t transitionLastMs[TRANSITION_COUNT] = {0};
 
-// 1.14: the speed for this draw. A per-transition setting wins; otherwise random (log-uniform, so
-// 0.5x-1x and 1x-2x are equally likely) when the app turned it on; otherwise 1x.
+// 1.14: the speed for this draw. A per-transition setting wins; otherwise random, uniform in
+// 0.4x-1.3x (owner's range), when the app turned it on; otherwise 1x.
 static float pickTransitionSpeed(int drawn) {
   if (drawn >= 0 && drawn < TRANSITION_SPEEDS_COUNT) {
     const uint8_t pct = transitionSpeedPct[drawn];
@@ -714,7 +732,7 @@ static float pickTransitionSpeed(int drawn) {
   }
   if (transitionSpeedRandom) {
     const float u = (float)(esp_random() % 10001u) / 10000.0f;
-    return powf(2.0f, u * 2.0f - 1.0f);
+    return TRANSITION_SPEED_RANDOM_MIN + u * (TRANSITION_SPEED_RANDOM_MAX - TRANSITION_SPEED_RANDOM_MIN);
   }
   return 1.0f;
 }
@@ -773,10 +791,13 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
   Serial.println("Transition complete!");
 }
 
-// True if the app left transition `t` switched on (BLE_PROTOCOL 1.12 mask).
+// True if the app left transition `t` switched on (BLE_PROTOCOL 1.12 mask, 128 bits since 1.15).
 static bool transitionEnabled(int t) {
   if (t < 0 || t >= TRANSITION_COUNT) return false;
-  return t < 32 ? ((transitionMaskLo >> t) & 1u) : ((transitionMaskHi >> (t - 32)) & 1u);
+  if (t < 32) return (transitionMaskLo >> t) & 1u;
+  if (t < 64) return (transitionMaskHi >> (t - 32)) & 1u;
+  if (t < 96) return (transitionMaskW2 >> (t - 64)) & 1u;
+  return (transitionMaskW3 >> (t - 96)) & 1u;
 }
 
 static TransitionType pickEnabledTransition(bool quickOnly);  // defined after QUICK_TRANSITIONS
@@ -822,12 +843,18 @@ static const TransitionType QUICK_TRANSITIONS[] = {
 // leaves nothing enabled at all, everything is allowed (never get stuck without a transition).
 // Shuffle bag: every enabled transition is drawn once before any of them repeats, so back-to-back
 // swaps (photo <-> cover, skip after skip) always look different (owner's request 2026-11-22).
-// Bit i set = index i already drawn this round. RAM only; a new round starts when the bag runs dry.
-static uint64_t transitionBag = 0;
+// Bit i set = index i already drawn this round (128 bits: indices run to 116). RAM only; a new round
+// starts when the bag runs dry.
+static uint64_t transitionBag[2] = {0, 0};
+static inline bool bagHas(int t) { return (transitionBag[t >> 6] >> (t & 63)) & 1ULL; }
+static inline void bagAdd(int t) { transitionBag[t >> 6] |= 1ULL << (t & 63); }
 
 static TransitionType pickEnabledTransition(bool quickOnly) {
   const int quickN = sizeof(QUICK_TRANSITIONS) / sizeof(QUICK_TRANSITIONS[0]);
   auto isQuick = [quickN](int t) {
+    // 1.15 threshold-map variants cost the same as the quick set's own maps.
+    if (t >= TRANSITION_VARIANT_FIRST && t <= TRANSITION_VARIANT_LAST) return true;
+    if (t >= TRANSITION_STRIPS && t <= TRANSITION_GLITTER) return true;
     for (int i = 0; i < quickN; i++) if ((int)QUICK_TRANSITIONS[i] == t) return true;
     return false;
   };
@@ -841,20 +868,24 @@ static TransitionType pickEnabledTransition(bool quickOnly) {
     for (int t = 0; t < TRANSITION_COUNT; t++) {
       if (isRetiredTransition((TransitionType)t) || !transitionEnabled(t)) continue;
       if (pass < 3 && quickOnly && !isQuick(t)) continue;
-      if (pass == 0 && (transitionBag & (1ULL << t))) continue;
+      if (pass == 0 && bagHas(t)) continue;
       if (pass <= 1 && (TransitionType)t == lastTransition) continue;
       cand[n++] = (TransitionType)t;
     }
     if (n > 0) {
-      if (pass >= 1) transitionBag = 0;  // new round
-      TransitionType pick = cand[random(0, n)];
-      transitionBag |= (1ULL << (int)pick);
+      if (pass >= 1) transitionBag[0] = transitionBag[1] = 0;  // new round
+      // Hardware RNG directly (BT is on, so it is truly random); Arduino's random() falls back to a
+      // seeded rand() if anything ever calls randomSeed().
+      TransitionType pick = cand[esp_random() % (uint32_t)n];
+      bagAdd((int)pick);
+      Serial.printf("Transition pick: %s (%d) from %d left in this round, pass %d\n",
+                    getTransitionName(pick).c_str(), (int)pick, n, pass);
       return pick;
     }
   }
   // Nothing enabled: allow every live transition except the last one used.
   TransitionType t;
-  do { t = (TransitionType)random(0, TRANSITION_COUNT); }
+  do { t = (TransitionType)(esp_random() % (uint32_t)TRANSITION_COUNT); }
   while (isRetiredTransition(t) || t == lastTransition);
   return t;
 }
@@ -1774,6 +1805,10 @@ void loop() {
     // BLE_PROTOCOL 1.14: the board understands the transition-speeds write and appends the speed
     // to TRANSITION_START.
     pMsgChar->setValue("CAPS:speeds");
+    pMsgChar->notify();
+    // BLE_PROTOCOL 1.15: transitions 52-116 exist, the mask is 128 bits and the speeds write may
+    // carry 117 slots.
+    pMsgChar->setValue("CAPS:t128");
     pMsgChar->notify();
     publishCacheCount();
     publishCacheStats();
