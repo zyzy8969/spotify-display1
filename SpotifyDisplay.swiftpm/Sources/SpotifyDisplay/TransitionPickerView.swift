@@ -58,7 +58,7 @@ struct TransitionPickerView: View {
                 .themeText(.row)
                 .foregroundStyle(theme.ink)
             Text(enabled == 0
-                 ? "None switched on: the display will use all of them."
+                 ? "None switched on: new covers appear at once, with no transition."
                  : "The display picks one of the switched-on transitions at random each time the cover changes.")
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)

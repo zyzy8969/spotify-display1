@@ -106,6 +106,15 @@ final class TransitionRenderer {
         let n = Self.pixelCount
         guard new.count >= Self.frameBytes else { return .empty(index: index) }
 
+        // Index 255 (no transition: every one switched off) or anything else outside the board's
+        // table: the board shows the new frame at once, so the mirror cuts straight to it.
+        if index < 0 || index >= 52 {
+            var pixels = [UInt16](repeating: 0, count: n)
+            Self.load(new, into: &pixels)
+            guard let image = Self.makeImage(pixels, factor: 1) else { return .empty(index: index) }
+            return RenderedTransition(index: index, frames: [image], times: [0], duration: 0)
+        }
+
         var oldPixels = [UInt16](repeating: 0, count: n)
         if let old, old.count >= Self.frameBytes {
             Self.load(old, into: &oldPixels)

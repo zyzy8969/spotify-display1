@@ -6,6 +6,7 @@ Version: **1.13** (`TRANSITION_START`: the board announces each transition as it
 
 Changes in 1.13 (live transition mirror). Additive: old apps ignore the unknown message; old firmware never
 sends it; the Python sender is unaffected.
+- **All transitions off** — an enabled-transitions mask with no live bit set now means "no transition": random picks (`0xFF` headers, `0xFD` photos and every cache hit) draw the new frame at once and announce `TRANSITION_START:255:0:0:<oldBlack>`; index 255 = none (clients cut). In 1.12 an empty mask meant "all enabled".
 - **Status LED brightness** — new optional characteristic `ffe6` (write, 1 byte). 0..255 scales the
   on-board WS2812B within its fixed safety cap (`STATUS_LED_MAX`, ~47% of full power): 255 = the cap
   (default after boot), 0 = LED always off. Not persisted on the board: the app re-sends its saved value
@@ -33,7 +34,7 @@ sender are unaffected.
 - **Enabled-transitions mask** — Cache characteristic write, 20 bytes: magic `0xCAC4E1EB` (u32 LE) +
   mask `u64` LE + 8 padding bytes. Bit *i* set = header transition index *i* may be picked at random
   (indices 0-51; retired 5, 10, 16 are ignored). It governs random picks only (`0xFF` headers and every
-  cache hit); a forced header index is still honoured. A mask with no live bit set means "all enabled".
+  cache hit); a forced header index is still honoured. A mask with no live bit set meant "all enabled" in 1.12; since 1.13 it means "none": random picks draw the new frame at once with no transition (announced as `TRANSITION_START:255:0:0:<oldBlack>`). Forced header indices still draw. After power-up every transition is enabled until the app sends a mask.
   The board keeps it in RAM only, so the app sends it on every connect. No reply. Fresh (new-song)
   draws normally pick from the quick set; if none of the quick ones is enabled they pick from whatever is.
 - **Fresh draws announce their transition** — Message `TRANSITION:<name>` is now also sent after a fresh

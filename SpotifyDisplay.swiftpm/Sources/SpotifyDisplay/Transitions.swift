@@ -117,15 +117,13 @@ enum TransitionPrefs {
         return TransitionCatalog.all.filter { !off.contains($0.id) }.count
     }
 
-    /// Bit i set = transition index i may be picked. All off means all on (the board never has nothing to draw).
+    /// Bit i set = transition index i may be picked. All off = 0: the board (BLE_PROTOCOL 1.13) then
+    /// shows new covers at once, with no transition.
     static func mask(disabledRaw: String) -> UInt64 {
         let off = disabledSet(from: disabledRaw)
         var mask: UInt64 = 0
         for t in TransitionCatalog.all where !off.contains(t.id) {
             mask |= (UInt64(1) << UInt64(t.id))
-        }
-        if mask == 0 {
-            for t in TransitionCatalog.all { mask |= (UInt64(1) << UInt64(t.id)) }
         }
         return mask
     }

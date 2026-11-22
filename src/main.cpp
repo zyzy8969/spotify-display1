@@ -799,10 +799,38 @@ String drawImageWithQuickTransition(uint16_t* buffer, int width, int height) {
   return transitionName;
 }
 
+// True if the app's mask leaves at least one live transition switched on.
+static bool anyTransitionEnabled() {
+  for (int t = 0; t < TRANSITION_COUNT; t++)
+    if (!isRetiredTransition((TransitionType)t) && transitionEnabled(t)) return true;
+  return false;
+}
+
+// BLE_PROTOCOL 1.13: every transition switched off in the app = the new cover appears at once, no
+// animation. Announced as TRANSITION_START index 255 so the app's mirror cuts too.
+#define TRANSITION_NONE_INDEX 255
+static String drawWithoutTransition(uint16_t* buffer, int width, int height) {
+  const bool canCompose = prevBuffer && composeBuffer;
+  const bool oldBlack = canCompose && !panelShowsImage;
+  gfx->drawPixel(0, 0, buffer[0]);  // panel-window resync, see runTransition
+  if (pMsgChar) {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "TRANSITION_START:%d:0:0:%d", TRANSITION_NONE_INDEX, oldBlack ? 1 : 0);
+    pMsgChar->setValue(msg);
+    pMsgChar->notify();
+  }
+  gfx->draw16bitRGBBitmap(0, 0, buffer, width, height);
+  if (canCompose) memcpy(prevBuffer, buffer, IMAGE_SIZE);
+  panelShowsImage = true;
+  Serial.println("Using transition: None (all switched off in the app)");
+  return "None";
+}
+
 // `quick`: when no transition is forced, pick from QUICK_TRANSITIONS (fresh transfers).
 String drawImageWithTransitionChoice(uint16_t* buffer, int width, int height, uint8_t transitionChoice,
                                      bool quick = false) {
   if (transitionChoice == 0xFF || transitionChoice >= (uint8_t)TRANSITION_COUNT) {
+    if (!anyTransitionEnabled()) return drawWithoutTransition(buffer, width, height);
     return quick ? drawImageWithQuickTransition(buffer, width, height)
                  : drawImageWithRandomTransition(buffer, width, height);
   }
