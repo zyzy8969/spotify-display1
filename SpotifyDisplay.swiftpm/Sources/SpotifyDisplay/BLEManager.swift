@@ -163,9 +163,13 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupportsNextTransition = false
     /// Board said `CAPS:newsong` (BLE_PROTOCOL 1.17): it takes the new-song cache check.
     @Published private(set) var boardSupportsNewSong = false
-    /// The song in flight has never been played (`PlayedTracks`). While the cache check runs the app's
-    /// line alternates blue / orange like the keychain's light; a fresh send is orange anyway.
+    /// The song in flight has never been played (`PlayedTracks`): the app's line is orange from the
+    /// start, like the keychain's light. A song played before is blue while the board checks its card.
     @Published private(set) var sendIsNewSong = false
+    /// A never-played song turned out to be on the card (saved ahead): when the board started drawing
+    /// it (its `TRANSITION_START`). The line flashes blue from then for as long as the keychain does
+    /// (`StripTiming.aheadFlash`), then orange again.
+    @Published private(set) var aheadHitAt: Date?
     /// What a song cover shows when it lands.
     enum DrawnKind: Equatable {
         /// Played before, from the card: "cache".
@@ -693,6 +697,7 @@ final class BLEManager: NSObject, ObservableObject {
         // (fresh send) is "new" (orange); that is set further down.
         let newToPerson = !playedTrackSet.contains(trackId)
         sendIsNewSong = newToPerson
+        aheadHitAt = nil
         popupForNextDraw = newToPerson ? .both : .cache
         trackForNextDraw = trackId
         sendSwapFlipIfAsked()
@@ -1325,6 +1330,9 @@ final class BLEManager: NSObject, ObservableObject {
         }
 
         if text.hasPrefix(TransitionStartEvent.prefix) {
+            // A never-played song's cache check got a draw: it was on the card (saved ahead). The board's
+            // light flashes blue right now; so does the line.
+            if awaitingCacheRenderConfirm, sendIsNewSong, !photoHold { aheadHitAt = Date() }
             handleTransitionStart(text)
         }
     }

@@ -628,6 +628,7 @@ struct NowPlayingScreen: View {
             bleFloor: stripBleFloor,
             failed: stripFailed,
             newSong: bleManager.sendIsNewSong,
+            aheadHitAt: bleManager.aheadHitAt,
             thickness: nerd ? ArtMetrics.nerdStripThickness : nil
         )
     }
@@ -1207,6 +1208,9 @@ enum StripRun: Equatable {
 /// Fill timing. While the phone works the fill creeps up on its own with an ease-out curve that
 /// approaches `creepCeiling` but never reaches it; real BLE progress fills the rest.
 enum StripTiming {
+    /// Blue flash for a never-played song found on the card (saved ahead); the keychain's light flashes
+    /// for the same 250 ms (firmware `LED_BOTH`).
+    static let aheadFlash = 0.25
     static let creepCeiling = 0.6
     static let creepTau = 0.6
     /// Time to run from the current fill to 100% on success.
@@ -1257,9 +1261,11 @@ struct LiveStrip: View {
     var bleFloor: Double = 0
     /// The send that just ended failed: the line turns red and stays.
     var failed = false
-    /// The song being sent has never been played: during the cache check the line alternates blue and
-    /// orange (the keychain's light does the same on a hit); orange once it is sent fresh.
+    /// The song being sent has never been played: the line is orange (like the keychain's light).
     var newSong = false
+    /// It was on the card after all (saved ahead): the board started drawing it at this time. The line
+    /// flashes blue for `StripTiming.aheadFlash`, then orange, like the keychain's light.
+    var aheadHitAt: Date? = nil
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
 
@@ -1340,12 +1346,10 @@ struct LiveStrip: View {
             let checking = stage == .checking
             return Look(
                 fill: min(1, max(creep, bleFloor)),
-                // A never-played song alternates blue / orange while the board checks its card, like
-                // the keychain's light; then orange if it has to be sent fresh.
-                color: checking
-                    ? (newSong && Int(now.timeIntervalSinceReferenceDate / 0.3) % 2 == 1
-                        ? StripColors.fresh(theme) : StripColors.check(theme))
-                    : StripColors.fresh(theme),
+                // Same as the keychain's light: a song played before is blue while the board checks its
+                // card; a never-played song is orange, with a short blue flash when it turns out to be on
+                // the card (saved ahead); a fresh send is orange.
+                color: lineColor(checking: checking, now: now),
                 opacity: 1,
                 dashedTrack: checking,
                 marker: .none
@@ -1379,6 +1383,15 @@ struct LiveStrip: View {
             let opacity = reduceMotion ? 0 : max(0, 1 - dt / StripTiming.endFade)
             return Look(fill: from, color: StripColors.fresh(theme), opacity: opacity, dashedTrack: false, marker: .none)
         }
+    }
+
+    private func lineColor(checking: Bool, now: Date) -> Color {
+        guard checking else { return StripColors.fresh(theme) }
+        guard newSong else { return StripColors.check(theme) }
+        if let at = aheadHitAt, now.timeIntervalSince(at) < StripTiming.aheadFlash {
+            return StripColors.check(theme)
+        }
+        return StripColors.fresh(theme)
     }
 
     @ViewBuilder

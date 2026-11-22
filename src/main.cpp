@@ -1737,9 +1737,9 @@ static void ledUpdate() {
       ledShow(LED_RGB_BLUE, 255);  // solid while the SD lookup / cache-hit draw blocks loop()
       break;
     case LED_BOTH:
-      // A song played for the first time whose cover is already on SD (prefetched, or the same album):
-      // blue (from the card) and orange (new) alternate while it draws. Stepped from fwWaitUs.
-      ledShow(((t / 300) % 2) ? LED_RGB_ORANGE : LED_RGB_BLUE, 255);
+      // A song played for the first time whose cover is already on SD (saved ahead from the queue): a
+      // short blue flash ("it's on the card"), then orange while it draws. Stepped from fwWaitUs.
+      ledShow(t < 250 ? LED_RGB_BLUE : LED_RGB_ORANGE, 255);
       break;
     case LED_NEW:
       // 1.17: a song new to the person drawn from SD (prefetched): the transfer orange, solid,
@@ -1936,11 +1936,11 @@ void loop() {
       pCacheChar->notify();
     } else {
 
-    // 1.17 new-song check = a song played for the first time: blue + orange alternating if its cover
-    // is on SD (set below, on the hit), orange if not (the miss path). Otherwise the cache blue.
+    // 1.17 new-song check = a song played for the first time: orange from the start; on a hit (saved
+    // ahead) a blue flash, then orange (below). A song played before: blue.
     const bool newSong = cacheCheckNewSong;
     cacheCheckNewSong = false;
-    ledSetMode(LED_CACHE);
+    ledSetMode(newSong ? LED_NEW : LED_CACHE);
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
