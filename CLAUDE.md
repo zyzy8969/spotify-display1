@@ -95,7 +95,7 @@ Atkinson-dither → 115,200 bytes LE RGB565 → BLE cache-key probe → hit: fir
 SD; miss: chunked BLE image write → (nothing drawn until complete) → firmware transition draw +
 SD save → ACK.
 
-### Firmware (`src/main.cpp`, ~1900 lines, single file)
+### Firmware (`src/main.cpp`, ~2800 lines, single file)
 
 The critical structural constraint: **BLE callbacks run on `BTC_TASK`, which has a tiny stack.**
 Every callback class (`CacheCheckCallbacks`, `ImageTransferCallbacks`, `BrightnessCallbacks`,
@@ -145,7 +145,7 @@ dithering happens app-side.)
   because firmware's `READY` notify fires before the client has subscribed. Owns
   `processTrack` (cache probe → transfer), write-without-response queueing via
   `peripheralIsReadyToSendWriteWithoutResponse`, a `readyEpoch` guard that invalidates
-  in-flight transfers across reconnects, a 32 s post-chunk SUCCESS timeout, and
+  in-flight transfers across reconnects, an 8 s post-chunk SUCCESS timeout, and
   counted background time (`holdTransferBackgroundTime`/`releaseTransferBackgroundTime`):
   `SpotifyManager` takes a hold *before* launching a send and `processTrack` takes its own, so an
   overlapping cancelled send can't end the live one's background time.
