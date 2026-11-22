@@ -133,6 +133,69 @@ enum TransitionPrefs {
     }
 }
 
+// MARK: - Transition speeds (BLE_PROTOCOL 1.14)
+
+/// Per-transition speed and the "random speed" switch. Every transition runs at its normal speed (1x)
+/// unless the person sets one; with random speed on, each draw of a transition left at normal picks
+/// a speed between 0.5x and 2x on the board.
+enum TransitionSpeeds {
+    /// Only the transitions the person changed: "id:percent" pairs, e.g. "22:150,35:60".
+    static let storageKey = "transitionSpeeds"
+    static let randomKey = "transitionSpeedRandom"
+    static let minPercent = 50
+    static let maxPercent = 200
+    static let normal = 100
+
+    static func parse(_ raw: String) -> [Int: Int] {
+        var out: [Int: Int] = [:]
+        for pair in raw.split(separator: ",") {
+            let parts = pair.split(separator: ":")
+            guard parts.count == 2, let id = Int(parts[0]), let pct = Int(parts[1]) else { continue }
+            out[id] = min(maxPercent, max(minPercent, pct))
+        }
+        return out
+    }
+
+    static func raw(from speeds: [Int: Int]) -> String {
+        speeds.filter { $0.value != normal }
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key):\($0.value)" }
+            .joined(separator: ",")
+    }
+
+    static var current: [Int: Int] {
+        parse(UserDefaults.standard.string(forKey: storageKey) ?? "")
+    }
+
+    static var randomOn: Bool {
+        UserDefaults.standard.bool(forKey: randomKey)
+    }
+
+    /// "1.5x", "0.75x", "1x".
+    static func label(_ percent: Int) -> String {
+        let v = Double(percent) / 100
+        var s = String(format: "%.2f", v)
+        while s.hasSuffix("0") { s.removeLast() }
+        if s.hasSuffix(".") { s.removeLast() }
+        return s + "x"
+    }
+
+    /// The 1.14 write: magic, flags (bit 0 = random), then one byte per header index 0-51
+    /// (0 = default, otherwise percent).
+    static let magic = UInt32(0xCAC4E1EC)
+    static let slots = 52
+
+    static func packet(speeds: [Int: Int], random: Bool) -> Data {
+        var data = Data()
+        withUnsafeBytes(of: magic.littleEndian) { data.append(contentsOf: $0) }
+        data.append(random ? 1 : 0)
+        for i in 0..<slots {
+            data.append(UInt8(clamping: speeds[i] ?? 0))
+        }
+        return data
+    }
+}
+
 // MARK: - Approximate engine (fallback for firmware older than BLE_PROTOCOL 1.13)
 
 /// Only `ArtStage` uses this now, for boards that do not announce `TRANSITION_START`: the picker,
@@ -617,6 +680,9 @@ struct LoopingTransitionPreview: View {
     let id: Int
     /// Kept for callers; the real render's own length is used.
     var duration: Double = 1.1
+    /// Playback speed (1 = normal). The 1x render is played faster or slower, so moving a speed
+    /// slider changes the example at once without rendering it again.
+    var speed: Double = 1
     @ObservedObject private var store = TransitionPreviewStore.shared
     private let hold = 0.55
 
@@ -624,10 +690,11 @@ struct LoopingTransitionPreview: View {
         Group {
             if let rendered = store.previews[id], !rendered.isEmpty {
                 TimelineView(.animation) { timeline in
-                    let length = max(0.1, rendered.duration)
+                    let rate = max(0.25, speed)
+                    let length = max(0.1, rendered.duration / rate)
                     let period = length + hold * 2
                     let t = timeline.date.timeIntervalSinceReferenceDate
-                    let local = t.truncatingRemainder(dividingBy: period) - hold
+                    let local = (t.truncatingRemainder(dividingBy: period) - hold) * rate
                     if let frame = rendered.frame(at: local) {
                         Image(decorative: frame, scale: 1)
                             .resizable()

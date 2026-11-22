@@ -176,6 +176,16 @@ volatile bool cacheProbeOnly = false;  // the pending cache check is a probe
 static volatile uint32_t transitionMaskLo = 0xFFFFFFFFu;
 static volatile uint32_t transitionMaskHi = 0xFFFFFFFFu;
 
+// BLE_PROTOCOL 1.14 transition speeds, Cache characteristic write of TRANSITION_SPEEDS_LEN bytes:
+// 4-byte magic + flags (bit 0 = random speed) + one byte per header index 0-51: 0 = default,
+// 25...250 = that transition always runs at value/100 speed. Default = 1x, or a random speed in
+// 0.5x...2x when the random flag is on. RAM only; the app re-sends it on every connect.
+#define TRANSITION_SPEEDS_MAGIC 0xCAC4E1ECu
+#define TRANSITION_SPEEDS_COUNT 52
+#define TRANSITION_SPEEDS_LEN (5 + TRANSITION_SPEEDS_COUNT)
+static volatile uint8_t transitionSpeedPct[TRANSITION_SPEEDS_COUNT] = {0};
+static volatile bool transitionSpeedRandom = false;
+
 #include "transitions_core.h"  // TransitionType, shared with the iOS app
 
 // Track last transition to avoid repeats
@@ -353,6 +363,14 @@ class MyServerCallbacks: public BLEServerCallbacks {
 class CacheCheckCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
         std::string value = pCharacteristic->getValue();
+
+        // Transition speeds (iOS app, 1.14): the one cache-characteristic write longer than 20 bytes.
+        // Only copies bytes, so it is safe on this task.
+        if (value.length() == TRANSITION_SPEEDS_LEN && decodeLE32(value) == TRANSITION_SPEEDS_MAGIC) {
+            transitionSpeedRandom = ((uint8_t)value[4] & 1u) != 0;
+            for (int i = 0; i < TRANSITION_SPEEDS_COUNT; i++) transitionSpeedPct[i] = (uint8_t)value[5 + i];
+            return;
+        }
 
         if (value.length() != 20) {
             Serial.printf("ERROR: Cache check got %d bytes, expected 20\n", value.length());
@@ -665,24 +683,51 @@ static void fwBitmap(void*, int16_t x, int16_t y, const uint16_t* px, int16_t w,
   gfx->draw16bitRGBBitmap(x, y, (uint16_t*)px, w, h);
 }
 static void fwPixel(void*, int16_t x, int16_t y, uint16_t c) { gfx->drawPixel(x, y, c); }
+// Speed of the transition being drawn (1.14). The core already scales pauses and frame counts; for
+// the older drawn transitions (< Card Stack) most of the time is drawing, so when slowing down the
+// board also stretches each step's drawing time here.
+static float fwSpeed = 1.0f;
+static bool fwStretchDrawing = false;
+static uint32_t fwStepStartUs = 0;
 static void fwWaitUs(void*, uint32_t us) {
+  if (fwStretchDrawing && fwSpeed < 1.0f) {
+    const uint32_t work = micros() - fwStepStartUs;
+    us += (uint32_t)((float)work * (1.0f / fwSpeed - 1.0f));
+  }
   if (us >= 1000) delay(us / 1000);  // the old delay(ms) calls yielded to FreeRTOS; keep that
   if (us % 1000) delayMicroseconds(us % 1000);
+  fwStepStartUs = micros();
 }
 static void* fwAllocLarge(void*, size_t bytes) { return ps_malloc(bytes); }
 static const TxPanel FW_PANEL = { nullptr, fwBitmap, fwPixel, fwWaitUs, fwAllocLarge };
 
-// Last measured draw time per transition index since boot (ms, 0 = never drawn). Sent as
-// TRANSITION_START's expectedMs so the app can pace its mirror.
+// Last measured draw time per transition index since boot, normalised to 1x speed (ms, 0 = never
+// drawn). TRANSITION_START's expectedMs is this divided by the speed used, so the app paces its mirror.
 static uint16_t transitionLastMs[TRANSITION_COUNT] = {0};
+
+// 1.14: the speed for this draw. A per-transition setting wins; otherwise random (log-uniform, so
+// 0.5x-1x and 1x-2x are equally likely) when the app turned it on; otherwise 1x.
+static float pickTransitionSpeed(int drawn) {
+  if (drawn >= 0 && drawn < TRANSITION_SPEEDS_COUNT) {
+    const uint8_t pct = transitionSpeedPct[drawn];
+    if (pct >= 25) return (float)pct / 100.0f;
+  }
+  if (transitionSpeedRandom) {
+    const float u = (float)(esp_random() % 10001u) / 10000.0f;
+    return powf(2.0f, u * 2.0f - 1.0f);
+  }
+  return 1.0f;
+}
 
 // BLE_PROTOCOL 1.13: "a transition is starting now". Sent from loop() (via runTransition), never
 // from a BLE callback. `drawn` is the index tx_run will actually draw.
-static void announceTransitionStart(int drawn, uint32_t seed, bool oldBlack) {
+static void announceTransitionStart(int drawn, uint32_t seed, bool oldBlack, float speed) {
   if (!pMsgChar) return;
-  char msg[64];
-  snprintf(msg, sizeof(msg), "TRANSITION_START:%d:%lu:%u:%d", drawn, (unsigned long)seed,
-           (unsigned)transitionLastMs[drawn], oldBlack ? 1 : 0);
+  char msg[72];
+  // 1.14 appends <speedPct>; expectedMs is already for this speed.
+  const unsigned expected = (unsigned)((float)transitionLastMs[drawn] / speed + 0.5f);
+  snprintf(msg, sizeof(msg), "TRANSITION_START:%d:%lu:%u:%d:%u", drawn, (unsigned long)seed,
+           expected, oldBlack ? 1 : 0, (unsigned)(speed * 100.0f + 0.5f));
   pMsgChar->setValue(msg);
   pMsgChar->notify();
 }
@@ -706,12 +751,23 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
   int drawn = tx_resolve((int)t);
   if (drawn < 0 || drawn >= TRANSITION_COUNT || (!canCompose && drawn >= TRANSITION_CARD_STACK))
     drawn = TRANSITION_WIPE_BOTTOM;
-  announceTransitionStart(drawn, seed, oldBlack);
+  const float speed = pickTransitionSpeed(drawn);
+  announceTransitionStart(drawn, seed, oldBlack, speed);
+  Serial.printf("Transition speed: %.2fx\n", speed);
   // The shared core (SpotifyDisplay.swiftpm/Sources/TransitionsCore) draws it, exactly as the app does.
+  tx_set_speed(speed);
+  fwSpeed = speed;
+  fwStretchDrawing = drawn < TRANSITION_CARD_STACK;
+  fwStepStartUs = micros();
   const unsigned long drawStart = millis();
   drawn = tx_run(&FW_PANEL, (int)t, oldB, buffer, canCompose ? composeBuffer : nullptr, seed);
   const unsigned long drawMs = millis() - drawStart;
-  if (drawn >= 0 && drawn < TRANSITION_COUNT) transitionLastMs[drawn] = drawMs > 0xFFFF ? 0xFFFF : (uint16_t)drawMs;
+  fwStretchDrawing = false;
+  tx_set_speed(1.0f);
+  if (drawn >= 0 && drawn < TRANSITION_COUNT) {
+    const float ms1x = (float)drawMs * speed;  // normalised to 1x
+    transitionLastMs[drawn] = ms1x > 65535.0f ? 0xFFFF : (uint16_t)ms1x;
+  }
   if (canCompose) memcpy(prevBuffer, buffer, IMAGE_SIZE);
   panelShowsImage = true;
   Serial.println("Transition complete!");
@@ -1714,6 +1770,10 @@ void loop() {
     // BLE_PROTOCOL 1.12: the board understands the enabled-transitions mask and the 0xFD display-only
     // header byte, and announces TRANSITION:<name> after fresh draws too.
     pMsgChar->setValue("CAPS:transitions");
+    pMsgChar->notify();
+    // BLE_PROTOCOL 1.14: the board understands the transition-speeds write and appends the speed
+    // to TRANSITION_START.
+    pMsgChar->setValue("CAPS:speeds");
     pMsgChar->notify();
     publishCacheCount();
     publishCacheStats();

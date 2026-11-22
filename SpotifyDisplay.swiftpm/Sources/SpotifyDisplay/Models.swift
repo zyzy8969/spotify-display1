@@ -47,6 +47,10 @@ struct TransferLogEntry: Identifiable, Codable, Equatable {
     let uploadMs: Int?
     let totalMs: Int
     let outcome: String // "ok", "cache hit", or error description
+    /// A cache hit on a cover the app saved to SD ahead of time this session (queue prefetch): the
+    /// song is new to the person even though the board drew it from its card. Optional so older
+    /// saved entries still decode.
+    var prefetched: Bool? = nil
 }
 
 /// All-time totals for Settings > Lifetime stats. Saved on the phone (UserDefaults, a few hundred

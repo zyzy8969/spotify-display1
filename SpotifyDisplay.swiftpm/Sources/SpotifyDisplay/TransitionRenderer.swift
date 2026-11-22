@@ -83,11 +83,13 @@ final class TransitionRenderer {
     /// Renders transition `index` from `old` (nil = black, like the board's empty screen) to `new`.
     /// Frames are LE RGB565, 240x240 (the bytes the app sends). Never throws; a bad frame gives an
     /// empty result.
-    func render(index: Int, old: Data?, new: Data, seed: UInt32,
+    /// `speed` (BLE_PROTOCOL 1.14): 1 = normal, 2 = twice as fast, 0.5 = half speed.
+    func render(index: Int, old: Data?, new: Data, seed: UInt32, speed: Double = 1,
                 options: TransitionRenderOptions = .mirror) async -> RenderedTransition {
         await withCheckedContinuation { (cont: CheckedContinuation<RenderedTransition, Never>) in
             queue.async {
-                let result = self.renderOnQueue(index: index, old: old, new: new, seed: seed, options: options)
+                let result = self.renderOnQueue(index: index, old: old, new: new, seed: seed, speed: speed,
+                                                options: options)
                 cont.resume(returning: result)
             }
         }
@@ -101,7 +103,7 @@ final class TransitionRenderer {
 
     // MARK: Work on the serial queue
 
-    private func renderOnQueue(index: Int, old: Data?, new: Data, seed: UInt32,
+    private func renderOnQueue(index: Int, old: Data?, new: Data, seed: UInt32, speed: Double,
                                options: TransitionRenderOptions) -> RenderedTransition {
         let n = Self.pixelCount
         guard new.count >= Self.frameBytes else { return .empty(index: index) }
@@ -146,6 +148,9 @@ final class TransitionRenderer {
         )
 
         let composePointer = compose
+        // Same speed the board used (the core keeps it until changed, so reset it after).
+        tx_set_speed(Float(speed))
+        defer { tx_set_speed(1) }
         withExtendedLifetime(capture) {
             oldPixels.withUnsafeBufferPointer { oldBuf in
                 newPixels.withUnsafeBufferPointer { newBuf in
@@ -400,6 +405,8 @@ struct TransitionStartEvent: Identifiable, Equatable {
     let expectedMs: Int
     /// The board's screen was all black before (nothing shown yet).
     let oldBlack: Bool
+    /// Speed the board draws it at, percent (BLE_PROTOCOL 1.14; 100 from older firmware).
+    let speedPercent: Int
     let received: Date
     var newFrame: Data?
 
@@ -414,8 +421,9 @@ struct TransitionStartEvent: Identifiable, Equatable {
         guard parts.count >= 2, let index = Int(parts[0]), let seed = UInt32(parts[1]) else { return nil }
         let expected = parts.count > 2 ? max(0, Int(parts[2]) ?? 0) : 0
         let black = parts.count > 3 ? (parts[3] == "1") : false
+        let speed = parts.count > 4 ? min(400, max(25, Int(parts[4]) ?? 100)) : 100
         return TransitionStartEvent(index: index, seed: seed, expectedMs: expected, oldBlack: black,
-                                    received: received, newFrame: nil)
+                                    speedPercent: speed, received: received, newFrame: nil)
     }
 
     static func == (a: TransitionStartEvent, b: TransitionStartEvent) -> Bool {
@@ -438,6 +446,8 @@ final class TransitionMirror: ObservableObject {
         let start: Date
         /// The board's own timing of this transition last time, in seconds (0 = unknown).
         let expected: TimeInterval
+        /// 1 = normal speed (BLE_PROTOCOL 1.14).
+        var speed: Double = 1
         var rendered: RenderedTransition?
 
         /// Board time is stretched so the frames last exactly `expected` when the board told us.
@@ -475,7 +485,8 @@ final class TransitionMirror: ObservableObject {
     func begin(_ event: TransitionStartEvent, old: Data?) {
         boardAnnouncesStart = true
         playback = Playback(id: event.id, index: event.index, start: event.received,
-                            expected: Double(event.expectedMs) / 1000, rendered: nil)
+                            expected: Double(event.expectedMs) / 1000,
+                            speed: Double(event.speedPercent) / 100, rendered: nil)
         pendingOld = old
         pendingSeed = event.seed
         if let frame = event.newFrame {
@@ -489,9 +500,11 @@ final class TransitionMirror: ObservableObject {
         let old = pendingOld
         let seed = pendingSeed
         let index = pb.index
+        let speed = pb.speed
         pendingOld = nil
         Task { @MainActor in
-            let rendered = await TransitionRenderer.shared.render(index: index, old: old, new: frame, seed: seed)
+            let rendered = await TransitionRenderer.shared.render(index: index, old: old, new: frame, seed: seed,
+                                                                  speed: speed)
             guard var current = self.playback, current.id == id else { return }
             current.rendered = rendered
             self.playback = current

@@ -89,6 +89,11 @@ typedef struct TxPanel {
   void* (*allocLarge)(void* ctx, size_t bytes);
 } TxPanel;
 
+/// Speed for the following tx_run calls (BLE_PROTOCOL 1.14): 1 = as designed, 2 = twice as fast,
+/// 0.5 = half speed; clamped to 0.25...4. Frame-composed transitions draw proportionally fewer or
+/// more frames; the older ones scale their pauses. Stays set until changed. Not thread-safe.
+void tx_set_speed(float speed);
+
 /// Name the firmware announces for index t ("Unknown" for retired / out of range).
 const char* tx_name(int t);
 /// Retired slots draw their twin.

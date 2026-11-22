@@ -128,6 +128,9 @@ final class BLEManager: NSObject, ObservableObject {
     private var lastDrawRequest: DrawRequest?
     /// Bumped per draw request; a late cache-hit conversion only sets `boardFrame` if none came after.
     private var drawRequestGen: UInt64 = 0
+    /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
+    /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
+    private var prefetchedKeySources: Set<String> = []
     private var mirror: TransitionMirror { TransitionMirror.shared }
     /// Rolling terminal-style log for the Live tab (newest last).
     @Published private(set) var eventLog: [LogLine] = []
@@ -135,6 +138,9 @@ final class BLEManager: NSObject, ObservableObject {
     /// Board said `CAPS:transitions` (BLE_PROTOCOL 1.12): it takes the enabled-transitions mask, the
     /// display-only header byte, and announces fresh draws.
     @Published private(set) var boardSupportsTransitionMask = false
+    /// Board said `CAPS:speeds` (BLE_PROTOCOL 1.14): it takes the transition-speeds write and appends
+    /// the speed it used to `TRANSITION_START`.
+    @Published private(set) var boardSupportsSpeeds = false
     /// A photo the person uploaded is on the display: Spotify sends are paused until `endPhotoHold()`.
     @Published private(set) var photoHold = false
     /// The last photo the person uploaded (square JPEG), so tapping the cover can show it again.
@@ -405,6 +411,17 @@ final class BLEManager: NSObject, ObservableObject {
         p.writeValue(packet, for: c, type: .withResponse)
         let on = TransitionCatalog.all.filter { mask & (UInt64(1) << UInt64($0.id)) != 0 }.count
         log("tx      transition mask: \(on) of \(TransitionCatalog.all.count) on", kind: .tx)
+        applyTransitionSpeeds()
+    }
+
+    /// Sends the per-transition speeds and the random-speed switch (BLE_PROTOCOL 1.14). Only to boards
+    /// that announced `CAPS:speeds`: older firmware expects 20-byte cache writes. No reply.
+    func applyTransitionSpeeds() {
+        guard boardSupportsSpeeds, isConnected, let p = peripheral, let c = cacheChar else { return }
+        let speeds = TransitionSpeeds.current
+        let random = TransitionSpeeds.randomOn
+        p.writeValue(TransitionSpeeds.packet(speeds: speeds, random: random), for: c, type: .withResponse)
+        log("tx      transition speeds: \(speeds.count) custom, random \(random ? "on" : "off")", kind: .tx)
     }
 
     /// Photo upload is over (or failed before the board drew it): let Spotify drive the display again.
@@ -572,10 +589,12 @@ final class BLEManager: NSObject, ObservableObject {
                 lastTransferResult = "Cache hit  \(secondsLabel(fromMs: totalMs))"
                 boardAckStatus = "Board ACK: cache hit"
                 lastConfirmedTrackId = trackId
+                let wasPrefetched = prefetchedKeySources.remove(cacheKeySource) != nil
                 appendLog(TransferLogEntry(
                     cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
                     downloadMs: nil, convertMs: nil, uploadMs: 0,
-                    totalMs: totalMs, outcome: "cache hit"
+                    totalMs: totalMs, outcome: "cache hit",
+                    prefetched: wasPrefetched ? true : nil
                 ))
                 setLivePhase("last: cache hit \(secondsLabel(fromMs: totalMs))")
                 return
@@ -867,7 +886,8 @@ final class BLEManager: NSObject, ObservableObject {
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         try ensureTransferEpoch(epochAtStart)
 
-        let cacheKey = String.cacheKeySource(albumId: albumId, imageURL: primaryURL).md5Digest
+        let keySource = String.cacheKeySource(albumId: albumId, imageURL: primaryURL)
+        let cacheKey = keySource.md5Digest
         if try await sendCacheQuery(magic: cacheProbeMagic, cacheKey: cacheKey) { return .alreadyCached }
         try ensureTransferEpoch(epochAtStart)
 
@@ -890,6 +910,7 @@ final class BLEManager: NSObject, ObservableObject {
         guard rgb565.count == imagePayloadBytes else { throw SpotifyDisplayError.conversionFailed }
 
         _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
+        prefetchedKeySources.insert(keySource)
         return .stored
     }
 
@@ -937,6 +958,7 @@ final class BLEManager: NSObject, ObservableObject {
         sawReady = false
         boardSupportsDeflate = false
         boardSupportsTransitionMask = false
+        boardSupportsSpeeds = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
         // Waiting screen: nothing of ours is on the panel any more.
         boardFrame = nil
@@ -1041,6 +1063,11 @@ final class BLEManager: NSObject, ObservableObject {
             let firstTime = !boardSupportsTransitionMask
             boardSupportsTransitionMask = true
             if firstTime { applyTransitionPrefs() }
+        }
+        if text == "CAPS:speeds" {
+            let firstTime = !boardSupportsSpeeds
+            boardSupportsSpeeds = true
+            if firstTime { applyTransitionSpeeds() }
         }
         if text.hasPrefix("ERROR: Decompress") {
             // The retry (and every later frame this connection) goes raw.

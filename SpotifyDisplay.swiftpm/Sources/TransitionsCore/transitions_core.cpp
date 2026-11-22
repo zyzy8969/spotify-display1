@@ -15,6 +15,15 @@ namespace {
 static const TxPanel* g_panel = nullptr;
 static uint16_t* composeBuffer = nullptr;
 static uint32_t g_rng = 1;
+// Speed factor for the current tx_run (BLE_PROTOCOL 1.14): 1 = as designed, 2 = twice as fast,
+// 0.5 = half speed. Frame-composed transitions run proportionally fewer / more frames; the older
+// drawn ones scale their pauses (the board also stretches their drawing time when slowing down).
+static float g_speed = 1.0f;
+static inline int tx_frames(int n) {
+  int f = (int)((float)n / g_speed + 0.5f);
+  return f < 2 ? 2 : f;
+}
+static inline uint32_t tx_scaled_us(uint32_t us) { return (uint32_t)((float)us / g_speed + 0.5f); }
 
 struct TxGfx {
   void draw16bitRGBBitmap(int16_t x, int16_t y, const uint16_t* px, int16_t w, int16_t h) {
@@ -36,8 +45,8 @@ static inline long tx_random(long lo, long hi) {
   return lo + (long)(g_rng % (uint32_t)(hi - lo));
 }
 
-#define delayMicroseconds(us) tx_wait_us((uint32_t)(us))
-#define delay(ms) tx_wait_us((uint32_t)(ms) * 1000u)
+#define delayMicroseconds(us) tx_wait_us(tx_scaled_us((uint32_t)(us)))
+#define delay(ms) tx_wait_us(tx_scaled_us((uint32_t)(ms) * 1000u))
 #define random(lo, hi) tx_random((lo), (hi))
 #define ps_malloc(n) tx_alloc_large(n)
 #undef min
@@ -341,7 +350,7 @@ void drawZoomBlocks(uint16_t* buffer, int width, int height) {
 void drawCheckerCascade(uint16_t* buffer, int width, int height) {
   const int cell = 8;
   const int nx = width / cell, ny = height / cell;
-  const int steps = 30;
+  const int steps = tx_frames(30);
   for (int s = 0; s < steps; s++) {
     for (int ty = 0; ty < ny; ty++) {
       for (int tx = 0; tx < nx; tx++) {
@@ -396,7 +405,7 @@ static const uint8_t BAYER8[8][8] = {
 
 // Card Stack: new cover slides in from the right over the old one, which stays put.
 void drawCardStack(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 26;
+  const int frames = tx_frames(26);
   for (int f = 1; f <= frames; f++) {
     int x0 = (int)((1.0f - easeInOut((float)f / frames)) * CW);
     int w = CW - x0;
@@ -412,7 +421,7 @@ void drawCardStack(const uint16_t* oldB, const uint16_t* newB) {
 
 // Static Dissolve (2 px random cells) and Dither Fade (8x8 Bayer): per-pixel threshold masks.
 static void drawMaskDissolve(const uint16_t* oldB, const uint16_t* newB, bool bayer) {
-  const int frames = 18;
+  const int frames = tx_frames(18);
   for (int f = 1; f <= frames; f++) {
     int level = (f * 256) / frames;  // pixels with threshold < level show the new image
     for (int y = 0; y < CH; y++) {
@@ -430,7 +439,7 @@ static void drawMaskDissolve(const uint16_t* oldB, const uint16_t* newB, bool ba
 
 // Push Left: both covers move together, carousel style.
 void drawPushLeft(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 24;
+  const int frames = tx_frames(24);
   for (int f = 1; f <= frames; f++) {
     int o = (int)(easeInOut((float)f / frames) * CW);
     for (int y = 0; y < CH; y++) {
@@ -444,7 +453,7 @@ void drawPushLeft(const uint16_t* oldB, const uint16_t* newB) {
 
 // Crossfade: smooth per-pixel blend.
 void drawCrossfade(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 16;
+  const int frames = tx_frames(16);
   for (int f = 1; f <= frames; f++) {
     uint32_t k = (uint32_t)(easeInOut((float)f / frames) * 32.0f + 0.5f);
     for (int i = 0; i < CW * CH; i++) composeBuffer[i] = blend565(oldB[i], newB[i], k);
@@ -459,7 +468,7 @@ static inline void squashRow(uint16_t* dstRow, const uint16_t* srcRow, int sx, i
 
 // Card Flip: whole cover narrows to a line and widens again showing the new art.
 void drawCardFlip(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 24;
+  const int frames = tx_frames(24);
   for (int f = 1; f <= frames; f++) {
     float t = easeInOut((float)f / frames);
     int w = max(1, (int)(CW * fabsf(cosf(PI * t))));
@@ -473,7 +482,7 @@ void drawCardFlip(const uint16_t* oldB, const uint16_t* newB) {
 
 // Tile Flip Wave: 6x6 grid of 40 px tiles, each flipping with a diagonal delay.
 void drawTileFlip(const uint16_t* oldB, const uint16_t* newB) {
-  const int n = 6, ts = CW / n, frames = 30;
+  const int n = 6, ts = CW / n, frames = tx_frames(30);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     memset(composeBuffer, 0, IMAGE_SIZE);
@@ -498,7 +507,7 @@ void drawTileFlip(const uint16_t* oldB, const uint16_t* newB) {
 
 // Block Drop: 40 px blocks fall into place over the old cover, bottom row first.
 void drawBlockDrop(const uint16_t* oldB, const uint16_t* newB) {
-  const int n = 6, bs = CW / n, frames = 36;
+  const int n = 6, bs = CW / n, frames = tx_frames(36);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     memcpy(composeBuffer, oldB, IMAGE_SIZE);
@@ -522,7 +531,7 @@ void drawBlockDrop(const uint16_t* oldB, const uint16_t* newB) {
 
 // Melt: old cover drips down in 4 px columns, revealing the new one underneath.
 void drawMelt(const uint16_t* oldB, const uint16_t* newB) {
-  const int col = 4, frames = 30;
+  const int col = 4, frames = tx_frames(30);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     memcpy(composeBuffer, newB, IMAGE_SIZE);
@@ -539,7 +548,7 @@ void drawMelt(const uint16_t* oldB, const uint16_t* newB) {
 
 // Zoom Punch: new cover grows from the center over the old one with a small overshoot.
 void drawZoomPunch(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 26;
+  const int frames = tx_frames(26);
   static int16_t srcX[DISPLAY_WIDTH];
   for (int f = 1; f <= frames; f++) {
     float u = (float)f / frames - 1.0f;
@@ -595,7 +604,7 @@ static void blitScaled(const uint16_t* src, float dx, float dy, float dw, float 
 
 // Corner Peel: old cover peels from the bottom-right corner; pale paper back, shadow on the crease.
 void drawCornerPeel(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 28;
+  const int frames = tx_frames(28);
   for (int f = 1; f <= frames; f++) {
     // Fold position in q = x + y units (0..478).
     int Fq = (int)((359.4f * (1.0f - easeInOut((float)f / frames)) - 10.0f) * 1.41421f);
@@ -656,7 +665,7 @@ static void initShards() {
 
 void drawShatter(const uint16_t* oldB, const uint16_t* newB) {
   if (!shardsReady) initShards();
-  const int frames = 32;
+  const int frames = tx_frames(32);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     memcpy(composeBuffer, newB, IMAGE_SIZE);
@@ -732,7 +741,7 @@ void drawShatter(const uint16_t* oldB, const uint16_t* newB) {
 
 // Cube Turn: both covers on the faces of a cube turning 90 degrees, with perspective and shading.
 void drawCubeTurn(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 26;
+  const int frames = tx_frames(26);
   for (int f = 1; f <= frames; f++) {
     float th = easeInOut((float)f / frames) * (PI / 2), sn = sinf(th), cs = cosf(th);
     float wa = CW * cs;
@@ -775,7 +784,7 @@ void drawCubeTurn(const uint16_t* oldB, const uint16_t* newB) {
 
 // Jelly Drop: new cover falls in, squashes on impact and wobbles until it settles.
 void drawJellyDrop(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 34;
+  const int frames = tx_frames(34);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     memcpy(composeBuffer, oldB, IMAGE_SIZE);
@@ -807,7 +816,7 @@ void drawTileSpin(const uint16_t* oldB, const uint16_t* newB) {
       }
     orderReady = true;
   }
-  const int frames = 32;
+  const int frames = tx_frames(32);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     memset(composeBuffer, 0, IMAGE_SIZE);
@@ -834,7 +843,7 @@ void drawTileSpin(const uint16_t* oldB, const uint16_t* newB) {
 
 // Infinite Zoom: new cover appears as a small framed picture inside the old one; the camera dives in.
 void drawInfiniteZoom(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 30;
+  const int frames = tx_frames(30);
   for (int f = 1; f <= frames; f++) {
     float z = easeInOut((float)f / frames), k = powf(6.0f, z), sa = CW * k, sb = 40.0f * k;
     blitScaled(oldB, 120 - sa / 2, 120 - sa / 2, sa, sa);
@@ -850,7 +859,7 @@ void drawInfiniteZoom(const uint16_t* oldB, const uint16_t* newB) {
 
 // RGB Split: red, green and blue channels fly apart, then snap together on the new cover.
 void drawRgbSplit(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 22;
+  const int frames = tx_frames(22);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     int off = (int)(sinf(PI * t) * 22.0f);
@@ -868,7 +877,7 @@ void drawRgbSplit(const uint16_t* oldB, const uint16_t* newB) {
 
 // Accordion: old cover folds into 8 shaded pleats that squeeze into the right edge.
 void drawAccordion(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 24, n = 8, pw = CW / n;
+  const int frames = tx_frames(24), n = 8, pw = CW / n;
   for (int f = 1; f <= frames; f++) {
     float e = easeInOut((float)f / frames), w = pw * (1.0f - e);
     memcpy(composeBuffer, newB, IMAGE_SIZE);
@@ -922,7 +931,7 @@ static bool initInkMask() {
 
 void drawInkBleed(const uint16_t* oldB, const uint16_t* newB) {
   if (!initInkMask()) { drawCrossfade(oldB, newB); return; }
-  const int frames = 28;
+  const int frames = tx_frames(28);
   for (int f = 1; f <= frames; f++) {
     int lv = (int)(easeInOut((float)f / frames) * 262.0f);
     for (int i = 0; i < CW * CH; i++) {
@@ -942,7 +951,7 @@ void drawCrackSplit(const uint16_t* oldB, const uint16_t* newB) {
     cx = max(70, min(170, cx));
     crack[y] = cx;
   }
-  const int crackFrames = 10, splitFrames = 22;
+  const int crackFrames = tx_frames(10), splitFrames = tx_frames(22);
   for (int f = 1; f <= crackFrames; f++) {
     int ly = (f * CH) / crackFrames;
     memcpy(composeBuffer, oldB, IMAGE_SIZE);
@@ -965,7 +974,7 @@ void drawCrackSplit(const uint16_t* oldB, const uint16_t* newB) {
 
 // Sand Pile: the new cover pours down as grains and piles up from the bottom row.
 void drawSandPile(const uint16_t* oldB, const uint16_t* newB) {
-  const int frames = 36;
+  const int frames = tx_frames(36);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     memcpy(composeBuffer, oldB, IMAGE_SIZE);
@@ -1006,7 +1015,7 @@ void drawHalftone(const uint16_t* oldB, const uint16_t* newB) {
       }
     lumOld[c] = so / 64; lumNew[c] = sn / 64;
   }
-  const int frames = 28;
+  const int frames = tx_frames(28);
   for (int f = 1; f <= frames; f++) {
     float t = (float)f / frames;
     bool firstHalf = t < 0.5f;
@@ -1028,7 +1037,7 @@ void drawHalftone(const uint16_t* oldB, const uint16_t* newB) {
 // QUICK TRANSITIONS (moved verbatim from src/main.cpp)
 // ==================================================
 
-#define QUICK_FRAMES 10
+#define QUICK_FRAMES tx_frames(10)
 static uint8_t* quickMaps[12] = {nullptr};
 
 static float quickThreshold(int id, int x, int y) {
@@ -1173,6 +1182,11 @@ static TransitionType resolveRetiredCore(TransitionType t) {
 // ==================================================
 // Public API
 // ==================================================
+
+extern "C" void tx_set_speed(float speed) {
+  if (!(speed > 0.0f)) speed = 1.0f;  // also catches NaN
+  g_speed = speed < 0.25f ? 0.25f : (speed > 4.0f ? 4.0f : speed);
+}
 
 extern "C" const char* tx_name(int t) {
   if (t < 0 || t >= TRANSITION_COUNT) return "Unknown";

@@ -9,6 +9,11 @@ struct TransitionPickerView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @AppStorage(TransitionPrefs.storageKey) private var disabledRaw = ""
+    /// Custom speeds ("id:percent") and the random-speed switch (BLE_PROTOCOL 1.14).
+    @AppStorage(TransitionSpeeds.storageKey) private var speedsRaw = ""
+    @AppStorage(TransitionSpeeds.randomKey) private var randomSpeed = false
+    /// The row whose speed slider is open (only one at a time).
+    @State private var speedEditing: Int?
 
     var body: some View {
         let enabled = TransitionPrefs.enabledCount(disabledRaw: disabledRaw)
@@ -19,6 +24,8 @@ struct TransitionPickerView: View {
                     .padding(.top, 8)
                 shortcuts
                     .padding(.top, 14)
+                randomSpeedRow
+                    .padding(.top, 6)
                 if !bleManager.boardSupportsTransitionMask && bleManager.isConnected {
                     Text("This display's firmware is older than BLE protocol 1.12, so it picks from every transition no matter what is switched on here. Flash the new firmware to use this list.")
                         .themeText(.footnote)
@@ -49,6 +56,9 @@ struct TransitionPickerView: View {
         .background(theme.background.ignoresSafeArea())
         .onChange(of: disabledRaw) { _ in
             bleManager.applyTransitionPrefs()
+        }
+        .onChange(of: randomSpeed) { _ in
+            bleManager.applyTransitionSpeeds()
         }
         // Previews go from the current song's cover (A) to the next queued song's (B). The samples
         // show until those are ready; a song change while the picker is open re-reads both.
@@ -89,6 +99,117 @@ struct TransitionPickerView: View {
                 disabledRaw = TransitionPrefs.raw(from: Set(TransitionCatalog.all.filter { !$0.quick }.map(\.id)))
             }
         }
+    }
+
+    /// Random speed: every transition left at normal speed plays somewhere between 0.5x and 2x.
+    private var randomSpeedRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $randomSpeed) {
+                Text("Random speed")
+                    .themeText(.row)
+                    .foregroundStyle(theme.ink)
+            }
+            .toggleStyle(ThemedToggleStyle())
+            Text(randomSpeed
+                 ? "Each time, a transition at normal speed plays somewhere between 0.5x and 2x. Ones you set yourself keep their speed."
+                 : "Every transition plays at normal speed unless you set its own with the speed button.")
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            if bleManager.isConnected && !bleManager.boardSupportsSpeeds {
+                Text("This display's firmware is older than BLE protocol 1.14, so it ignores speeds. Flash the new firmware to use them.")
+                    .themeText(.footnote)
+                    .foregroundStyle(theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func speedPercent(_ id: Int) -> Int {
+        TransitionSpeeds.parse(speedsRaw)[id] ?? TransitionSpeeds.normal
+    }
+
+    private func setSpeed(_ id: Int, _ percent: Int) {
+        var speeds = TransitionSpeeds.parse(speedsRaw)
+        speeds[id] = percent
+        speedsRaw = TransitionSpeeds.raw(from: speeds)
+    }
+
+    /// Small button under a transition's name: shows its speed, opens the slider.
+    private func speedButton(_ info: TransitionInfo) -> some View {
+        let pct = speedPercent(info.id)
+        let open = speedEditing == info.id
+        let custom = pct != TransitionSpeeds.normal
+        return Button {
+            withAnimation(.easeOut(duration: 0.15)) { speedEditing = open ? nil : info.id }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "gauge.with.dots.needle.33percent")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(custom ? TransitionSpeeds.label(pct) : (randomSpeed ? "random" : "normal"))
+                    .themeText(.statCaption)
+                    .monospacedDigit()
+            }
+            .foregroundStyle(custom || open ? theme.ink : theme.inkFaint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .overlay(Capsule().stroke(open ? theme.ink : theme.ringOff.opacity(0.6), lineWidth: 1))
+            // Small pill, 44 pt tall target.
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, -10)
+        .accessibilityLabel("\(info.name) speed")
+        .accessibilityValue(custom ? TransitionSpeeds.label(pct) : (randomSpeed ? "Random" : "Normal"))
+        .accessibilityHint(open ? "Closes the speed slider" : "Opens a speed slider")
+    }
+
+    /// 0.5x...2x slider for one transition; the example above plays at the chosen speed.
+    private func speedSlider(_ info: TransitionInfo) -> some View {
+        let pct = speedPercent(info.id)
+        let binding = Binding<Double>(
+            get: { Double(pct) },
+            set: { setSpeed(info.id, Int(($0 / 5).rounded() * 5)) }
+        )
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("0.5x").themeText(.statCaption).foregroundStyle(theme.inkFaint)
+                Slider(
+                    value: binding,
+                    in: Double(TransitionSpeeds.minPercent)...Double(TransitionSpeeds.maxPercent),
+                    onEditingChanged: { editing in
+                        // One write when the finger lifts, not one per step.
+                        if !editing { bleManager.applyTransitionSpeeds() }
+                    }
+                )
+                .tint(theme.sliderTint)
+                .accessibilityLabel("\(info.name) speed")
+                .accessibilityValue(TransitionSpeeds.label(pct))
+                Text("2x").themeText(.statCaption).foregroundStyle(theme.inkFaint)
+            }
+            HStack {
+                Text(TransitionSpeeds.label(pct))
+                    .themeText(.rowValue)
+                    .monospacedDigit()
+                    .foregroundStyle(theme.ink)
+                Spacer()
+                Button {
+                    setSpeed(info.id, TransitionSpeeds.normal)
+                    bleManager.applyTransitionSpeeds()
+                } label: {
+                    Text(randomSpeed ? "Back to random" : "Back to normal")
+                        .themeText(.rowValue)
+                        .foregroundStyle(pct == TransitionSpeeds.normal ? theme.inkFaint : theme.ink)
+                        .underline()
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(pct == TransitionSpeeds.normal)
+            }
+        }
+        .padding(.leading, 98)
     }
 
     private func shortcut(_ title: String, action: @escaping () -> Void) -> some View {
@@ -159,9 +280,20 @@ struct TransitionPickerView: View {
     }
 
     private func row(_ info: TransitionInfo) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            rowMain(info)
+            if speedEditing == info.id {
+                speedSlider(info)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    private func rowMain(_ info: TransitionInfo) -> some View {
         let on = isOn(info)
         return HStack(alignment: .center, spacing: 14) {
-            LoopingTransitionPreview(id: info.id, duration: info.duration)
+            LoopingTransitionPreview(id: info.id, duration: info.duration,
+                                     speed: Double(speedPercent(info.id)) / 100)
                 .frame(width: 84, height: 84)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .opacity(on.wrappedValue ? 1 : 0.35)
@@ -181,6 +313,8 @@ struct TransitionPickerView: View {
                     .themeText(.footnote)
                     .foregroundStyle(theme.inkSoft)
                     .fixedSize(horizontal: false, vertical: true)
+                speedButton(info)
+                    .padding(.top, 2)
             }
             Spacer(minLength: 8)
             Toggle("", isOn: on)

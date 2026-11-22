@@ -2,11 +2,27 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.13** (`TRANSITION_START`: the board announces each transition as it starts, so the app can mirror it.)
+Version: **1.14** (transition speeds: the app sets a speed per transition or random speeds; the board reports the speed it used.)
 
-Firmware behaviour note (2026-11-22, no wire change, version unchanged): fresh (new-song) frames with a
-`0xFF` header now pick from **every** enabled transition, the same as cache hits. They used to be limited
-to the quick set (see 1.11 / 1.12 below). Messages, headers and the mask are unchanged; clients need no update.
+Changes in 1.14 (transition speeds, 2026-11-22; owner-approved). Additive: old firmware never announces
+`CAPS:speeds`, so the app never sends it the new write; old apps ignore `CAPS:speeds` and the extra field.
+The Python sender is unaffected.
+- **Transition speeds** — Cache characteristic write, 57 bytes (the only cache write longer than 20):
+  magic `0xCAC4E1EC` (u32 LE) + `flags` (u8; bit 0 = random speed) + 52 bytes, one per header transition
+  index 0-51: `0` = default, `25`..`250` = that transition always runs at value/100 speed. Default is 1x,
+  or, with the random flag, a random speed per draw in 0.5x..2x (log-uniform). The app uses 50..200 and
+  sends it on every connect (after `CAPS:speeds`) and when the person changes it. No reply. RAM only.
+  How speed works: frame-composed transitions (index >= 18) draw value-scaled fewer/more frames; the older
+  drawn ones (0-17) scale their pauses, and when slowing down the board also stretches each step's
+  drawing time. The shared core takes it as `tx_set_speed()`.
+- **`TRANSITION_START` gains a 5th field** — `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>:<speedPct>`.
+  `speedPct` = the speed this draw uses x100 (e.g. `150`); `expectedMs` is already for that speed. Missing
+  (1.13 firmware, or index 255 "none") = 100. Clients render the mirror at that speed.
+- **`CAPS:speeds`** — sent on every stats request next to `CAPS:transitions`.
+
+Firmware behaviour notes (2026-11-22, no wire change): fresh (new-song) frames with a `0xFF` header pick from
+**every** enabled transition, the same as cache hits (they used to be limited to the quick set, see 1.11 /
+1.12 below). Random picks use a shuffle bag: every enabled transition is drawn once before any repeats.
 
 Changes in 1.13 (live transition mirror). Additive: old apps ignore the unknown message; old firmware never
 sends it; the Python sender is unaffected.
@@ -193,7 +209,8 @@ message they do not recognise.
 | `READY` | Connect callback (usually lost; read Status instead) | Readiness |
 | `HB` | Every ~1 s while connected | iOS: background poll tick. Not a reply to anything |
 | `CACHE_HIT_MS:<ms>` | Cache hit, after SD load + transition | Telemetry only |
-| `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>` | Right before every drawn transition starts (cache hit, fresh frame, `0xFD` photo; not `0xFE`) (1.13) | iOS: start the live mirror of the board's transition with the shared core |
+| `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>[:<speedPct>]` | Right before every drawn transition starts (cache hit, fresh frame, `0xFD` photo; not `0xFE`) (1.13; `speedPct` since 1.14) | iOS: start the live mirror of the board's transition with the shared core, at that speed |
+| `CAPS:speeds` | Stats request, next to `CAPS:transitions` (1.14) | iOS: may send the transition-speeds write this connection |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |

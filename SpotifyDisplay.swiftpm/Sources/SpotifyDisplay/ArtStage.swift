@@ -22,6 +22,9 @@ struct ArtStage: View {
     let value: String
     /// Newest `TRANSITION:` announcement from the board, if any.
     var event: TransitionEvent? = nil
+    /// A tap swap is in flight (photo <-> cover): the card already flipped to the new picture, so the
+    /// board's transition for it is not mirrored and picture changes cut.
+    var quiet = false
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -79,7 +82,16 @@ struct ArtStage: View {
         }
         .onChange(of: imageID) { _ in imageDidChange() }
         .onChange(of: mirror.playback?.id) { id in
-            if let id { watchMirror(id) }
+            if quiet {
+                // This swap's own board transition: already shown by the flip.
+                finishedMirrorID = id
+            } else if let id {
+                watchMirror(id)
+            }
+        }
+        .onChange(of: quiet) { on in
+            // Leaving a swap: a playback still running belongs to it; never start it late.
+            if !on, let pb = mirror.playback { finishedMirrorID = pb.id }
         }
         .frame(width: side, height: side)
         .background(theme.artSurface)
@@ -100,7 +112,7 @@ struct ArtStage: View {
 
     /// The board transition being mirrored right now, if any.
     private var activeMirror: TransitionMirror.Playback? {
-        guard !reduceMotion, let pb = mirror.playback, pb.id != finishedMirrorID else { return nil }
+        guard !reduceMotion, !quiet, let pb = mirror.playback, pb.id != finishedMirrorID else { return nil }
         // A real board transition the person switched off (the board drew it before our mask got
         // there, or its firmware ignores the mask): don't play it here, cut when the cover arrives.
         // Index 255 (none) stays: its single-frame render is a cut on the board's clock.
@@ -152,6 +164,16 @@ struct ArtStage: View {
     private func imageDidChange() {
         let old = previous
         previous = image
+        if quiet {
+            // Swap flip: the card already shows this picture; cut, and treat the board's playback as done.
+            playStart = nil
+            outgoing = nil
+            if let pb = mirror.playback {
+                coverArrivedFor = pb.id
+                finishedMirrorID = pb.id
+            }
+            return
+        }
         if let pb = mirror.playback, coverArrivedFor != pb.id,
            pb.id != finishedMirrorID || Date().timeIntervalSince(pb.end) < freshWindow {
             // The cover the board is drawing (or just drew): the mirror already shows this change,

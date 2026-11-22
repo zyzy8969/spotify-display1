@@ -491,6 +491,7 @@ struct TransferRow: View {
             if let ul = entry.uploadMs { parts.append("ble \(StatsFormat.short(ul))") }
         }
         // Since BLE_PROTOCOL 1.12 fresh sends report their transition too, not only cache hits.
+        if entry.prefetched == true { parts.append("saved ahead") }
         if let name = entry.transitionName, !name.isEmpty { parts.append("tr \(name)") }
         return parts.joined(separator: "  ")
     }
