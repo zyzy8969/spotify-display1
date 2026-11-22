@@ -1,9 +1,15 @@
 # Dev handoff — iOS BLE / background work
 
-Last updated: 2026-04-15
+Last updated: 2026-11-22
 
 ## What was committed
 
+- **2026-11-22 (later), `feat/faster-transfer`, builds #48-#62 (BLE 1.15-1.18), all pushed, last firmware
+  flashed:** build-46 transitions merged into the shared core, 0.4-1.3x speeds, swap Card Flip, photos cached
+  on the card, `DRAWN` pop-up timing, new-song LED / app-line colours, per-track cache/new rule, separate
+  nerd/normal layouts, white waiting screen fix, build number in Settings. **Paused mid-way by the owner:**
+  lighting, cache/new/hit and the nerd layout are still being worked on (see `PROJECT_STATUS.md`
+  "In progress"). Nothing verified on the device yet; script: `docs/VALIDATION_CHECKLIST.md` "2026-11-22 session".
 - **2026-11-22, `feat/transition-picker-stats-upload` (BLE 1.12, awaiting device test, uncommitted):** transition on/off picker with live examples (mask sent to the board), fresh draws now announce `TRANSITION:`, the app cover replays the board's announced effect, stats moved from a sheet to General/Live pages on the main screen (Live has a terminal log), photo upload (display-only `0xFD`, not saved to SD, pauses Spotify). Firmware compiles with PlatformIO; the Swift side has NOT been compiled (no Mac) — run the CI `ios` job first. Test script: `docs/VALIDATION_CHECKLIST.md`.
 - **2026-11-22, `feat/faster-transfer` (BLE 1.11, awaiting device test):** deflate-compressed frames, 7.5–15 ms interval + 251-byte DLE request, 5-song prefetch. Old behaviour and rollback steps: `docs/ROLLBACK_FASTER_TRANSFER.md`; pre-change code is tagged `backup/pre-faster-transfer`.
 - **Info.plist:** `UIBackgroundModes` → `bluetooth-central`.

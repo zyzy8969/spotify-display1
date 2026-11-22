@@ -137,3 +137,23 @@ Needs the new firmware flashed AND the new app build. Serial monitor on (`pio de
   (banner "Photo on display"); "Back to Spotify" redraws the current song. Disconnect/reconnect clears the
   hold. Try a portrait, a landscape and a screenshot.
 - Regression: rapid skips, disconnect mid-transfer, and a cache-hit-then-skip must behave as before.
+
+## 2026-11-22 session — branch feat/faster-transfer, build #62 (BLE 1.15-1.18)
+
+Check "app build 62" at the bottom of Settings first. Keep `pio device monitor -b 921600` open.
+
+- [ ] Transitions: with every transition on, a run of skips gives a different one each time (serial
+      `Transition pick: <name> (<index>) from <n> left`), new ones included (Honeycomb, Gallery, Doors...).
+- [ ] Mirrored effects (Push Right, Block Rise, Cube Down) show the picture the right way round.
+- [ ] Ripple is smooth (no tearing).
+- [ ] Speeds vary 0.4x-1.3x on cache hits; a new song logs `Transition speed: 1.30x`.
+- [ ] Album <-> photo: the app card flips and the keychain plays Card Flip both ways; the card behind always
+      shows the other picture; after the first show, album -> photo is a cache hit (~1 s).
+- [ ] Lighting (still being designed, see PROJECT_STATUS): played song = blue; saved-ahead new song = orange,
+      blue flash at draw start, orange; new not on card = orange; app line matches at the same moments.
+- [ ] Pop-ups (normal mode only) appear when the keychain turns green: "cache" / "cache"+"new" / "new";
+      none for photos; going back to a song just played says "cache".
+- [ ] Disconnect (phone Bluetooth off): the keychain shows the white "Bluetooth connected?" screen, never the
+      text over the old cover. Repeat a few times.
+- [ ] Nerd mode: live details right under the small cover row and its line (owner still reports it wrong).
+
