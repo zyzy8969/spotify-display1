@@ -1760,6 +1760,15 @@ static void ledUpdate() {
   }
 }
 
+// BLE_PROTOCOL 1.18: "DRAWN" goes out the moment the cover is fully on screen, together with the green
+// LED (fresh frames: before the SD save and ACK; cache hits: after the draw). The app pops its
+// "new" / "cache" word on it, so the word appears when the keychain turns green.
+static void notifyDrawn() {
+  if (!pMsgChar || !deviceConnected) return;
+  pMsgChar->setValue("DRAWN");
+  pMsgChar->notify();
+}
+
 static void ledSetMode(LedMode m) {
   ledMode = m;
   ledModeSince = millis();
@@ -1969,6 +1978,7 @@ void loop() {
         pMsgChar->setValue("SUCCESS");
         pMsgChar->notify();
         ledSetMode(LED_DONE);
+        notifyDrawn();
       } else {
         ledSetMode(LED_WAITING);  // a fresh transfer follows
         Serial.println("ERROR: Cache load failed — reporting miss so the client sends fresh");
@@ -2054,6 +2064,7 @@ void loop() {
     pendingTransition = 0xFF;  // a later cache hit must not inherit this frame's header byte
     // Green as soon as the cover is on screen, not after the SD save (~0.4 s later).
     ledSetMode(LED_DONE);
+        notifyDrawn();
 
     unsigned long saveStart = millis();
     if (!displayOnly) saveToCache(transferCacheKey);

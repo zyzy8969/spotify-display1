@@ -172,6 +172,17 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupportsNextTransition = false
     /// Board said `CAPS:newsong` (BLE_PROTOCOL 1.17): it takes the new-song cache check.
     @Published private(set) var boardSupportsNewSong = false
+    /// The send in flight is a new song (first from its album, or a fresh send): the keychain's LED is
+    /// orange, so the app's progress line is orange too. False for songs drawn from cache (blue).
+    @Published private(set) var sendIsNewSong = false
+    /// One "new" / "cache" word to pop, published when the board says `DRAWN` (BLE_PROTOCOL 1.18), i.e.
+    /// when the keychain turns green. `popupForNextDraw` is what the current song send will show.
+    struct DrawnPopup: Equatable {
+        let id = UUID()
+        let cached: Bool
+    }
+    @Published private(set) var drawnPopup: DrawnPopup?
+    private var popupForNextDraw: Bool?
     /// The view set this for a photo <-> cover swap: the next draw this app asks for (the photo, or the
     /// cover coming back) plays Card Flip on the keychain, like the app's card. Cleared once sent.
     var flipNextDraw = false
@@ -505,6 +516,8 @@ final class BLEManager: NSObject, ObservableObject {
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         sendSwapFlipIfAsked()
+        popupForNextDraw = nil
+        sendIsNewSong = false
 
         sendStageGen &+= 1
         let myStageGen = sendStageGen
@@ -611,13 +624,17 @@ final class BLEManager: NSObject, ObservableObject {
         // "Played before" is per album: the first song from an album is new (orange on the keychain)
         // even when its cover is already on the card (prefetched); later songs from it are blue.
         let albumKey = playKey(albumId: albumId, trackId: trackId)
+        let newToPerson = !playedAlbumSet.contains(albumKey)
+        sendIsNewSong = newToPerson
+        // A hit says "cache" unless the album is new to the person; a miss (fresh send) says "new".
+        popupForNextDraw = !newToPerson
         sendSwapFlipIfAsked()
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
         noteDrawRequest(.cacheCheck(frameTask))
         let hitDrawGen = drawRequestGen
         do {
-            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: !playedAlbumSet.contains(albumKey))
+            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: newToPerson)
         } catch {
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
@@ -672,6 +689,9 @@ final class BLEManager: NSObject, ObservableObject {
         }
         awaitingCacheRenderConfirm = false
         cacheRenderConfirmed = false
+        // Fresh send: orange on the keychain, "new" when it turns green.
+        sendIsNewSong = true
+        popupForNextDraw = false
 
         let data: Data
         setLivePhase("waiting download…")
@@ -1143,6 +1163,13 @@ final class BLEManager: NSObject, ObservableObject {
         }
         if text == "CAPS:next" { boardSupportsNextTransition = true }
         if text == "CAPS:newsong" { boardSupportsNewSong = true }
+        if text == "DRAWN" {
+            // Song covers only: photos and anything not started by processTrack pop nothing.
+            if let cached = popupForNextDraw, !photoHold {
+                drawnPopup = DrawnPopup(cached: cached)
+            }
+            popupForNextDraw = nil
+        }
         if text == "CAPS:t128" {
             // Arrives after CAPS:speeds: send the speeds again, now for every index.
             let firstTime = !boardSupports128

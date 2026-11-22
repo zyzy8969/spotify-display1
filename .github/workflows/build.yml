@@ -28,6 +28,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             build
 
       - name: Package unsigned IPA

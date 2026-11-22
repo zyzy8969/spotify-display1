@@ -52,6 +52,11 @@ struct SettingsView: View {
                 spotifyRows
                 ThemedDivider()
                 clientIDRows
+                // Which cloud build this is (the GitHub Actions run number), to match reports to builds.
+                Text("app build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")")
+                    .themeText(.footnote)
+                    .foregroundStyle(theme.inkFaint)
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
             .padding(.horizontal, theme.margin + 4)
             .padding(.bottom, 32)

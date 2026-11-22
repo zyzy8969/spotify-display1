@@ -170,7 +170,7 @@ struct NowPlayingScreen: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .overlay {
                 ResultPopups(
-                    lastEntry: bleManager.transferLog.last,
+                    drawn: bleManager.drawnPopup,
                     photoUp: bleManager.photoHold,
                     nerd: layoutNerd,
                     area: geo.size
@@ -641,6 +641,7 @@ struct NowPlayingScreen: View {
             stage: bleManager.sendStage,
             bleFloor: stripBleFloor,
             failed: stripFailed,
+            newSong: bleManager.sendIsNewSong,
             thickness: nerd ? ArtMetrics.nerdStripThickness : nil
         )
     }
@@ -739,7 +740,8 @@ private struct ScrollIf<Content: View>: View {
 /// cover coming back, so it says "cache". Purely decorative: no hit testing, hidden from VoiceOver
 /// (the strip already says the same). Reduce Motion: fade only.
 private struct ResultPopups: View {
-    let lastEntry: TransferLogEntry?
+    /// Published when the board says `DRAWN` (its green light): the word appears right then.
+    let drawn: BLEManager.DrawnPopup?
     /// A photo is on the display: nothing pops.
     let photoUp: Bool
     /// Nerd mode shows the same in Live details and the log: nothing pops.
@@ -777,10 +779,9 @@ private struct ResultPopups: View {
         .frame(width: area.width, height: area.height)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-        .onChange(of: lastEntry?.id) { _ in
-            guard !photoUp, !nerd, let entry = lastEntry,
-                  entry.outcome == "cache hit" || entry.outcome == "ok" else { return }
-            spawn(cached: entry.cacheHit && entry.firstShow != true)
+        .onChange(of: drawn?.id) { _ in
+            guard !photoUp, !nerd, let drawn else { return }
+            spawn(cached: drawn.cached)
         }
     }
 
@@ -1263,6 +1264,9 @@ struct LiveStrip: View {
     var bleFloor: Double = 0
     /// The send that just ended failed: the line turns red and stays.
     var failed = false
+    /// The song being sent is new (the keychain's LED is orange): the line is orange from the start,
+    /// not the cache-check blue.
+    var newSong = false
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
 
@@ -1343,7 +1347,7 @@ struct LiveStrip: View {
             let checking = stage == .checking
             return Look(
                 fill: min(1, max(creep, bleFloor)),
-                color: checking ? StripColors.check(theme) : StripColors.fresh(theme),
+                color: checking && !newSong ? StripColors.check(theme) : StripColors.fresh(theme),
                 opacity: 1,
                 dashedTrack: checking,
                 marker: .none

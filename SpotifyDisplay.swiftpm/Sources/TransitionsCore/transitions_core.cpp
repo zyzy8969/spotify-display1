@@ -1578,26 +1578,28 @@ void drawDoors(const uint16_t* oldB, const uint16_t* newB) {
   }
 }
 
-// Ripple: a water ring spreads from the centre, bending the picture and swapping covers as it passes.
+// Ripple: a soft water ring spreads from the centre; the new cover is inside it. The ring is shading
+// only (a lit crest and a darker trough), never a pixel displacement: the old version bent the picture
+// per pixel and tore on the panel (owner: "too glitchy", 2026-11-22). Uses the Quick Iris distance map
+// (0..250 = centre..corner), so a frame is one table read per pixel.
 void drawRipple(const uint16_t* oldB, const uint16_t* newB) {
+  const uint8_t* m = getQuickMap(0);
+  if (!m) { drawCrossfade(oldB, newB); return; }
   const int frames = tx_frames(26);
+  const float band = 22.0f;  // half-width of the ring, map units
   for (int f = 1; f <= frames; f++) {
-    float R = easeInOut((float)f / frames) * 200 - 10;
-    for (int y = 0; y < CH; y++) {
-      float dy = y + 0.5f - 120;
-      uint16_t* d = composeBuffer + y * CW;
-      for (int x = 0; x < CW; x++) {
-        float dx = x + 0.5f - 120, r = sqrtf(dx * dx + dy * dy) + 0.001f, dd = r - R;
-        int i = y * CW + x;
-        if (fabsf(dd) < 22) {
-          float k = sinf(dd / 22 * PI) * 7;
-          const uint16_t* src = dd < 0 ? newB : oldB;
-          uint16_t c = src[clampPx((int)(y + dy / r * k)) * CW + clampPx((int)(x + dx / r * k))];
-          d[x] = blend565(c, 0xFFFF, (uint32_t)((1 - fabsf(dd) / 22) * 9));
-        } else {
-          d[x] = dd < 0 ? newB[i] : oldB[i];
-        }
-      }
+    // From just before the centre to past the corners, so the last frame has no ring left.
+    const float R = easeInOut((float)f / frames) * (250.0f + 2 * band) - band;
+    for (int i = 0; i < CW * CH; i++) {
+      const float dd = (float)m[i] - R;
+      if (dd <= -band) { composeBuffer[i] = newB[i]; continue; }
+      if (dd >= band) { composeBuffer[i] = oldB[i]; continue; }
+      const uint16_t src = dd < 0 ? newB[i] : oldB[i];
+      // One smooth wave across the band: crest (lighter) just inside the front, trough (darker) outside.
+      const float w = sinf(dd / band * PI);  // -1..1
+      const float fade = 1.0f - fabsf(dd) / band;  // 0 at the band edges, 1 at the front
+      composeBuffer[i] = w < 0 ? blend565(src, 0xFFFF, (uint32_t)(-w * fade * 9.0f))
+                               : shade565(src, 1.0f - w * fade * 0.22f);
     }
     pushComposedFrame();
   }

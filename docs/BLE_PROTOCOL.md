@@ -2,7 +2,16 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.17** (new-song cache check: songs the keychain has never shown light the orange LED, even from SD.)
+Version: **1.18** (`DRAWN`: the board says when a cover is fully on screen, with its green LED.)
+
+Changes in 1.18 (2026-11-22). Additive: old apps ignore the message; old firmware never sends it (the app
+then shows no "new" / "cache" word).
+- **`DRAWN`** — Message notify sent the moment a cover is fully drawn, together with the green status LED:
+  fresh frames right after the transition (before the SD save and the `SUCCESS` ACK), cache hits after the
+  draw. Not sent for store-only (`0xFE`) frames. The app pops its "new" / "cache" word on it, so the word
+  appears when the keychain turns green. Photos (`0xFD`) send it too; the app ignores it for them.
+
+Changes in 1.17 summary: (new-song cache check: songs the keychain has never shown light the orange LED, even from SD.)
 
 Changes in 1.17 (2026-11-22; owner asked for the orange light on every new song, prefetched ones too).
 Additive: the app sends the new magic only to boards that announced `CAPS:newsong`.
@@ -266,6 +275,7 @@ message they do not recognise.
 | `CAPS:t128` | Stats request, after `CAPS:speeds` (1.15) | iOS: transitions 52-116 exist; send speeds for all 117 indices |
 | `CAPS:next` | Stats request, after `CAPS:t128` (1.16) | iOS: may send the one-shot next-draw transition (swap flip) |
 | `CAPS:newsong` | Stats request, after `CAPS:next` (1.17) | iOS: may send the new-song cache check (orange LED) |
+| `DRAWN` | A cover is fully on screen, with the green LED (1.18) | iOS: pop the "new" / "cache" word now |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |
