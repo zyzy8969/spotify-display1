@@ -1265,18 +1265,52 @@ void drawShatter(const uint16_t* oldB, const uint16_t* newB) {
       int x0 = max(0, (int)minX), x1 = min(CW - 1, (int)maxX + 1);
       int y0 = max(0, (int)minY), y1 = min(CH - 1, (int)maxY + 1);
       if (x0 > x1 || y0 > y1) continue;
+      // Everything below is affine in the screen pixel (x, y): the source point (sx, sy) inside the
+      // unmoved shard and its barycentric weights w0, w1 (w2 = 1 - w0 - w1). So per frame and shard we
+      // compute each one's value at (0, 0) and its x/y slopes once, solve each row's inside-the-shard
+      // span directly, and walk only that span with additions. The old loop tested every pixel of the
+      // bounding box (about twice the shard) with 3 divides and a rotation each.
+      // Source point: sx = s.cx + cs*rx + sn*ry, sy = s.cy - sn*rx + cs*ry, rx = x+0.5-s.cx-ox, ry = y+0.5-s.cy-oy.
+      const float qx = 0.5f - s.cx - ox, qy = 0.5f - s.cy - oy;
+      const float sx00 = s.cx + cs * qx + sn * qy, sy00 = s.cy - sn * qx + cs * qy;
+      const float sxdx = cs, sxdy = sn, sydx = -sn, sydy = cs;
+      // w0 = ((bx-ax)(sy-ay) - (by-ay)(sx-ax)) / area; w1 likewise with (b, c). Linear in (sx, sy).
+      const float ia = 1.0f / s.area;
+      const float a0x = -(s.by - s.ay) * ia, a0y = (s.bx - s.ax) * ia;
+      const float a0c = ((s.by - s.ay) * s.ax - (s.bx - s.ax) * s.ay) * ia;
+      const float a1x = -(s.cy2 - s.by) * ia, a1y = (s.cx2 - s.bx) * ia;
+      const float a1c = ((s.cy2 - s.by) * s.bx - (s.cx2 - s.bx) * s.by) * ia;
+      const float w0dx = a0x * sxdx + a0y * sydx, w0dy = a0x * sxdy + a0y * sydy;
+      const float w1dx = a1x * sxdx + a1y * sydx, w1dy = a1x * sxdy + a1y * sydy;
+      const float w0_00 = a0x * sx00 + a0y * sy00 + a0c, w1_00 = a1x * sx00 + a1y * sy00 + a1c;
+      const float w2dx = -w0dx - w1dx;
+      const uint8_t crackAmt = lt > 0 ? 14 : 24;
       for (int y = y0; y <= y1; y++) {
-        for (int x = x0; x <= x1; x++) {
-          // Map the screen pixel back into the unmoved shard.
-          float rx = x + 0.5f - s.cx - ox, ry = y + 0.5f - s.cy - oy;
-          float sx = s.cx + cs * rx + sn * ry, sy = s.cy - sn * rx + cs * ry;
-          float w0 = ((s.bx - s.ax) * (sy - s.ay) - (s.by - s.ay) * (sx - s.ax)) / s.area;
-          float w1 = ((s.cx2 - s.bx) * (sy - s.by) - (s.cy2 - s.by) * (sx - s.bx)) / s.area;
-          float w2 = 1.0f - w0 - w1;
-          if (w0 < 0 || w1 < 0 || w2 < 0) continue;
-          uint16_t c = oldB[clampPx((int)sy) * CW + clampPx((int)sx)];
-          if (cracks && fminf(w0, fminf(w1, w2)) < 0.035f) c = blend565(c, 0xFFFF, lt > 0 ? 14 : 24);
-          composeBuffer[y * CW + x] = c;
+        // Row values at x = 0, then the x range where all three weights are >= 0.
+        float w0r = w0_00 + w0dy * y, w1r = w1_00 + w1dy * y, w2r = 1.0f - w0r - w1r;
+        float lo = (float)x0, hi = (float)x1;
+        bool empty = false;
+        const float wr[3] = {w0r, w1r, w2r}, wd[3] = {w0dx, w1dx, w2dx};
+        for (int e = 0; e < 3 && !empty; e++) {
+          if (wd[e] > 1e-7f)       lo = fmaxf(lo, -wr[e] / wd[e]);
+          else if (wd[e] < -1e-7f) hi = fminf(hi, -wr[e] / wd[e]);
+          else if (wr[e] < 0)      empty = true;
+        }
+        if (empty) continue;
+        int xs = max(x0, (int)ceilf(lo)), xe = min(x1, (int)floorf(hi));
+        if (xs > xe) continue;
+        float sx = sx00 + sxdx * xs + sxdy * y, sy = sy00 + sydx * xs + sydy * y;
+        uint16_t* out = composeBuffer + y * CW + xs;
+        if (!cracks) {
+          for (int x = xs; x <= xe; x++, sx += sxdx, sy += sydx)
+            *out++ = oldB[clampPx((int)sy) * CW + clampPx((int)sx)];
+        } else {
+          float w0 = w0r + w0dx * xs, w1 = w1r + w1dx * xs, w2 = 1.0f - w0 - w1;
+          for (int x = xs; x <= xe; x++, sx += sxdx, sy += sydx, w0 += w0dx, w1 += w1dx, w2 += w2dx) {
+            uint16_t c = oldB[clampPx((int)sy) * CW + clampPx((int)sx)];
+            if (fminf(w0, fminf(w1, w2)) < 0.035f) c = blend565(c, 0xFFFF, crackAmt);
+            *out++ = c;
+          }
         }
       }
     }
