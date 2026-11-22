@@ -5,6 +5,7 @@
 Version: **1.11** (Compressed frames; faster link parameters.)
 
 Changes in 1.11 (faster sending). Additive: old clients and the Python sender are unaffected.
+How 1.10 worked and how to roll back: `docs/ROLLBACK_FASTER_TRANSFER.md` (tag `backup/pre-faster-transfer`).
 - **Compressed frame** — new 10-byte image header: `transitionIndex (1)` + `format (1)` = `0x01`
   (raw DEFLATE, RFC 1951, no zlib header) + raw size `uint32` LE (must be `115200`) + packed size
   `uint32` LE (1..115200). The body is that many bytes of the deflated RGB565 frame. Firmware inflates it

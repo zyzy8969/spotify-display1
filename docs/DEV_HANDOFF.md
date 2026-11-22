@@ -4,6 +4,7 @@ Last updated: 2026-04-15
 
 ## What was committed
 
+- **2026-11-22, `feat/faster-transfer` (BLE 1.11, awaiting device test):** deflate-compressed frames, 7.5–15 ms interval + 251-byte DLE request, 5-song prefetch. Old behaviour and rollback steps: `docs/ROLLBACK_FASTER_TRANSFER.md`; pre-change code is tagged `backup/pre-faster-transfer`.
 - **Info.plist:** `UIBackgroundModes` → `bluetooth-central`.
 - **BLEManager:** Core Bluetooth state restoration (`CBCentralManagerOptionRestoreIdentifierKey`, `willRestoreState`, reconnect / rediscover services), `UIApplication.beginBackgroundTask` for the full `processTrack` scope, cancellable 32s post-chunk `SUCCESS` timeout.
 - **ContentView:** `scenePhase`-aware copy about limited background Spotify updates + always-visible expectation line.
