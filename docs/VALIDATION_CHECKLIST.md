@@ -67,7 +67,7 @@ Last updated: 2026-04-15
 ## iOS UI (themes)
 
 Added with the three-theme UI (`feat/themes-ui`). Nothing here has been run yet. Repeat the visual
-checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
+checks in each theme (Settings > look / Theme: Crayon and Quiet, each in day and night).
 
 - Safe area, Face ID iPhone: the gear and status dots sit below the status bar / Dynamic Island,
   and the footer line ("47 saved" / "47 cached") sits fully above the home indicator.
@@ -84,7 +84,7 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
   ring; while sending a growing line; while preparing a dashed line.
 - Dynamic Type: Settings > Accessibility > Display & Text Size > Larger Text, largest size. Every
   screen stays usable (main screen scrolls if needed; dot names hide but the dots stay), nothing
-  overlaps, buttons still work. Turn on Bold Text and check that Crayon and Serif text gets bolder.
+  overlaps, buttons still work. Turn on Bold Text and check that Crayon text gets bolder.
 - VoiceOver: dots read "Spotify connected" / "Display not connected"; the strip reads "Display"
   plus its state; playback buttons read "Previous track", "Play"/"Pause", "Next track"; the
   "show stats" switch reads as a switch with its on/off value; the theme options read "selected".

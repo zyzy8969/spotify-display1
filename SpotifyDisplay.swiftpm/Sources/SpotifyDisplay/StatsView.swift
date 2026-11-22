@@ -129,14 +129,36 @@ struct LastTimeStats: View {
 struct CacheHistory: View {
     let entries: [TransferLogEntry]
     var limit = 3
+    /// Opens the full history; nil hides the button.
+    var onExpand: (() -> Void)? = nil
     @Environment(\.theme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(theme.id.text(.cacheHistory))
-                .themeText(.eyebrow)
-                .foregroundStyle(theme.inkFaint)
-                .accessibilityAddTraits(.isHeader)
+            HStack(alignment: .center, spacing: 8) {
+                Text(theme.id.text(.cacheHistory))
+                    .themeText(.eyebrow)
+                    .foregroundStyle(theme.inkFaint)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 8)
+                if let onExpand, !entries.isEmpty {
+                    Button(action: onExpand) {
+                        HStack(spacing: 4) {
+                            Text(theme.id.text(.seeAll))
+                                .themeText(.footnote)
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundStyle(theme.headerLink)
+                        // Small label, full 44 pt target (it sits on the eyebrow line).
+                        .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
+                        .padding(.vertical, -14)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("See the full cache history")
+                }
+            }
             if entries.isEmpty {
                 Text(theme.id.text(.nothingYet))
                     .themeText(.mono)
@@ -145,6 +167,37 @@ struct CacheHistory: View {
                 RecentTransfers(entries: Array(entries.suffix(limit).reversed()), spacing: 6)
             }
         }
+    }
+}
+
+/// Nerd mode > Cache history > See all: every transfer since the app was opened, newest first.
+struct FullCacheHistoryView: View {
+    @ObservedObject var bleManager: BLEManager
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        let entries = bleManager.transferLog
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                SheetHeader(title: theme.id.text(.cacheHistory)) { dismiss() }
+                if entries.isEmpty {
+                    Text(theme.id.text(.nothingYet))
+                        .themeText(.row)
+                        .foregroundStyle(theme.inkSoft)
+                } else {
+                    MarkerLegend()
+                    RecentTransfers(entries: Array(entries.reversed()))
+                }
+                Text("\(theme.id.text(.sinceOpened)) \u{00B7} last \(entries.count)")
+                    .themeText(.statCaption)
+                    .foregroundStyle(theme.inkFaint)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, theme.margin + 4)
+            .padding(.bottom, 32)
+        }
+        .background(theme.background.ignoresSafeArea())
     }
 }
 

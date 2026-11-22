@@ -16,11 +16,14 @@ enum ArtMetrics {
         return max(120, min(maxSide, byWidth, byHeight)).rounded(.down)
     }
 
-    /// Nerd mode: the small cover at the top left. 19% of the screen height, kept within 104...130 pt
-    /// (about 123 pt on a 4.7" iPhone SE), so the session log gets most of the height.
+    /// Nerd mode: the small cover at the top left. 14% of the screen height, kept within 84...104 pt
+    /// (about 90 pt on a 4.7" iPhone SE), so the details and the session log get most of the height.
     static func nerdSide(for size: CGSize) -> CGFloat {
-        min(130, max(104, (size.height * 0.19).rounded(.down)))
+        min(104, max(84, (size.height * 0.14).rounded(.down)))
     }
+
+    /// Nerd mode's progress line is thinner than the normal one.
+    static let nerdStripThickness: CGFloat = 3
 
     /// Text size multiplier for the compact player and the log in nerd mode.
     static let compactTextScale: CGFloat = 0.75
@@ -127,9 +130,12 @@ struct NowPlayingScreen: View {
     @State private var songImage: UIImage?
     /// Last uploaded photo, decoded once.
     @State private var photoImage: UIImage?
-    /// The back card was tapped and its swap is on the way (it slides out a little further).
-    @State private var peekNudge = false
-    @State private var nudgeGen = 0
+    /// Set on tap: the back card shows the picture being replaced right away, instead of waiting for
+    /// the board to confirm the swap. Cleared when the board confirms, or flipped back on failure.
+    @State private var backOverride: UIImage?
+    /// Bumped on every tap (and on a revert) so the back card flips only then, not on every refresh.
+    @State private var peekFlipKey = 0
+    @State private var swapGen = 0
 
     // Progress line under the cover (see `LiveStrip`).
     @State private var stripRun: StripRun = .idle
@@ -155,6 +161,9 @@ struct NowPlayingScreen: View {
                 .opacity(playerOpacity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .overlay {
+                ResultPopups(lastEntry: bleManager.transferLog.last, area: geo.size)
+            }
         }
         .alert("Photo", isPresented: Binding(
             get: { photoError != nil },
@@ -190,7 +199,16 @@ struct NowPlayingScreen: View {
             photoImage = Self.decode(data)
         }
         .onChange(of: shownIsPhoto) { _ in
-            peekNudge = false
+            // The board drew the swap: the computed back card is now the picture it replaced.
+            backOverride = nil
+        }
+        .onChange(of: spotifyManager.currentTrack?.id) { _ in
+            // While a photo is up, Spotify sends are paused; keep the card behind on the song
+            // that is actually playing.
+            if shownIsPhoto { loadSongArtForBackCard() }
+        }
+        .onChange(of: photoError) { error in
+            if error != nil { revertSwap() }
         }
         // `sendStage` returns to idle on every exit from processTrack (success, error, skip).
         .onChange(of: bleManager.sendStage) { stage in
@@ -282,10 +300,12 @@ struct NowPlayingScreen: View {
                 shownImage = pending
                 shownIsPhoto = bleManager.photoHold
                 if !shownIsPhoto { songImage = pending }
+                backOverride = nil
+            } else {
+                revertSwap()
             }
             pendingImage = nil
             pendingSinceLogID = nil
-            peekNudge = false
         case .checking:
             break
         }
@@ -378,20 +398,45 @@ struct NowPlayingScreen: View {
         } else {
             return
         }
-        // Feedback until the board has drawn the swap (or ~8 s, if it never does).
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { peekNudge = true }
-        nudgeGen &+= 1
-        let gen = nudgeGen
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-            guard gen == nudgeGen else { return }
-            withAnimation(.easeOut(duration: 0.2)) { peekNudge = false }
+        // The card behind flips now to the picture being replaced; the front changes when the board
+        // draws it (with its transition, mirrored here).
+        backOverride = shownImage
+        peekFlipKey &+= 1
+        swapGen &+= 1
+        let gen = swapGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+            // Never confirmed (lost connection, dropped send): put the card back.
+            guard gen == swapGen, backOverride != nil else { return }
+            revertSwap()
         }
+    }
+
+    /// The swap did not happen: the card behind flips back to the picture that is not on the display.
+    private func revertSwap() {
+        guard backOverride != nil else { return }
+        backOverride = nil
+        peekFlipKey &+= 1
     }
 
     /// The picture that is not on the display: the song cover while a photo is up, otherwise the
     /// last photo (nil until one was uploaded since the app was opened).
     private var backImage: UIImage? {
-        shownIsPhoto ? songImage : photoImage
+        backOverride ?? (shownIsPhoto ? songImage : photoImage)
+    }
+
+    /// Downloads the playing song's cover for the card behind a photo (no BLE involved).
+    private func loadSongArtForBackCard() {
+        guard let track = spotifyManager.currentTrack,
+              let urlString = track.album?.images.first?.url,
+              let url = URL(string: urlString) else { return }
+        let trackID = track.id
+        Task { @MainActor in
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  let image = UIImage(data: data),
+                  spotifyManager.currentTrack?.id == trackID,
+                  shownIsPhoto else { return }
+            songImage = image
+        }
     }
 
     // MARK: Layout
@@ -467,18 +512,23 @@ struct NowPlayingScreen: View {
         }
     }
 
-    /// Nerd mode, right of the cover: title and artist, the controls right under them, then the strip.
+    /// Nerd mode, right of the cover: title and artist, the controls centred under them, then a thin strip.
     private func nerdTrackColumn(side: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 0) {
             TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: true, leading: true)
                 .matchedGeometryEffect(id: "track", in: playerNS, properties: .position)
             PlaybackControls(spotifyManager: spotifyManager, compact: true)
-                // The first button's 44 pt frame is wider than its glyph: line the glyph up with the text.
-                .padding(.leading, -10)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
-            strip
-                .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
-                .padding(.top, 2)
+            LiveStrip(
+                state: stripState,
+                run: stripRun,
+                stage: bleManager.sendStage,
+                bleFloor: stripBleFloor,
+                failed: stripFailed,
+                thickness: ArtMetrics.nerdStripThickness
+            )
+            .matchedGeometryEffect(id: "strip", in: playerNS, properties: .position)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, minHeight: side, alignment: .topLeading)
@@ -489,7 +539,7 @@ struct NowPlayingScreen: View {
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
         VStack(spacing: 0) {
             ThemedDivider()
-                .padding(.top, 12)
+                .padding(.top, 6)
             if showsLower {
                 NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
                     .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
@@ -512,9 +562,9 @@ struct NowPlayingScreen: View {
         let back = backImage
         return ZStack {
             if let back {
-                PeekCard(image: back, side: side)
-                    .rotationEffect(.degrees(peekNudge ? 7 : 4))
-                    .offset(x: PeekCard.peek(for: side, nudged: peekNudge))
+                PeekCard(image: back, side: side, flipKey: peekFlipKey)
+                    .rotationEffect(.degrees(4))
+                    .offset(x: PeekCard.peek(for: side))
                     .transition(.opacity)
                     .accessibilityHidden(true)
             }
@@ -527,7 +577,7 @@ struct NowPlayingScreen: View {
             )
         }
         // Nerd mode: keep the peeking card clear of the track text beside the cover.
-        .padding(.trailing, layoutNerd && back != nil ? PeekCard.peek(for: side, nudged: true) + 6 : 0)
+        .padding(.trailing, layoutNerd && back != nil ? PeekCard.peek(for: side) + 8 : 0)
         .contentShape(Rectangle())
         .onTapGesture { coverTapped() }
         .accessibilityAddTraits(photoUp || canReshow ? .isButton : [])
@@ -636,11 +686,86 @@ private struct ScrollIf<Content: View>: View {
     }
 }
 
-/// The picture that is not on the display, tucked behind the cover. When it changes (the two
-/// swapped) it flips over on its vertical axis; Reduce Motion: a short crossfade.
+/// Little words that pop up at a random spot when a cover lands: "cache" in the status LED's blue for
+/// a cover drawn from the SD card, "new" in its orange for one sent fresh. Purely decorative: no hit
+/// testing, hidden from VoiceOver (the strip already says the same). Reduce Motion: fade only.
+private struct ResultPopups: View {
+    let lastEntry: TransferLogEntry?
+    let area: CGSize
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var popups: [Popup] = []
+
+    private struct Popup: Identifiable {
+        let id = UUID()
+        let cached: Bool
+        let point: CGPoint
+        let tilt: Double
+        var shown = false
+    }
+
+    private static let life = 1.4
+
+    var body: some View {
+        ZStack {
+            ForEach(popups) { popup in
+                Text(popup.cached ? "cache" : "new")
+                    .font(.system(size: 22, weight: .heavy, design: .rounded))
+                    .foregroundStyle(popup.cached ? StripColors.check(theme) : StripColors.fresh(theme))
+                    .shadow(color: theme.background.opacity(0.9), radius: 3)
+                    .rotationEffect(.degrees(popup.tilt))
+                    .scaleEffect(popup.shown || reduceMotion ? 1 : 0.6)
+                    .opacity(popup.shown ? 1 : 0)
+                    .offset(y: popup.shown && !reduceMotion ? -18 : 0)
+                    .position(popup.point)
+            }
+        }
+        .frame(width: area.width, height: area.height)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onChange(of: lastEntry?.id) { _ in
+            guard let entry = lastEntry, entry.outcome == "cache hit" || entry.outcome == "ok" else { return }
+            spawn(cached: entry.cacheHit)
+        }
+    }
+
+    private func spawn(cached: Bool) {
+        guard area.width > 120, area.height > 200 else { return }
+        let point = CGPoint(
+            x: CGFloat.random(in: 60...(area.width - 60)),
+            y: CGFloat.random(in: 90...(area.height - 90))
+        )
+        let popup = Popup(cached: cached, point: point, tilt: Double.random(in: -12...12))
+        popups.append(popup)
+        let id = popup.id
+        // In: quick spring. Out: shorter and quieter than the way in.
+        DispatchQueue.main.async {
+            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 0.6)) {
+                setShown(id, true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.life) {
+            withAnimation(.easeIn(duration: 0.15)) { setShown(id, false) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.life + 0.2) {
+            popups.removeAll { $0.id == id }
+        }
+    }
+
+    private func setShown(_ id: UUID, _ shown: Bool) {
+        guard let i = popups.firstIndex(where: { $0.id == id }) else { return }
+        popups[i].shown = shown
+    }
+}
+
+/// The picture that is not on the display, tucked behind the cover. A tap (`flipKey` changes) flips
+/// it over on its vertical axis to the new picture; any other change of `image` (the same picture
+/// re-decoded once the board confirms, a newer song cover) just updates it. Reduce Motion: a crossfade.
 private struct PeekCard: View {
     let image: UIImage
     let side: CGFloat
+    let flipKey: Int
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -648,12 +773,19 @@ private struct PeekCard: View {
     @State private var face: UIImage?
     @State private var angle: Double = 0
     @State private var gen = 0
+    @State private var seenFlipKey = 0
 
     private static let half = 0.17
 
+    /// One change token, so a tap's new image and new key are handled together, in one place.
+    private struct Token: Equatable {
+        let flipKey: Int
+        let imageID: ObjectIdentifier
+    }
+
     /// How far the card sticks out to the right of the cover.
-    static func peek(for side: CGFloat, nudged: Bool) -> CGFloat {
-        (side * (nudged ? 0.12 : 0.07)).rounded()
+    static func peek(for side: CGFloat) -> CGFloat {
+        (side * 0.07).rounded()
     }
 
     var body: some View {
@@ -668,8 +800,19 @@ private struct PeekCard: View {
             .brightness(-0.04)
             .shadow(color: theme.artShadowColor, radius: theme.artShadowRadius, x: 0, y: theme.artShadowY)
             .rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
-            .onAppear { face = image }
-            .onChange(of: ObjectIdentifier(image)) { _ in flip() }
+            .onAppear {
+                face = image
+                seenFlipKey = flipKey
+            }
+            .onChange(of: Token(flipKey: flipKey, imageID: ObjectIdentifier(image))) { token in
+                if token.flipKey != seenFlipKey {
+                    seenFlipKey = token.flipKey
+                    flip()
+                } else if angle == 0 {
+                    // Not mid-flip: show the refreshed picture as is.
+                    face = image
+                }
+            }
     }
 
     private func flip() {
@@ -1090,6 +1233,8 @@ struct LiveStrip: View {
     var bleFloor: Double = 0
     /// The send that just ended failed: the line turns red and stays.
     var failed = false
+    /// Line width; nil = the theme's (nerd mode passes a thinner one).
+    var thickness: CGFloat? = nil
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1121,11 +1266,13 @@ struct LiveStrip: View {
                 line(look)
             }
         }
-        .frame(height: max(theme.stripThickness + 8, markerSize))
+        .frame(height: max(lineWidth + 8, markerSize))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Display")
         .accessibilityValue(accessibilityText)
     }
+
+    private var lineWidth: CGFloat { thickness ?? theme.stripThickness }
 
     private var isAnimating: Bool {
         switch run {
@@ -1219,7 +1366,7 @@ struct LiveStrip: View {
     }
 
     private func line(_ look: Look) -> some View {
-        let width = theme.stripThickness
+        let width = lineWidth
         let shape = WobbleLine(
             amplitude: theme.wobble * 1.2,
             bow: theme.isWobbly ? 2.5 : 0,
@@ -1286,10 +1433,10 @@ struct PlaybackControls: View {
     @ScaledMetric(relativeTo: .title) private var playSize: CGFloat = 30
 
     var body: some View {
-        let skip = compact ? skipSize * 0.8 : skipSize
-        let play = compact ? playSize * 0.75 : playSize
+        let skip = compact ? skipSize * 0.7 : skipSize
+        let play = compact ? playSize * 0.62 : playSize
         // Compact sits beside the nerd-mode cover, so its 44 pt buttons nearly touch.
-        HStack(spacing: compact ? 8 : 34) {
+        HStack(spacing: compact ? 4 : 34) {
             control(.previous, size: skip, minFrame: 44, color: theme.control, label: "Previous track") {
                 Task { await spotifyManager.skipToPrevious() }
             }

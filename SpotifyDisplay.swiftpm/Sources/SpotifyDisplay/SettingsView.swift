@@ -10,6 +10,10 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
+    @AppStorage("uiDark.crayon") private var crayonDark = false
+    @AppStorage("uiDark.quiet") private var quietDark = true
+    /// Switched-off transitions, for the "49/49" count on the Transitions row.
+    @AppStorage(TransitionPrefs.storageKey) private var disabledTransitionsRaw = ""
     /// Nerd mode is available: the main screen shows its terminal icon.
     @AppStorage(NerdMode.enabledKey) private var nerdEnabled = false
     /// Nerd layout currently on (the terminal icon's state); switched off with the feature.
@@ -31,18 +35,19 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 SheetHeader(title: theme.id.text(.settings)) { dismiss() }
+                // What is on the keychain, and emptying it.
+                cacheRows
+                ThemedDivider()
                 // The display itself: how it looks and draws.
                 brightnessRow
                 statusLightRow
                 transitionsRow
                 ThemedDivider()
-                ThemePicker(selection: $themeRaw)
+                ThemePicker(selection: $themeRaw, crayonDark: $crayonDark, quietDark: $quietDark)
                 ThemedDivider()
                 // Numbers: nerd mode (live, on the main screen) and the all-time totals.
                 nerdModeRow
                 lifetimeStatsRow
-                ThemedDivider()
-                cacheRows
                 ThemedDivider()
                 spotifyRows
                 ThemedDivider()
@@ -137,7 +142,11 @@ struct SettingsView: View {
 
     /// Opens the transition picker (which transitions the display may use, with live examples).
     private var transitionsRow: some View {
-        navRow(title: theme.id.text(.transitionsRow)) {
+        navRow(
+            title: theme.id.text(.transitionsRow),
+            value: "\(TransitionPrefs.enabledCount(disabledRaw: disabledTransitionsRaw))/\(TransitionCatalog.all.count)",
+            valueLabel: "\(TransitionPrefs.enabledCount(disabledRaw: disabledTransitionsRaw)) of \(TransitionCatalog.all.count) on"
+        ) {
             showTransitions = true
         }
         .sheet(isPresented: $showTransitions) {
@@ -149,8 +158,7 @@ struct SettingsView: View {
 
     /// Opens the general transfer stats (totals, cache counts, averages, recent transfers).
     private var lifetimeStatsRow: some View {
-        // Nothing to pick on this page, so no "Choose": just the chevron.
-        navRow(title: theme.id.text(.lifetimeStats), showsChoose: false) {
+        navRow(title: theme.id.text(.lifetimeStats)) {
             showLifetimeStats = true
         }
         .sheet(isPresented: $showLifetimeStats) {
@@ -160,17 +168,23 @@ struct SettingsView: View {
         }
     }
 
-    /// A row that opens another page: title, then "Choose" (pages where you pick something) and a chevron.
-    private func navRow(title: String, showsChoose: Bool = true, action: @escaping () -> Void) -> some View {
+    /// A row that opens another page: title, an optional value (like "49/49") and a chevron.
+    private func navRow(
+        title: String,
+        value: String? = nil,
+        valueLabel: String? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             HStack(alignment: .center, spacing: 8) {
                 Text(title)
                     .themeText(.row)
                     .foregroundStyle(theme.ink)
                 Spacer(minLength: 8)
-                if showsChoose {
-                    Text(theme.id.text(.choose))
+                if let value {
+                    Text(value)
                         .themeText(.rowValue)
+                        .monospacedDigit()
                         .foregroundStyle(theme.inkSoft)
                         .accessibilityHidden(true)
                 }
@@ -183,6 +197,7 @@ struct SettingsView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
+        .accessibilityValue(valueLabel ?? value ?? "")
         .accessibilityHint("Opens a new page")
     }
 
@@ -378,49 +393,107 @@ struct SettingsView: View {
 
 // MARK: - Theme picker
 
-/// Chooses a theme (not a light/dark mode): each option is set in its own typeface, and the
-/// selection is shown by a filled dot vs hollow ring as well as by VoiceOver's "selected".
+/// Chooses a theme and, per theme, day or night. Each option previews itself: a small card on that
+/// theme's own page colour, its name in its own face (Crayon's letters in its crayon colours) and a
+/// row of its colours. Selection is a filled dot vs hollow ring as well as VoiceOver's "selected".
 struct ThemePicker: View {
     @Binding var selection: String
+    @Binding var crayonDark: Bool
+    @Binding var quietDark: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 10) {
             Text(theme.id.text(.themeTitle))
                 .themeText(.row)
                 .foregroundStyle(theme.ink)
                 .accessibilityAddTraits(.isHeader)
-                .padding(.bottom, 6)
             ForEach(ThemeID.allCases) { option in
                 optionRow(option)
             }
         }
     }
 
+    private func darkBinding(_ option: ThemeID) -> Binding<Bool> {
+        option == .crayon ? $crayonDark : $quietDark
+    }
+
     private func optionRow(_ option: ThemeID) -> some View {
         let isSelected = ThemeID.from(selection) == option
-        return Button {
-            selection = option.rawValue
-        } label: {
-            HStack(spacing: 12) {
-                StateMarker(filled: isSelected, fillColor: theme.ink, ringColor: theme.ringOff, size: 14)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(option.displayName)
-                        .font(Self.previewFont(option))
-                        .foregroundStyle(theme.ink)
-                    Text(option.blurb)
-                        .themeText(.footnote)
-                        .foregroundStyle(theme.inkSoft)
+        let dark = darkBinding(option)
+        let look = option.theme(dark: dark.wrappedValue)
+        return HStack(spacing: 10) {
+            Button {
+                selection = option.rawValue
+            } label: {
+                HStack(spacing: 12) {
+                    StateMarker(filled: isSelected, fillColor: theme.ink, ringColor: theme.ringOff, size: 14)
+                    preview(option, look: look)
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .frame(minHeight: 64)
+                .contentShape(Rectangle())
             }
-            .frame(minHeight: 52)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(option.displayName) theme, \(option.blurb)")
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+            DayNightSwitch(isDark: dark, themeName: option.displayName)
         }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(option.displayName) theme, \(option.blurb)")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+    }
+
+    /// The theme drawn on its own page colour, so its colours read as they will in the app.
+    private func preview(_ option: ThemeID, look: Theme) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let isDark = look.colorScheme == .dark
+        return VStack(alignment: .leading, spacing: 6) {
+            name(option, look: look)
+            HStack(spacing: 5) {
+                ForEach(Array(option.swatch(dark: isDark).enumerated()), id: \.offset) { _, color in
+                    Circle()
+                        .fill(color)
+                        .frame(width: 10, height: 10)
+                        .overlay(Circle().stroke(look.ink.opacity(0.15), lineWidth: 1))
+                }
+                Text(option.blurb)
+                    .font(.caption2)
+                    .foregroundStyle(look.inkSoft)
+                    .lineLimit(1)
+                    .padding(.leading, 4)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(shape.fill(look.background))
+        .overlay(shape.stroke(theme.ringOff.opacity(0.5), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func name(_ option: ThemeID, look: Theme) -> some View {
+        switch option {
+        case .crayon:
+            // One crayon per letter. Day uses the darker crayons so every letter keeps 3:1 on white.
+            let hexes: [UInt32] = look.colorScheme == .dark
+                ? [0xFFA040, 0x64B5F6, 0xFF7A70, 0xCE93D8, 0x66BB6A, 0xF5D04A]
+                : [0xE65100, 0x1565C0, 0xC62828, 0x6A1B9A, 0x2E7D32, 0xB26A00]
+            let colors = hexes.map { Color(hex: $0) }
+            HStack(spacing: 0) {
+                ForEach(Array("Crayon".enumerated()), id: \.offset) { i, letter in
+                    Text(String(letter))
+                        .font(Self.previewFont(.crayon))
+                        .foregroundStyle(colors[i % colors.count])
+                }
+            }
+        case .quiet:
+            HStack(spacing: 6) {
+                Text(option.displayName)
+                    .font(Self.previewFont(.quiet))
+                    .foregroundStyle(look.ink)
+                // Quiet's only colour lives in its two status dots.
+                Circle().fill(look.spotify).frame(width: 7, height: 7)
+                Circle().fill(look.display).frame(width: 7, height: 7)
+            }
+        }
     }
 
     /// Each option's name is set in that theme's own face so the choice previews itself.
@@ -428,8 +501,41 @@ struct ThemePicker: View {
         switch option {
         case .crayon: return .custom("ChalkboardSE-Bold", size: 19, relativeTo: .body)
         case .quiet: return .system(.body).weight(.semibold)
-        case .serif: return .custom("TimesNewRomanPSMT", size: 20, relativeTo: .body)
         }
+    }
+}
+
+/// Day / night for one theme: a sun and a moon, the chosen one filled. 44 pt targets.
+struct DayNightSwitch: View {
+    @Binding var isDark: Bool
+    let themeName: String
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 0) {
+            segment(dark: false, symbol: "sun.max.fill", label: "Day")
+            segment(dark: true, symbol: "moon.fill", label: "Night")
+        }
+        .padding(2)
+        .background(Capsule().stroke(theme.ringOff.opacity(0.6), lineWidth: 1))
+    }
+
+    private func segment(dark: Bool, symbol: String, label: String) -> some View {
+        let on = isDark == dark
+        return Button {
+            withAnimation(.easeOut(duration: 0.15)) { isDark = dark }
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(on ? theme.background : theme.inkSoft)
+                .frame(width: 40, height: 32)
+                .background(Capsule().fill(on ? theme.ink : Color.clear))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(themeName) \(label)")
+        .accessibilityAddTraits(on ? [.isButton, .isSelected] : [.isButton])
     }
 }
 

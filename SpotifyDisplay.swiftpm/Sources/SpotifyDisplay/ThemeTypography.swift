@@ -48,7 +48,6 @@ extension ThemeID {
         switch self {
         case .crayon: return .chalkboard
         case .quiet: return .system
-        case .serif: return .times
         }
     }
 
@@ -56,7 +55,6 @@ extension ThemeID {
         switch self {
         case .crayon: return Self.crayonSpec(role)
         case .quiet: return Self.quietSpec(role)
-        case .serif: return Self.serifSpec(role)
         }
     }
 

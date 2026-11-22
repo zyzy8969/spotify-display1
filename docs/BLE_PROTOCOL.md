@@ -4,6 +4,10 @@
 
 Version: **1.13** (`TRANSITION_START`: the board announces each transition as it starts, so the app can mirror it.)
 
+Firmware behaviour note (2026-11-22, no wire change, version unchanged): fresh (new-song) frames with a
+`0xFF` header now pick from **every** enabled transition, the same as cache hits. They used to be limited
+to the quick set (see 1.11 / 1.12 below). Messages, headers and the mask are unchanged; clients need no update.
+
 Changes in 1.13 (live transition mirror). Additive: old apps ignore the unknown message; old firmware never
 sends it; the Python sender is unaffected.
 - **All transitions off** — an enabled-transitions mask with no live bit set now means "no transition": random picks (`0xFF` headers, `0xFD` photos and every cache hit) draw the new frame at once and announce `TRANSITION_START:255:0:0:<oldBlack>`; index 255 = none (clients cut). In 1.12 an empty mask meant "all enabled".
@@ -36,7 +40,7 @@ sender are unaffected.
   (indices 0-51; retired 5, 10, 16 are ignored). It governs random picks only (`0xFF` headers and every
   cache hit); a forced header index is still honoured. A mask with no live bit set meant "all enabled" in 1.12; since 1.13 it means "none": random picks draw the new frame at once with no transition (announced as `TRANSITION_START:255:0:0:<oldBlack>`). Forced header indices still draw. After power-up every transition is enabled until the app sends a mask.
   The board keeps it in RAM only, so the app sends it on every connect. No reply. Fresh (new-song)
-  draws normally pick from the quick set; if none of the quick ones is enabled they pick from whatever is.
+  draws picked from the quick set in 1.12/1.13; since 2026-11-22 they pick from every enabled one.
 - **Fresh draws announce their transition** — Message `TRANSITION:<name>` is now also sent after a fresh
   transfer is drawn, before the Image `0x01` ACK / `SUCCESS` (previously cache hits only). The iOS app
   replays that effect on its cover and shows it in the Live tab.

@@ -2,14 +2,13 @@ import SwiftUI
 
 // MARK: - Theme identity
 
-/// The three looks from the Design canvas mockup. Persisted by raw value under `storageKey`.
+/// The looks from the Design canvas mockup, each with a day and a night version. Persisted by raw
+/// value under `storageKey`. (Serif was removed 2026-11-22; a stored "serif" falls back to Crayon.)
 enum ThemeID: String, CaseIterable, Identifiable {
-    /// Theme A: white page, hand-drawn crayon marks, Chalkboard SE.
+    /// Theme A: hand-drawn crayon marks, Chalkboard SE. Day: white page; night: chalkboard.
     case crayon
-    /// Theme B: near-black, system font, small colour accents.
+    /// Theme B: system font, small colour accents. Night (its original): near-black; day: light grey.
     case quiet
-    /// Theme C: white page, Times New Roman, hairline rules, dot leaders, one rust accent.
-    case serif
 
     static let storageKey = "uiTheme"
     static let fallback: ThemeID = .crayon
@@ -21,11 +20,27 @@ enum ThemeID: String, CaseIterable, Identifiable {
         ThemeID(rawValue: raw) ?? fallback
     }
 
-    var theme: Theme {
+    /// Where this theme's night switch is stored (one per theme, so each keeps its own choice).
+    var darkKey: String { "uiDark.\(rawValue)" }
+    /// Crayon starts in day mode, Quiet in night mode, as designed.
+    var defaultDark: Bool { self == .quiet }
+
+    /// The theme in its default mode.
+    var theme: Theme { theme(dark: defaultDark) }
+
+    func theme(dark: Bool) -> Theme {
         switch self {
-        case .crayon: return .crayon
-        case .quiet: return .quiet
-        case .serif: return .serif
+        case .crayon: return dark ? .crayonNight : .crayon
+        case .quiet: return dark ? .quiet : .quietDay
+        }
+    }
+
+    /// A few of the theme's own colours, for its swatch in Settings.
+    func swatch(dark: Bool) -> [Color] {
+        let t = theme(dark: dark)
+        switch self {
+        case .crayon: return Array(t.artPalette.prefix(5))
+        case .quiet: return [t.ink, t.spotify, t.display, t.inkSoft]
         }
     }
 }
@@ -233,52 +248,83 @@ extension Theme {
         return t
     }()
 
-    /// Theme C — Serif. Pure white, Times New Roman, rules and dot leaders, one rust accent.
-    static let serif: Theme = {
-        var t = Theme(id: .serif, colorScheme: .light)
-        t.background = Color(hex: 0xFFFFFF)
-        t.artSurface = Color(hex: 0xFFFFFF)
-        t.ink = Color(hex: 0x111110)            // 18.9:1
-        t.inkSoft = Color(hex: 0x4A4A48)        // 8.9:1
-        t.inkFaint = Color(hex: 0x6A6A66)       // 5.4:1
-        t.headerLink = Color(hex: 0x6A6A66)
-        t.backTint = Color(hex: 0x4A4A48)
-        t.control = Color(hex: 0x4A4A48)
-        t.controlStrong = Color(hex: 0x111110)
-        t.spotify = Color(hex: 0x111110)
-        t.display = Color(hex: 0x111110)
-        t.fresh = Color(hex: 0xA33B2A)          // 6.5:1, the one rust accent
-        t.accent = Color(hex: 0xA33B2A)
-        t.destructive = Color(hex: 0xA33B2A)
-        t.ringOff = Color(hex: 0x6A6A66)
-        t.toggleOff = Color(hex: 0x8A8884)      // 3.5:1 (mockup #B4B2AA is 2.1:1)
-        t.toggleOnFill = Color(hex: 0x111110)
-        t.toggleOnKnob = Color(hex: 0xFFFFFF)
-        t.sliderTint = Color(hex: 0x111110)
-        t.primaryFill = Color(hex: 0x111110)
-        t.onPrimary = Color(hex: 0xFFFFFF)
-        t.phaseColors = [Color(hex: 0x111110)]
-        t.rule = Color(hex: 0xDEDCD6)
-        t.artPalette = [Color(hex: 0x111110), Color(hex: 0xA33B2A)]
-        t.doodle = [
-            Color(hex: 0x8A8884), Color(hex: 0x111110), Color(hex: 0x111110),
-            Color(hex: 0x111110), Color(hex: 0xA33B2A), Color(hex: 0x111110)
+    /// Crayon at night: chalk on a chalkboard. Same marks and wobble as Crayon, light ink on a dark
+    /// slate; the colours are lifted so they keep their contrast against the dark page.
+    static let crayonNight: Theme = {
+        var t = Theme.crayon
+        t.colorScheme = .dark
+        t.background = Color(hex: 0x16191D)
+        t.artSurface = Color(hex: 0x1F2328)
+        t.ink = Color(hex: 0xF2F1EC)            // 16.0:1
+        t.inkSoft = Color(hex: 0xB9B8B1)        // 9.0:1
+        t.inkFaint = Color(hex: 0x9E9D97)       // 6.6:1
+        t.headerLink = Color(hex: 0xF2F1EC)
+        t.backTint = Color(hex: 0x64B5F6)
+        t.control = Color(hex: 0xF2F1EC)
+        t.controlStrong = Color(hex: 0xF2F1EC)
+        t.spotify = Color(hex: 0x66BB6A)        // 7.4:1
+        t.display = Color(hex: 0x64B5F6)        // 7.6:1
+        t.fresh = Color(hex: 0xFFA040)          // 8.5:1
+        t.accent = Color(hex: 0xCE93D8)
+        t.destructive = Color(hex: 0xFF7A70)    // 6.6:1
+        t.ringOff = Color(hex: 0x8C8B85)        // 5.1:1
+        t.toggleOff = Color(hex: 0x8C8B85)
+        t.toggleOnFill = Color(hex: 0x66BB6A)
+        t.toggleOnKnob = Color(hex: 0x16191D)
+        t.sliderTint = Color(hex: 0x64B5F6)
+        t.primaryFill = Color(hex: 0x66BB6A)
+        t.onPrimary = Color(hex: 0x10130F)      // 8.0:1 on the green
+        t.phaseColors = [
+            Color(hex: 0x64B5F6), Color(hex: 0x66BB6A), Color(hex: 0xCE93D8),
+            Color(hex: 0xFFA040), Color(hex: 0x8C8B85)
         ]
-        t.artFrame = nil
-        t.wobble = 0
-        t.iconStroke = 1.2
-        t.stripThickness = 2
-        t.artCornerRadius = 0
-        t.artShadowColor = .clear
-        t.artShadowRadius = 0
-        t.artShadowY = 0
-        t.artBorder = Color(hex: 0xDEDCD6)
-        t.buttonCornerRadius = 0
-        t.doodleWidthScale = 0.35
-        t.margin = 26
-        t.statsStyle = .dotLeaders
-        t.placeholder = .hairlineRings
-        t.heroLabelAbove = true
+        t.rule = Color(hex: 0x2C3137)
+        t.doodle = [
+            Color(hex: 0x6C7076), Color(hex: 0xF2F1EC), Color(hex: 0xF2742C),
+            Color(hex: 0x5C9CEB), Color(hex: 0xE8453C), Color(hex: 0xF5B924)
+        ]
+        t.artShadowColor = Color(hex: 0x000000, opacity: 0.5)
+        return t
+    }()
+
+    /// Quiet by day: the same restraint on a soft light-grey page; colour still only in the dots.
+    static let quietDay: Theme = {
+        var t = Theme.quiet
+        t.colorScheme = .light
+        t.background = Color(hex: 0xF4F4F2)
+        t.artSurface = Color(hex: 0xE9E9E6)
+        t.ink = Color(hex: 0x0C0C0C)            // 18.1:1
+        t.inkSoft = Color(hex: 0x5A5A5A)        // 6.3:1
+        t.inkFaint = Color(hex: 0x666666)       // 5.2:1
+        t.headerLink = Color(hex: 0x5A5A5A)
+        t.backTint = Color(hex: 0x5A5A5A)
+        t.control = Color(hex: 0x5A5A5A)
+        t.controlStrong = Color(hex: 0x0C0C0C)
+        t.spotify = Color(hex: 0x1E8E3E)        // 3.9:1, marks only
+        t.display = Color(hex: 0x0277BD)        // 4.6:1
+        t.fresh = Color(hex: 0x0C0C0C)
+        t.accent = Color(hex: 0x0277BD)
+        t.destructive = Color(hex: 0x0C0C0C)
+        t.ringOff = Color(hex: 0x767676)        // 4.1:1
+        t.toggleOff = Color(hex: 0x8A8A8A)      // 3.2:1
+        t.toggleOnFill = Color(hex: 0x0C0C0C)
+        t.toggleOnKnob = Color(hex: 0xF4F4F2)
+        t.sliderTint = Color(hex: 0x0C0C0C)
+        t.primaryFill = Color(hex: 0x0C0C0C)
+        t.onPrimary = Color(hex: 0xFFFFFF)
+        t.phaseColors = [Color(hex: 0x0C0C0C)]
+        t.rule = Color(hex: 0xDEDEDB)
+        t.artPalette = [
+            Color(hex: 0xE0E0DD), Color(hex: 0xC4C4C0), Color(hex: 0x9B9B9B),
+            Color(hex: 0x6E6E6E), Color(hex: 0x2A2A2A)
+        ]
+        t.doodle = [
+            Color(hex: 0x9B9B9B), Color(hex: 0x2A2A2A), Color(hex: 0x6E6E6E),
+            Color(hex: 0x0277BD), Color(hex: 0x9B9B9B), Color(hex: 0x1E8E3E)
+        ]
+        t.artShadowColor = Color(hex: 0x000000, opacity: 0.14)
+        t.artShadowRadius = 18
+        t.artShadowY = 12
         return t
     }()
 }

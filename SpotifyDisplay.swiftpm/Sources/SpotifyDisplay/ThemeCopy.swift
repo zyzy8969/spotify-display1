@@ -17,7 +17,7 @@ enum CopyKey {
     case sinceOpened, nothingYet, liveDetails
     case sessionLog, waitingForActivity, newestLine, lifetimeStats, transitionsRow, choose
     case summaryLast, summaryHitRate, summaryAvgNew
-    case cacheHistory, lastTime
+    case cacheHistory, lastTime, seeAll
 }
 
 extension ThemeID {
@@ -79,30 +79,19 @@ extension ThemeID {
         case .summaryAvgNew: return p ? "avg new" : "Avg new"
         case .cacheHistory: return p ? "cache history" : "Cache history"
         case .lastTime: return p ? "last time" : "Last time"
+        case .seeAll: return p ? "see all" : "See all"
         }
     }
 
-    /// "47 saved" / "47 cached" / "Forty-seven cached".
+    /// "47 saved" / "47 cached".
     func countText(_ n: Int) -> String {
         switch self {
         case .crayon:
             return "\(n) saved"
         case .quiet:
             return "\(n) cached"
-        case .serif:
-            let words = Self.spellOut.string(from: NSNumber(value: n)) ?? "\(n)"
-            let first = String(words.prefix(1)).uppercased()
-            let rest = String(words.dropFirst())
-            return first + rest + " cached"
         }
     }
-
-    /// Built once: the footer asks for the count on every render, including each progress tick.
-    private static let spellOut: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .spellOut
-        return formatter
-    }()
 
     /// Seconds from milliseconds, always with its unit ("0.9s"): most timings on Stats stand
     /// alone in a row, with no label nearby to say what the number is.
@@ -119,15 +108,13 @@ extension ThemeID {
         switch self {
         case .crayon: return "Crayon"
         case .quiet: return "Quiet"
-        case .serif: return "Serif"
         }
     }
 
     var blurb: String {
         switch self {
-        case .crayon: return "hand-drawn, white"
-        case .quiet: return "dark, a little colour"
-        case .serif: return "white, Times, rules"
+        case .crayon: return "hand-drawn, bright colours"
+        case .quiet: return "calm, a little colour"
         }
     }
 }

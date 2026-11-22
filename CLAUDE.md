@@ -174,7 +174,7 @@ dithering happens app-side.)
   details, shown when "show stats" is on). Views only *read* manager state.
 - Theme system — `Theme` (token struct per theme, exposed as `\.theme` in the environment),
   `ThemeTypography` (text roles → fonts scaled with Dynamic Type), `ThemeCopy` (wording per
-  theme), `CrayonShapes` (seeded wobble shapes and icons; wobble 0 = crisp for Quiet/Serif),
+  theme), `CrayonShapes` (seeded wobble shapes and icons; wobble 0 = crisp for Quiet),
   `ThemeComponents`. Add a theme by adding a `ThemeID` case and its tokens, not new screens.
 - `KeychainHelper` holds tokens; Client ID comes from `Resources/Info.plist`
   (`SpotifyClientID`) with a UserDefaults override in Settings.
@@ -204,10 +204,11 @@ Changes here need on-device stress testing (rapid skip, disconnect mid-transfer)
 roadmap and bug backlog) where they disagree. `docs/DEV_HANDOFF.md` records what was last
 committed and what still needs device verification.
 
-The iOS UI follows the user's Design canvas mockup, which defines three user-selectable themes:
-**Crayon** (default; white, hand-drawn crayon marks, Chalkboard SE), **Quiet** (dark, system
-font, small colour accents) and **Serif** (white, Times New Roman, rules and dot leaders, one
-rust accent). The theme is picked in Settings and stored under `@AppStorage("uiTheme")`. The
+The iOS UI follows the user's Design canvas mockup. Two user-selectable themes remain (Serif was
+removed 2026-11-22): **Crayon** (default; hand-drawn crayon marks, Chalkboard SE; day = white,
+night = chalkboard) and **Quiet** (system font, small colour accents; night = near-black, its
+original, day = light grey). The theme is picked in Settings and stored under
+`@AppStorage("uiTheme")`; each theme's day/night choice under `uiDark.<theme>`. The
 older monochrome `SpotifyDisplay_UI_Spec.md` is superseded; only its live strip under the art
 and its "debug stats behind a Settings toggle" ideas were kept. The canvas's live serial log,
 "+ gif" upload and 240x240 device-screen boards need firmware or BLE protocol changes and are

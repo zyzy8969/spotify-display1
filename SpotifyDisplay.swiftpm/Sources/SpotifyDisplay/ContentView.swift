@@ -12,9 +12,13 @@ struct ContentView: View {
     @StateObject private var spotifyManager = SpotifyManager()
     @State private var panel: Panel?
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
+    /// Night switch per theme (Settings > Theme). Keys and defaults match `ThemeID.darkKey/defaultDark`.
+    @AppStorage("uiDark.crayon") private var crayonDark = false
+    @AppStorage("uiDark.quiet") private var quietDark = true
 
     var body: some View {
-        let theme = ThemeID.from(themeRaw).theme
+        let id = ThemeID.from(themeRaw)
+        let theme = id.theme(dark: id == .crayon ? crayonDark : quietDark)
         ZStack {
             theme.background
                 .ignoresSafeArea()

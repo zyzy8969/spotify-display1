@@ -736,8 +736,8 @@ String drawImageWithRandomTransition(uint16_t* buffer, int width, int height) {
   return transitionName;
 }
 
-// New songs have already waited ~2-3 s for their BLE transfer, so they get only the fast transitions
-// (measured draw time in brackets). Cache hits keep the full set.
+// The fast transitions (measured draw time in brackets). Until 2026-11-22 new songs used only these;
+// now every frame picks from the full enabled set and this list only backs `quick` callers.
 static const TransitionType QUICK_TRANSITIONS[] = {
   TRANSITION_RANDOM_BLOCKS,   // ~130 ms
   TRANSITION_WIPE_BOTTOM,     // ~160 ms ("Wipe Up")
@@ -764,24 +764,37 @@ static const TransitionType QUICK_TRANSITIONS[] = {
 // `quickOnly` restricts it to QUICK_TRANSITIONS; if none of those is enabled it falls back to any enabled
 // one, because an explicit choice in the app beats the "fast for new songs" preference. If the mask
 // leaves nothing enabled at all, everything is allowed (never get stuck without a transition).
+// Shuffle bag: every enabled transition is drawn once before any of them repeats, so back-to-back
+// swaps (photo <-> cover, skip after skip) always look different (owner's request 2026-11-22).
+// Bit i set = index i already drawn this round. RAM only; a new round starts when the bag runs dry.
+static uint64_t transitionBag = 0;
+
 static TransitionType pickEnabledTransition(bool quickOnly) {
   const int quickN = sizeof(QUICK_TRANSITIONS) / sizeof(QUICK_TRANSITIONS[0]);
   auto isQuick = [quickN](int t) {
     for (int i = 0; i < quickN; i++) if ((int)QUICK_TRANSITIONS[i] == t) return true;
     return false;
   };
-  for (int pass = 0; pass < 3; pass++) {
-    // pass 0: enabled (+quick), not the last one; pass 1: same but repeats allowed;
-    // pass 2: enabled at any speed (only reached when quickOnly found nothing).
+  for (int pass = 0; pass < 4; pass++) {
+    // pass 0: enabled (+quick), not drawn yet this round, not the last one.
+    // pass 1: the round is used up: enabled (+quick), not the last one; the bag restarts.
+    // pass 2: same, repeats allowed (only one transition is on).
+    // pass 3: enabled at any speed (only reached when quickOnly found nothing).
     TransitionType cand[TRANSITION_COUNT];
     int n = 0;
     for (int t = 0; t < TRANSITION_COUNT; t++) {
       if (isRetiredTransition((TransitionType)t) || !transitionEnabled(t)) continue;
-      if (pass < 2 && quickOnly && !isQuick(t)) continue;
-      if (pass == 0 && (TransitionType)t == lastTransition) continue;
+      if (pass < 3 && quickOnly && !isQuick(t)) continue;
+      if (pass == 0 && (transitionBag & (1ULL << t))) continue;
+      if (pass <= 1 && (TransitionType)t == lastTransition) continue;
       cand[n++] = (TransitionType)t;
     }
-    if (n > 0) return cand[random(0, n)];
+    if (n > 0) {
+      if (pass >= 1) transitionBag = 0;  // new round
+      TransitionType pick = cand[random(0, n)];
+      transitionBag |= (1ULL << (int)pick);
+      return pick;
+    }
   }
   // Nothing enabled: allow every live transition except the last one used.
   TransitionType t;
@@ -1881,8 +1894,11 @@ void loop() {
     // 1.12: a photo upload is shown but never written to SD.
     const bool displayOnly = (pendingTransition == TRANSITION_DISPLAY_ONLY);
     unsigned long displayStart = millis();
+    // New covers pick from every enabled transition, like cache hits (owner's choice 2026-11-22;
+    // they used to be limited to QUICK_TRANSITIONS). The app's Transitions page still has a
+    // "Quick only" shortcut for anyone who wants new songs fast.
     String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                                                          pendingTransition, /*quick=*/true);
+                                                          pendingTransition, /*quick=*/false);
     unsigned long displayTime = millis() - displayStart;
     pendingTransition = 0xFF;  // a later cache hit must not inherit this frame's header byte
     // Green as soon as the cover is on screen, not after the SD save (~0.4 s later).

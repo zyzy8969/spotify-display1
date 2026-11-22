@@ -37,7 +37,7 @@ struct TransitionPickerView: View {
                         }
                     }
                 }
-                Text("Previews are drawn by the display's own transition code, so they show the real effect; only their speed is estimated. They go from the current song's cover to the next one in your queue (sample covers when either is missing). New songs use quick transitions unless none of them is switched on.")
+                Text("Previews are drawn by the display's own transition code, so they show the real effect; only their speed is estimated. They go from the current song's cover to the next one in your queue (sample covers when either is missing). New songs and covers from the display's memory both pick from every transition switched on here; \u{201C}Quick only\u{201D} keeps new songs fast.")
                     .themeText(.statCaption)
                     .foregroundStyle(theme.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
