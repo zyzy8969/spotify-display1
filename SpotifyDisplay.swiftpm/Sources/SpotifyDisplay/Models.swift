@@ -51,25 +51,25 @@ struct TransferLogEntry: Identifiable, Codable, Equatable {
     /// song is new to the person even though the board drew it from its card. Optional so older
     /// saved entries still decode.
     var prefetched: Bool? = nil
-    /// A cache hit on a cover that was only saved ahead (queue prefetch) and never shown: the song is
-    /// new to the person ("new" pop-up, not "cache"). Optional so older entries decode.
+    /// A cache hit for a song's first play (its cover was already on the card): the song is new to
+    /// the person ("new" pop-up, not "cache"). Optional so older entries decode.
     var firstShow: Bool? = nil
 }
 
-/// Covers saved to the keychain's card ahead of time (queue prefetch) that it has not shown yet, as
-/// cache-key sources, saved on the phone so it survives app restarts. Such a song is new to the person
-/// although its cover comes off the card ("new" pop-up, orange LED). Every other cache hit is a cover
-/// the keychain showed before ("cache", blue). Oldest first, capped.
-enum UnshownPrefetches {
-    static let storageKey = "unshownPrefetchedKeys.v1"
-    static let cap = 500
+/// Spotify track ids the keychain has shown at least once, saved on the phone. A song's first play is
+/// "new" (orange LED, "new" pop-up) even when its cover is already on the card (queue prefetch, or
+/// another song from the same album); every later play that comes off the card is "cache" (blue).
+/// Oldest first, capped (~110 KB at most).
+enum PlayedTracks {
+    static let storageKey = "playedTrackIds.v1"
+    static let cap = 5000
 
     static func load() -> [String] {
         UserDefaults.standard.stringArray(forKey: storageKey) ?? []
     }
 
-    static func save(_ keys: [String]) {
-        UserDefaults.standard.set(Array(keys.suffix(cap)), forKey: storageKey)
+    static func save(_ ids: [String]) {
+        UserDefaults.standard.set(Array(ids.suffix(cap)), forKey: storageKey)
     }
 }
 

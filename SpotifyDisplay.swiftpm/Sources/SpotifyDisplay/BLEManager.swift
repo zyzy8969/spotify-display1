@@ -131,22 +131,21 @@ final class BLEManager: NSObject, ObservableObject {
     /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
     /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
     private var prefetchedKeySources: Set<String> = []
-    /// Prefetched covers the keychain has not shown yet (`UnshownPrefetches`), oldest first.
-    private var unshownPrefetches: [String] = UnshownPrefetches.load()
+    /// Songs the keychain has shown (`PlayedTracks`), oldest first, plus a set for lookups.
+    private var playedTrackOrder: [String] = PlayedTracks.load()
+    private lazy var playedTrackSet: Set<String> = Set(playedTrackOrder)
 
-    private func noteUnshownPrefetch(_ keySource: String) {
-        guard !unshownPrefetches.contains(keySource) else { return }
-        unshownPrefetches.append(keySource)
-        UnshownPrefetches.save(unshownPrefetches)
-        unshownPrefetches = Array(unshownPrefetches.suffix(UnshownPrefetches.cap))
-    }
-
-    /// The keychain is showing this cover: true if it was a prefetched cover it had never shown.
+    /// The keychain is showing this song; true if it is the song's first play.
     @discardableResult
-    private func markCoverShown(_ keySource: String) -> Bool {
-        guard let i = unshownPrefetches.firstIndex(of: keySource) else { return false }
-        unshownPrefetches.remove(at: i)
-        UnshownPrefetches.save(unshownPrefetches)
+    private func markTrackPlayed(_ trackId: String) -> Bool {
+        guard !trackId.isEmpty, !playedTrackSet.contains(trackId) else { return false }
+        playedTrackSet.insert(trackId)
+        playedTrackOrder.append(trackId)
+        if playedTrackOrder.count > PlayedTracks.cap + 200 {
+            playedTrackOrder.removeFirst(playedTrackOrder.count - PlayedTracks.cap)
+            playedTrackSet = Set(playedTrackOrder)
+        }
+        PlayedTracks.save(playedTrackOrder)
         return true
     }
     private var mirror: TransitionMirror { TransitionMirror.shared }
@@ -608,9 +607,9 @@ final class BLEManager: NSObject, ObservableObject {
         noteDrawRequest(.cacheCheck(frameTask))
         let hitDrawGen = drawRequestGen
         do {
-            // New to the person only if its cover was saved ahead and never shown; any other cover on
-            // the card was shown before (cache blue). A miss is a fresh send, orange anyway.
-            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: unshownPrefetches.contains(cacheKeySource))
+            // A song's first play is orange on the keychain even when its cover is already on the card
+            // (prefetched, or same album); later plays from the card are blue.
+            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: !playedTrackSet.contains(trackId))
         } catch {
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
@@ -647,8 +646,8 @@ final class BLEManager: NSObject, ObservableObject {
                 boardAckStatus = "Board ACK: cache hit"
                 lastConfirmedTrackId = trackId
                 let wasPrefetched = prefetchedKeySources.remove(cacheKeySource) != nil
-                // A song whose cover was only saved ahead (prefetch, any launch) is still new to the person.
-                let firstShow = markCoverShown(cacheKeySource)
+                // First play of this song: "new", although its cover came off the card.
+                let firstShow = markTrackPlayed(trackId)
                 appendLog(TransferLogEntry(
                     cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
                     downloadMs: nil, convertMs: nil, uploadMs: 0,
@@ -710,7 +709,7 @@ final class BLEManager: NSObject, ObservableObject {
         lastTransferResult = "Sent new  \(secondsLabel(fromMs: totalMs)) (dl \(secondsLabel(fromMs: downloadMs)), \(wireLabel))"
         boardAckStatus = "Board ACK: image sent"
         lastConfirmedTrackId = trackId
-        markCoverShown(cacheKeySource)
+        markTrackPlayed(trackId)
         appendLog(TransferLogEntry(
             cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: cacheCheckMs,
             downloadMs: downloadMs, convertMs: convertMs, uploadMs: uploadMs,
@@ -972,7 +971,6 @@ final class BLEManager: NSObject, ObservableObject {
 
         _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
         prefetchedKeySources.insert(keySource)
-        noteUnshownPrefetch(keySource)
         return .stored
     }
 
