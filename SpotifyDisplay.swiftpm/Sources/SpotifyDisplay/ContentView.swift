@@ -25,8 +25,8 @@ struct ContentView: View {
             sheetContent(panel)
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
-                // Settings and the transition picker are full-height tasks. Stats are not a sheet:
-                // nerd mode shows them on the Now Playing screen.
+                // Settings and the transition picker are full-height tasks. Lifetime stats open from
+                // Settings; nerd mode shows the live details and session log on Now Playing.
                 .presentationDetents([.large])
                 .presentationDragIndicator(.hidden)
         }

@@ -242,6 +242,8 @@ final class SpotifyManager: ObservableObject {
         lastPreviewArtTrackId = nil
         previewArtTask?.cancel()
         previewArtTask = nil
+        nextQueuedArtTrackId = nil
+        nextQueuedArtData = nil
         lastDisplayFailureAt = nil
         lastDisplayFailureTrackId = nil
         lastAnyDisplayFailureAt = nil
@@ -323,6 +325,11 @@ final class SpotifyManager: ObservableObject {
     func startMonitoring(bleManager: BLEManager) {
         monitoredBle = bleManager
         startNetworkMonitor()
+
+        // The transition picker only gets the BLE manager; it asks for the next queued cover here.
+        TransitionPreviewStore.shared.nextCoverSource = { [weak self] in
+            await self?.nextQueuedArt()
+        }
 
         // Direct callback from BLE — fires even when background poll loop is suspended by iOS.
         bleManager.onReadyCallback = { [weak self, weak bleManager] in
@@ -963,12 +970,18 @@ final class SpotifyManager: ObservableObject {
     }
 
     private func fetchQueue() async throws -> [Track] {
+        // Same 429 cooldown as the now-playing poll: no queue reads while Spotify asked us to wait.
+        if let until = rateLimitedUntil, Date() < until { return [] }
         try await ensureAccessTokenFresh()
         guard let token = accessToken else { throw SpotifyAPIError.noToken }
         var req = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player/queue")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw SpotifyAPIError.badResponse }
+        if http.statusCode == 429 {
+            rateLimitedUntil = Date().addingTimeInterval(Self.cappedRetryAfterSeconds(from: http))
+            return []
+        }
         if http.statusCode == 401 || http.statusCode == 403 {
             // Token from before the queue scope was added. Off until the next sign-in.
             prefetchUnavailable = true
@@ -976,6 +989,37 @@ final class SpotifyManager: ObservableObject {
         }
         guard (200 ... 299).contains(http.statusCode) else { return [] }
         return (try? JSONDecoder().decode(QueueResponse.self, from: data))?.queue ?? []
+    }
+
+    // MARK: - Next queued cover (transition picker previews)
+
+    /// Cover JPEG of the last "next in queue" song looked up, keyed by track id.
+    private var nextQueuedArtTrackId: String?
+    private var nextQueuedArtData: Data?
+
+    /// Album art (JPEG) of the first upcoming song in the Spotify queue, or nil when there is none
+    /// (not signed in, empty queue, no queue scope, rate limited, download failed). One queue read
+    /// per call; the download is cached per track id. Only the transition picker calls this (when it
+    /// opens, and when the current song changes while it is open), for its "B" preview cover.
+    func nextQueuedArt() async -> Data? {
+        guard isAuthenticated, !prefetchUnavailable else { return nil }
+        guard let queue = try? await fetchQueue() else { return nil }
+        let currentId = currentTrack?.id
+        guard let next = queue.first(where: { $0.id != currentId && !preferredArtURLs(from: $0).isEmpty }) else {
+            return nil
+        }
+        if nextQueuedArtTrackId == next.id, let cached = nextQueuedArtData { return cached }
+        for candidate in preferredArtURLs(from: next).prefix(2) {
+            guard let url = URL(string: candidate) else { continue }
+            guard let result = try? await URLSession.shared.data(from: url) else { continue }
+            let data = result.0
+            if let http = result.1 as? HTTPURLResponse, !(200...299).contains(http.statusCode) { continue }
+            guard UIImage(data: data) != nil else { continue }
+            nextQueuedArtTrackId = next.id
+            nextQueuedArtData = data
+            return data
+        }
+        return nil
     }
 
     /// Downloads album art for the app preview if not already showing for this track.

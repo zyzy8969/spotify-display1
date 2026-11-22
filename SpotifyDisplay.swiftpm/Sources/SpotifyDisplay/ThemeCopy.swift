@@ -15,6 +15,8 @@ enum CopyKey {
     case avgCached, avgNew, savedLabel
     case phaseLookup, phaseDownload, phaseConvert, phaseSend, phaseOther
     case sinceOpened, nothingYet, liveDetails
+    case sessionLog, waitingForActivity, newestLine, lifetimeStats, transitionsRow, choose
+    case summaryLast, summaryHitRate, summaryAvgNew
 }
 
 extension ThemeID {
@@ -38,8 +40,8 @@ extension ThemeID {
         case .showStats: return p ? "nerd mode (live stats)" : "Nerd mode (live stats)"
         case .showStatsHint:
             return p
-                ? "shrinks the cover and shows live details, the terminal and transfer stats under it. same as the terminal icon at the top"
-                : "Shrinks the cover and shows live details, the terminal and transfer stats under it. Same as the terminal icon at the top of the main screen."
+                ? "moves the cover to the corner and shows live details and the log since you opened the app. same as the terminal icon at the top"
+                : "Moves the cover to the corner and shows live details and the session log under it. Same as the terminal icon at the top of the main screen."
         case .themeTitle: return p ? "look" : "Theme"
         case .onTheDisplay: return p ? "on the keychain" : "On the display"
         case .emptyCache: return p ? "empty it" : "Clear display cache"
@@ -65,6 +67,15 @@ extension ThemeID {
         case .sinceOpened: return p ? "since you opened the app" : "Since you opened the app"
         case .nothingYet: return p ? "nothing sent yet" : "Nothing sent yet"
         case .liveDetails: return p ? "live details" : "Live details"
+        case .sessionLog: return p ? "since you opened the app" : "Session log"
+        case .waitingForActivity: return p ? "waiting for activity\u{2026}" : "Waiting for activity\u{2026}"
+        case .newestLine: return p ? "newest" : "Newest"
+        case .lifetimeStats: return p ? "lifetime stats" : "Lifetime stats"
+        case .transitionsRow: return p ? "transitions" : "Transitions"
+        case .choose: return p ? "choose" : "Choose"
+        case .summaryLast: return p ? "last one" : "Last"
+        case .summaryHitRate: return p ? "hits" : "Cache hits"
+        case .summaryAvgNew: return p ? "avg new" : "Avg new"
         }
     }
 

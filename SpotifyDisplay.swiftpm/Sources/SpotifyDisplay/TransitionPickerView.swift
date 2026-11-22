@@ -37,7 +37,7 @@ struct TransitionPickerView: View {
                         }
                     }
                 }
-                Text("Previews are drawn by the display's own transition code, so they show the real effect; only their speed is estimated. New songs use quick transitions unless none of them is switched on.")
+                Text("Previews are drawn by the display's own transition code, so they show the real effect; only their speed is estimated. They go from the current song's cover to the next one in your queue (sample covers when either is missing). New songs use quick transitions unless none of them is switched on.")
                     .themeText(.statCaption)
                     .foregroundStyle(theme.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -50,6 +50,19 @@ struct TransitionPickerView: View {
         .onChange(of: disabledRaw) { _ in
             bleManager.applyTransitionPrefs()
         }
+        // Previews go from the current song's cover (A) to the next queued song's (B). The samples
+        // show until those are ready; a song change while the picker is open re-reads both.
+        .onAppear { refreshPreviewCovers(opening: true) }
+        .onChange(of: bleManager.boardFrame) { _ in refreshPreviewCovers(opening: false) }
+        .onChange(of: bleManager.currentAlbumArt) { _ in refreshPreviewCovers(opening: false) }
+    }
+
+    private func refreshPreviewCovers(opening: Bool) {
+        TransitionPreviewStore.shared.refreshCovers(
+            boardFrame: bleManager.boardFrame,
+            albumArt: bleManager.currentAlbumArt,
+            opening: opening
+        )
     }
 
     private func summary(enabled: Int) -> some View {

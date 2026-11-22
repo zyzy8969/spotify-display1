@@ -44,8 +44,12 @@ sender are unaffected.
   transition but do **not** save it to SD (photo upload). Same ACK as a normal frame. Needs no cache check
   first; the board ignores `transferCacheKey` for it.
 - **Capability** — Message `CAPS:transitions`, sent with the stats reply (next to `CAPS:deflate`). Clients
-  must send the mask and the `0xFD` header byte only after seeing it on the current connection (old firmware
-  would treat `0xFD` as a random frame *and save it*, and log the mask write as a bad magic).
+  must send the `0xFD` header byte only after seeing it on the current connection (old firmware would treat
+  `0xFD` as a random frame *and save it*). The mask write is safe before it: old firmware only logs it as a
+  bad magic, and no firmware replies to it. The iOS app therefore sends the mask right after `READY`, before
+  its first cache check of the connection (so the first cover after a connect or board reboot already obeys
+  it), and again once `CAPS:transitions` arrives. Writes on the Cache characteristic are handled in order,
+  so the mask is in place before that cache check.
 - The Python sender is unchanged (it never sends any of this).
 
 Changes in 1.11 (faster sending). Additive: old clients and the Python sender are unaffected.

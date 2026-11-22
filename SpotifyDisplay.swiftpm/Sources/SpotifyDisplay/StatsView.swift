@@ -1,8 +1,29 @@
 import SwiftUI
 
-/// General transfer stats, shown in nerd mode under the live details (`NerdStatsView`). Shows only
-/// what the app already records: `BLEManager.transferLog` (in memory, last 30 transfers since launch)
-/// and the SD cache count. The caller provides the scrolling and the side margins.
+/// Settings > Lifetime stats: a sheet with the general transfer stats.
+struct LifetimeStatsView: View {
+    @ObservedObject var bleManager: BLEManager
+    @ObservedObject var spotifyManager: SpotifyManager
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                SheetHeader(title: theme.id.text(.lifetimeStats)) { dismiss() }
+                GeneralStatsView(bleManager: bleManager, spotifyManager: spotifyManager)
+            }
+            .padding(.horizontal, theme.margin + 4)
+            .padding(.bottom, 32)
+        }
+        .background(theme.background.ignoresSafeArea())
+    }
+}
+
+/// General transfer stats (Settings > Lifetime stats). Shows only what the app already records:
+/// `BLEManager.transferLog` (in memory, last 30 transfers since launch) and the SD cache count.
+/// The caller provides the scrolling and the side margins.
 struct GeneralStatsView: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
@@ -360,45 +381,6 @@ struct MarkerLegend: View {
                 .themeText(.statCaption)
                 .foregroundStyle(theme.inkFaint)
         }
-    }
-}
-
-// MARK: - Live details (former inline debug strip; the last transition is the header icon now)
-
-struct LiveDetails: View {
-    @ObservedObject var bleManager: BLEManager
-    @ObservedObject var spotifyManager: SpotifyManager
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(theme.id.text(.liveDetails))
-                .themeText(.eyebrow)
-                .foregroundStyle(theme.inkFaint)
-                .padding(.bottom, 4)
-            ForEach(Array(lines.enumerated()), id: \.offset) { item in
-                Text(item.element)
-                    .themeText(.mono)
-                    .foregroundStyle(theme.inkSoft)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .textSelection(.enabled)
-    }
-
-    private var lines: [String] {
-        var out: [String] = [
-            "live: \(bleManager.currentLivePhase ?? "idle")",
-            "board: \(bleManager.statusMessage)"
-        ]
-        if let ack = bleManager.boardAckStatus { out.append("ack: \(ack)") }
-        if let result = bleManager.lastTransferResult { out.append("last: \(result)") }
-        if let poll = spotifyManager.pollStatus { out.append("spotify: \(poll)") }
-        if let error = spotifyManager.lastError { out.append("error: \(error)") }
-        if bleManager.isTransferring {
-            out.append("progress: \(Int((bleManager.transferProgress * 100).rounded()))%")
-        }
-        return out
     }
 }
 

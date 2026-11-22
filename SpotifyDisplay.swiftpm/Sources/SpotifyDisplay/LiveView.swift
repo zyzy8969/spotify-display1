@@ -1,99 +1,246 @@
 import SwiftUI
 
-/// Nerd mode's stats area under the Now Playing controls: live details and the terminal, then the
-/// general transfer stats, all compacted. The caller provides the scrolling, the side margins and the
-/// smaller text (`themeTextScale`).
-struct NerdStatsView: View {
+/// Nerd mode's area under the compact player: one scrolling list in the Live details style. The live
+/// details come first, then the session log (every BLE / transfer line since the app was opened,
+/// `BLEManager.eventLog`, newest at the bottom). It follows new lines while the person is at the
+/// bottom and stays put when they have scrolled up (a "newest" button takes them back down).
+/// The caller provides the side margins and the smaller text (`themeTextScale`).
+struct NerdLogView: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            LiveView(bleManager: bleManager, spotifyManager: spotifyManager, compact: true)
-            ThemedDivider()
-            GeneralStatsView(bleManager: bleManager, spotifyManager: spotifyManager, compact: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// What the display is doing right now (phase, board and Spotify status) and a terminal-style log of
-/// every event the app sends to or hears from the board. In-memory only: it starts empty each launch.
-/// The last transition's name is no longer shown here: it is the sparkles icon in the header.
-struct LiveView: View {
-    @ObservedObject var bleManager: BLEManager
-    @ObservedObject var spotifyManager: SpotifyManager
-    var compact = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 14 : 24) {
-            LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-            TerminalView(lines: bleManager.eventLog, height: compact ? 170 : 320)
-        }
-    }
-}
-
-/// Dark terminal pane. Newest line at the bottom; sticks to the bottom as lines arrive.
-struct TerminalView: View {
-    let lines: [LogLine]
-    var height: CGFloat = 320
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The bottom of the list is on screen (set by the sentinel row's appear / disappear).
+    @State private var atBottom = true
+
+    private static let bottomID = "nerd-log-bottom"
+
+    var body: some View {
+        let lines = bleManager.eventLog
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
+                        .padding(.top, 12)
+                    ThemedDivider()
+                        .padding(.vertical, 14)
+                    Text(theme.id.text(.sessionLog))
+                        .themeText(.eyebrow)
+                        .foregroundStyle(theme.inkFaint)
+                        .accessibilityAddTraits(.isHeader)
+                        .padding(.bottom, 8)
+                    if lines.isEmpty {
+                        Text(theme.id.text(.waitingForActivity))
+                            .themeText(.mono)
+                            .foregroundStyle(theme.inkFaint)
+                    }
+                    ForEach(lines) { line in
+                        SessionLogRow(line: line)
+                            .id(line.id)
+                    }
+                    Color.clear
+                        .frame(height: 16)
+                        .id(Self.bottomID)
+                        .onAppear { atBottom = true }
+                        .onDisappear { atBottom = false }
+                }
+                .textSelection(.enabled)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !atBottom && !lines.isEmpty {
+                    newestButton(proxy)
+                        .transition(.opacity)
+                }
+            }
+            .onChange(of: lines.last?.id) { _ in
+                guard atBottom else { return }
+                if reduceMotion {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                    }
+                }
+            }
+            .onAppear {
+                // Next turn: the lazy rows need one layout pass before they can be scrolled to.
+                DispatchQueue.main.async {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    private func newestButton(_ proxy: ScrollViewProxy) -> some View {
+        Button {
+            atBottom = true
+            if reduceMotion {
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            } else {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(theme.id.text(.newestLine))
+                    .themeText(.footnote)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(theme.ink)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(theme.background))
+            .overlay(Capsule().stroke(theme.ringOff, lineWidth: 1))
+            .shadow(color: Color.black.opacity(0.12), radius: 6, x: 0, y: 2)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, 6)
+        .accessibilityLabel("Scroll to the newest log line")
+    }
+}
+
+/// One session-log line in the Live details style: time on the left (faint), the event on the right,
+/// and a small shape-coded marker for sends (ring), replies (dot), transitions and errors. The line's
+/// own text says "tx" / "rx" / "error" too, so nothing relies on colour alone.
+struct SessionLogRow: View {
+    let line: LogLine
+    @Environment(\.theme) private var theme
+    @ScaledMetric(relativeTo: .caption2) private var markerSize: CGFloat = 6
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
+        f.dateFormat = "HH:mm:ss"
         return f
     }()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Terminal")
-                .themeText(.eyebrow)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(Self.timeFormatter.string(from: line.date))
+                .themeText(.mono)
                 .foregroundStyle(theme.inkFaint)
-            ScrollViewReader { proxy in
-                ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        if lines.isEmpty {
-                            Text("waiting for activity…")
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundColor(Color(white: 0.55))
-                        }
-                        ForEach(lines) { line in
-                            Text("\(Self.timeFormatter.string(from: line.date)) \(line.text)")
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundColor(color(for: line.kind))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(line.id)
-                        }
-                    }
-                    .padding(10)
-                }
-                .frame(height: height)
-                .background(Color(white: 0.07))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .onChange(of: lines.count) { _ in
-                    if let last = lines.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-                .onAppear {
-                    if let last = lines.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
-            }
-            .accessibilityLabel("Terminal log")
+            marker
+                .frame(width: markerSize, height: markerSize)
+                .alignmentGuide(.firstTextBaseline) { d in d[.bottom] }
+            Text(line.text)
+                .themeText(.mono)
+                .foregroundStyle(line.kind == .error ? theme.destructive : theme.inkSoft)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .textSelection(.enabled)
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
     }
 
-    private func color(for kind: LogLine.Kind) -> Color {
-        switch kind {
-        case .info: return Color(white: 0.7)
-        case .tx: return Color(red: 0.45, green: 0.8, blue: 1.0)
-        case .rx: return Color(red: 0.55, green: 0.9, blue: 0.6)
-        case .transition: return Color(red: 1.0, green: 0.8, blue: 0.35)
-        case .error: return Color(red: 1.0, green: 0.45, blue: 0.4)
+    @ViewBuilder
+    private var marker: some View {
+        switch line.kind {
+        case .info:
+            Color.clear
+        case .tx:
+            StateMarker(filled: false, fillColor: theme.display, ringColor: theme.display, size: markerSize)
+        case .rx:
+            StateMarker(filled: true, fillColor: theme.display, ringColor: theme.display, size: markerSize)
+        case .transition:
+            StateMarker(filled: true, fillColor: theme.accent, ringColor: theme.accent, size: markerSize)
+        case .error:
+            StateMarker(filled: true, fillColor: theme.destructive, ringColor: theme.destructive, size: markerSize)
         }
+    }
+}
+
+// MARK: - Live details
+
+/// What the display is doing right now, plus a few short values from this session's transfers (the
+/// history and totals are in Settings > Lifetime stats). Label / value rows; values in monospace.
+struct LiveDetails: View {
+    @ObservedObject var bleManager: BLEManager
+    @ObservedObject var spotifyManager: SpotifyManager
+    @Environment(\.theme) private var theme
+    @ScaledMetric(relativeTo: .caption2) private var labelWidth: CGFloat = 64
+
+    private struct Row: Identifiable {
+        let id: String
+        let label: String
+        let value: String
+        var isError = false
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(theme.id.text(.liveDetails))
+                .themeText(.eyebrow)
+                .foregroundStyle(theme.inkFaint)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.bottom, 4)
+            ForEach(rows) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(row.label)
+                        .themeText(.mono)
+                        .foregroundStyle(theme.inkFaint)
+                        .frame(width: labelWidth, alignment: .leading)
+                    Text(row.value)
+                        .themeText(.mono)
+                        .foregroundStyle(row.isError ? theme.destructive : theme.inkSoft)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private var rows: [Row] {
+        var out: [Row] = [
+            Row(id: "live", label: "live", value: bleManager.currentLivePhase ?? "idle"),
+            Row(id: "board", label: "board", value: bleManager.statusMessage)
+        ]
+        if bleManager.isTransferring {
+            out.append(Row(id: "progress", label: "progress", value: "\(Int((bleManager.transferProgress * 100).rounded()))%"))
+        }
+        if let ack = bleManager.boardAckStatus { out.append(Row(id: "ack", label: "ack", value: ack)) }
+        if let result = bleManager.lastTransferResult { out.append(Row(id: "last", label: "last", value: result)) }
+        if let poll = spotifyManager.pollStatus { out.append(Row(id: "spotify", label: "spotify", value: poll)) }
+        if let error = spotifyManager.lastError, !error.isEmpty {
+            out.append(Row(id: "error", label: "error", value: error, isError: true))
+        }
+
+        // Short session values (formerly the General stats block under the terminal).
+        let entries = bleManager.transferLog
+        if let count = bleManager.sdCacheEntryCount {
+            out.append(Row(id: "sd", label: "on sd", value: "\(count) covers"))
+        }
+        if !entries.isEmpty {
+            let hits = entries.filter { $0.cacheHit }.count
+            out.append(Row(id: "hits", label: "hits", value: "\(hits) of \(entries.count) cached"))
+            if let avg = SessionStats.averageMs(entries, cacheHit: true) {
+                out.append(Row(id: "avgHit", label: "avg hit", value: StatsFormat.short(avg)))
+            }
+            if let avg = SessionStats.averageMs(entries, cacheHit: false) {
+                out.append(Row(id: "avgNew", label: "avg new", value: StatsFormat.short(avg)))
+            }
+        }
+        return out
+    }
+}
+
+/// Small read-only helpers over `BLEManager.transferLog` (in memory, last 30 transfers).
+enum SessionStats {
+    static func averageMs(_ entries: [TransferLogEntry], cacheHit: Bool) -> Int? {
+        let matching = entries.filter { $0.cacheHit == cacheHit }
+        guard !matching.isEmpty else { return nil }
+        return matching.reduce(0) { $0 + $1.totalMs } / matching.count
+    }
+
+    /// Whole-number percentage of cache hits, nil with no transfers.
+    static func hitRatePercent(_ entries: [TransferLogEntry]) -> Int? {
+        guard !entries.isEmpty else { return nil }
+        let hits = entries.filter { $0.cacheHit }.count
+        return Int((Double(hits) / Double(entries.count) * 100).rounded())
     }
 }

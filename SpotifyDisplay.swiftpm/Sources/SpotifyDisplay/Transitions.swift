@@ -466,34 +466,124 @@ enum SampleCoverArt {
 
 /// Real previews: every transition rendered A to B by the board's own code (`TransitionRenderer`),
 /// at preview size, on the renderer's queue, and kept for the rows most recently on screen.
+/// A = the current song's cover, B = the next song in the Spotify queue (`refreshCovers`); either one
+/// falls back to its sample cover when missing. Until real covers are known (and while they render)
+/// the sample previews show, then each row swaps to the real-cover render when it is ready.
 @MainActor
 final class TransitionPreviewStore: ObservableObject {
     static let shared = TransitionPreviewStore()
 
     @Published private(set) var previews: [Int: RenderedTransition] = [:]
-    private var inFlight = Set<Int>()
+    /// The cover pair each kept preview was rendered from (`pairGen` at the time).
+    private var previewGen: [Int: UInt64] = [:]
+    /// Renders running, with the pair they render.
+    private var inFlight: [Int: UInt64] = [:]
     /// Least recently requested first.
     private var recent: [Int] = []
     /// About 1.7 MB per preview (30 frames of 120x120).
     private let capacity = 12
     private var samplesTask: Task<[Data]?, Never>?
 
+    /// Real covers as 240x240 LE RGB565 (nil = use the sample). Bumping `pairGen` invalidates previews.
+    private var coverA: Data?
+    private var coverB: Data?
+    private var pairGen: UInt64 = 0
+
+    /// Gives the next queued song's cover (JPEG), or nil. Set by `SpotifyManager.startMonitoring`.
+    var nextCoverSource: (@MainActor () async -> Data?)?
+    /// The current-song frame the last applied refresh used, to tell a real song change from a
+    /// repeated update of the same cover (the board frame is set more than once per draw).
+    private var lastCurrentFrame: Data?
+    private var nextFetchPending = true
+    private var refreshGen: UInt64 = 0
+
     private init() {}
 
-    func request(_ id: Int) {
-        recent.removeAll { $0 == id }
-        recent.append(id)
-        guard previews[id] == nil, !inFlight.contains(id) else { return }
-        inFlight.insert(id)
+    /// Re-reads A and B. `boardFrame` (the RGB565 on the board) wins; otherwise `albumArt` (JPEG) is
+    /// converted the way a send would be. The queue is read when `opening` (the picker appeared) or
+    /// when the current cover changed; otherwise the last B is kept. Cheap to call repeatedly.
+    func refreshCovers(boardFrame: Data?, albumArt: Data?, opening: Bool) {
+        if opening { nextFetchPending = true }
+        refreshGen &+= 1
+        let gen = refreshGen
         Task { @MainActor in
-            defer { self.inFlight.remove(id) }
-            guard let samples = await self.sampleFrames(), samples.count == 2 else { return }
+            var a: Data?
+            if let frame = boardFrame, frame.count >= TransitionRenderer.frameBytes {
+                a = frame
+            } else if let jpeg = albumArt {
+                a = await Self.frame(fromJPEG: jpeg)
+            }
+            guard gen == self.refreshGen else { return }
+            let needNext = self.nextFetchPending || a != self.lastCurrentFrame
+            var b = self.coverB
+            if needNext {
+                b = nil
+                if let source = self.nextCoverSource, let jpeg = await source() {
+                    b = await Self.frame(fromJPEG: jpeg)
+                }
+                guard gen == self.refreshGen else { return }
+                self.nextFetchPending = false
+            }
+            self.lastCurrentFrame = a
+            // Same picture both sides (next song is on the same album): a transition would show
+            // nothing, so B goes back to its sample.
+            if let a, let bb = b, a == bb { b = nil }
+            self.setCovers(a: a, b: b)
+        }
+    }
+
+    private static func frame(fromJPEG jpeg: Data) async -> Data? {
+        await Task.detached(priority: .userInitiated) { () -> Data? in
+            guard let frame = try? ImageProcessor.convertToRGB565(imageData: jpeg),
+                  frame.count >= TransitionRenderer.frameBytes else { return nil }
+            return frame
+        }.value
+    }
+
+    private func setCovers(a: Data?, b: Data?) {
+        guard a != coverA || b != coverB else { return }
+        coverA = a
+        coverB = b
+        pairGen &+= 1
+        // Re-render what was on screen most recently, newest first. The old previews stay up meanwhile.
+        for id in recent.suffix(capacity).reversed() {
+            request(id, touch: false)
+        }
+    }
+
+    func request(_ id: Int) {
+        request(id, touch: true)
+    }
+
+    private func request(_ id: Int, touch: Bool) {
+        if touch {
+            recent.removeAll { $0 == id }
+            recent.append(id)
+        }
+        let gen = pairGen
+        if previews[id] != nil, previewGen[id] == gen { return }
+        if inFlight[id] == gen { return }
+        inFlight[id] = gen
+        let a = coverA
+        let b = coverB
+        Task { @MainActor in
+            defer { if self.inFlight[id] == gen { self.inFlight[id] = nil } }
+            var old = a
+            var new = b
+            if old == nil || new == nil {
+                guard let samples = await self.sampleFrames(), samples.count == 2 else { return }
+                if old == nil { old = samples[0] }
+                if new == nil { new = samples[1] }
+            }
+            guard let oldFrame = old, let newFrame = new, gen == self.pairGen else { return }
             let seed = UInt32(truncatingIfNeeded: (id + 1) &* 40_503)
             let rendered = await TransitionRenderer.shared.render(
-                index: id, old: samples[0], new: samples[1], seed: seed, options: .preview
+                index: id, old: oldFrame, new: newFrame, seed: seed, options: .preview
             )
-            guard !rendered.isEmpty else { return }
+            // A newer pair arrived meanwhile: its own render replaces this one.
+            guard !rendered.isEmpty, gen == self.pairGen else { return }
             self.previews[id] = rendered
+            self.previewGen[id] = gen
             self.evictIfNeeded()
         }
     }
@@ -515,11 +605,13 @@ final class TransitionPreviewStore: ObservableObject {
         while previews.count > capacity, let oldest = recent.first {
             recent.removeFirst()
             previews[oldest] = nil
+            previewGen[oldest] = nil
         }
     }
 }
 
-/// Plays transition `id` from sample cover A to B, on a loop: hold A, the board's effect, hold B.
+/// Plays transition `id` from cover A to B (the current and next song, or the samples), on a loop:
+/// hold A, the board's effect, hold B.
 /// Frames come precomputed from `TransitionPreviewStore`; each tick only picks one.
 struct LoopingTransitionPreview: View {
     let id: Int

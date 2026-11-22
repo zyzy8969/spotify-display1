@@ -11,8 +11,9 @@ struct SettingsView: View {
     @Environment(\.theme) private var theme
     @AppStorage("showDebugInfo") private var showDebugInfo = false
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
-    @AppStorage(TransitionPrefs.storageKey) private var disabledTransitions = ""
     @State private var showTransitions = false
+    @State private var showLifetimeStats = false
+    @ScaledMetric(relativeTo: .body) private var chevronSize: CGFloat = 14
 
     @State private var clientIDOverride = ""
     @State private var brightnessValue: Double = 200
@@ -33,7 +34,10 @@ struct SettingsView: View {
                 ThemedDivider()
                 ThemePicker(selection: $themeRaw)
                 ThemedDivider()
-                transitionsRow
+                VStack(alignment: .leading, spacing: 4) {
+                    transitionsRow
+                    lifetimeStatsRow
+                }
                 ThemedDivider()
                 cacheRows
                 ThemedDivider()
@@ -126,27 +130,50 @@ struct SettingsView: View {
 
     /// Opens the transition picker (which transitions the display may use, with live examples).
     private var transitionsRow: some View {
-        Button {
+        navRow(title: theme.id.text(.transitionsRow)) {
             showTransitions = true
-        } label: {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Transitions")
-                    .themeText(.row)
-                    .foregroundStyle(theme.ink)
-                Spacer()
-                Text("\(TransitionPrefs.enabledCount(disabledRaw: disabledTransitions)) of \(TransitionCatalog.all.count) on")
-                    .themeText(.rowValue)
-                    .foregroundStyle(theme.inkSoft)
-            }
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .sheet(isPresented: $showTransitions) {
             TransitionPickerView(bleManager: bleManager)
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
         }
+    }
+
+    /// Opens the general transfer stats (totals, cache counts, averages, recent transfers).
+    private var lifetimeStatsRow: some View {
+        navRow(title: theme.id.text(.lifetimeStats)) {
+            showLifetimeStats = true
+        }
+        .sheet(isPresented: $showLifetimeStats) {
+            LifetimeStatsView(bleManager: bleManager, spotifyManager: spotifyManager)
+                .environment(\.theme, theme)
+                .preferredColorScheme(theme.colorScheme)
+        }
+    }
+
+    /// A row that opens another page: title, then "Choose" and a chevron.
+    private func navRow(title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(title)
+                    .themeText(.row)
+                    .foregroundStyle(theme.ink)
+                Spacer(minLength: 8)
+                Text(theme.id.text(.choose))
+                    .themeText(.rowValue)
+                    .foregroundStyle(theme.inkSoft)
+                    .accessibilityHidden(true)
+                GlyphIcon(glyph: .chevronLeft, color: theme.inkSoft, size: chevronSize)
+                    .rotationEffect(.degrees(180))
+                    .accessibilityHidden(true)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityHint("Opens a new page")
     }
 
     private var cacheCountText: String {

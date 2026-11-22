@@ -7,28 +7,27 @@ import PhotosUI
 enum ArtMetrics {
     static let maxSide: CGFloat = 300
 
-    /// Square side for the cover. Depends only on the safe-area size of the screen, never on
-    /// sibling views, so badges, progress and errors coming and going cannot resize the art.
-    static func side(for size: CGSize, margin: CGFloat) -> CGFloat {
+    /// Square side for the big cover. Depends only on the safe-area size of the screen (and whether
+    /// text is at an accessibility size), never on sibling views, so badges, progress and errors
+    /// coming and going cannot resize the art.
+    static func side(for size: CGSize, margin: CGFloat, accessibilityText: Bool = false) -> CGFloat {
         let byWidth = size.width - margin * 2
-        let byHeight = size.height * 0.46
+        let byHeight = size.height * (accessibilityText ? 0.34 : 0.46)
         return max(120, min(maxSide, byWidth, byHeight)).rounded(.down)
     }
 
-    /// Nerd mode: about 58% of the normal side, and never more than 27% of the screen height, so the
-    /// stats area under the controls keeps roughly 40% of a 4.7" iPhone SE screen.
-    static func compactSide(for size: CGSize, margin: CGFloat) -> CGFloat {
-        let normal = side(for: size, margin: margin)
-        return max(96, min(normal * 0.58, size.height * 0.27)).rounded(.down)
+    /// Nerd mode: the small cover at the top left. 19% of the screen height, kept within 104...130 pt
+    /// (about 123 pt on a 4.7" iPhone SE), so the session log gets most of the height.
+    static func nerdSide(for size: CGSize) -> CGFloat {
+        min(130, max(104, (size.height * 0.19).rounded(.down)))
     }
 
-    /// Text size multiplier for the Now Playing column and the stats in nerd mode.
+    /// Text size multiplier for the compact player and the log in nerd mode.
     static let compactTextScale: CGFloat = 0.75
 
-    /// Fixed gap between the header and the art. Only the Spacer *below* the track info flexes,
-    /// so nothing that changes height below the art can move it.
+    /// Smallest gap between the header and the big cover; the column is centred in what is left.
     static func topGap(for size: CGSize) -> CGFloat {
-        min(40, max(8, size.height * 0.035))
+        min(28, max(8, size.height * 0.025))
     }
 
     /// Bottom breathing room: the home indicator already reserves space on Face ID phones;
@@ -36,6 +35,26 @@ enum ArtMetrics {
     static func bottomPadding(safeAreaBottom: CGFloat) -> CGFloat {
         safeAreaBottom > 0 ? 4 : 14
     }
+
+    /// The quiet stats line under the controls only shows when the screen has room for it.
+    static func showsSummary(for size: CGSize, dynamicTypeSize: DynamicTypeSize) -> Bool {
+        size.height >= 690 && dynamicTypeSize <= .xxLarge
+    }
+}
+
+/// Timing for the nerd-mode switch. One spring moves the cover, the track info and the controls;
+/// the area under them (log in nerd mode, footer + stats in normal mode) follows a beat later and
+/// leaves first, quickly. Reduce Motion: a 0.2 s dip-and-return crossfade, nothing moves.
+enum ModeMotion {
+    static let spring = Animation.spring(response: 0.42, dampingFraction: 0.86)
+    /// How long after the cover starts moving the lower area comes in.
+    static let lowerDelay = 0.12
+    /// The lower area slides up this far as it fades in.
+    static let lowerRise: CGFloat = 14
+    static let lowerExit = Animation.easeOut(duration: 0.12)
+    /// Nerd -> normal: the log is gone after this long, then the cover grows back.
+    static let exitLead = 0.09
+    static let reducedHalf = 0.1
 }
 
 // MARK: - Now playing
@@ -43,9 +62,13 @@ enum ArtMetrics {
 /// Main screen while signed in to Spotify. Covers the Crayon "playing" and "sending" artboards
 /// (and their Quiet / Serif counterparts) — sending is a state of this screen, not a new screen.
 ///
-/// Nerd mode (`@AppStorage("showDebugInfo")`, the header's terminal icon or the Settings toggle)
-/// shrinks the cover, track info and controls and puts the live details, the terminal and the
-/// transfer stats in a scrolling area under them.
+/// Normal mode: the big cover centred with the strip, track info, controls, footer and (on taller
+/// screens) a quiet stats line under it. Nerd mode (`@AppStorage("showDebugInfo")`, the header's
+/// terminal icon or the Settings toggle): the cover goes small to the top left with the track info and
+/// controls to its right, the strip across the width, and the live details + session log below.
+///
+/// Both modes are one view tree: the single `ArtStage` keeps its identity (so a mirrored transition
+/// keeps playing) and only its size and place animate.
 struct NowPlayingScreen: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
@@ -53,8 +76,18 @@ struct NowPlayingScreen: View {
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Nerd mode. Same key as the Settings toggle, so both stay in sync.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    /// Nerd mode as the person set it. Same key as the Settings toggle, so both stay in sync.
     @AppStorage("showDebugInfo") private var nerdMode = false
+    /// Nerd mode as laid out right now. Follows `nerdMode`, sequenced by `applyMode`.
+    @State private var layoutNerd = UserDefaults.standard.bool(forKey: "showDebugInfo")
+    /// False while the log fades out, before the cover grows back (nerd -> normal).
+    @State private var showsLower = true
+    /// Reduce Motion crossfade: the player dips to the background and comes back.
+    @State private var playerOpacity: Double = 1
+    @State private var modeGen = 0
+    @Namespace private var playerNS
+
     @State private var photoError: String?
     /// What the keychain shows right now, decoded once per change instead of on every render.
     @State private var shownImage: UIImage?
@@ -77,26 +110,19 @@ struct NowPlayingScreen: View {
     var body: some View {
         GeometryReader { geo in
             let bottomPad = ArtMetrics.bottomPadding(safeAreaBottom: geo.safeAreaInsets.bottom)
+            let scrolls = dynamicTypeSize.isAccessibilitySize
             VStack(spacing: 0) {
                 header
                     .padding(.horizontal, theme.margin)
                     // The last-transition bubble hangs below the header, over the cover.
                     .zIndex(1)
-                Group {
-                    if nerdMode {
-                        nerdColumn(size: geo.size)
-                            .transition(.opacity)
-                    } else {
-                        FitOrScroll {
-                            column(size: geo.size)
-                        }
-                        .transition(.opacity)
-                    }
+                ScrollIf(enabled: scrolls) {
+                    player(size: geo.size, scrolls: scrolls)
                 }
                 .padding(.bottom, bottomPad)
+                .opacity(playerOpacity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: nerdMode)
         }
         .alert("Photo", isPresented: Binding(
             get: { photoError != nil },
@@ -108,6 +134,12 @@ struct NowPlayingScreen: View {
         }
         .onAppear {
             shownImage = Self.decode(bleManager.currentAlbumArt)
+            if layoutNerd != nerdMode {
+                layoutNerd = nerdMode
+            }
+        }
+        .onChange(of: nerdMode) { on in
+            applyMode(on)
         }
         .onChange(of: bleManager.currentAlbumArt) { newData in
             // During a fresh send the stage handler below picks the art up; anything else
@@ -132,6 +164,60 @@ struct NowPlayingScreen: View {
             }
         }
     }
+
+    // MARK: Mode switch
+
+    /// Moves the layout to `on`. Toggling again mid-way retargets the springs (they are interruptible)
+    /// and `modeGen` drops any step still scheduled by the previous toggle.
+    private func applyMode(_ on: Bool) {
+        modeGen &+= 1
+        let gen = modeGen
+        if reduceMotion {
+            withAnimation(.easeOut(duration: ModeMotion.reducedHalf)) { playerOpacity = 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + ModeMotion.reducedHalf) {
+                guard gen == modeGen else { return }
+                var cut = Transaction()
+                cut.disablesAnimations = true
+                withTransaction(cut) {
+                    layoutNerd = on
+                    showsLower = true
+                }
+                withAnimation(.easeIn(duration: ModeMotion.reducedHalf)) { playerOpacity = 1 }
+            }
+            return
+        }
+        playerOpacity = 1
+        if on {
+            withAnimation(ModeMotion.spring) {
+                layoutNerd = true
+                showsLower = true
+            }
+        } else {
+            guard layoutNerd else { return }
+            // The log leaves first, quickly; then the cover grows back.
+            withAnimation(ModeMotion.lowerExit) { showsLower = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + ModeMotion.exitLead) {
+                guard gen == modeGen else { return }
+                withAnimation(ModeMotion.spring) {
+                    layoutNerd = false
+                    showsLower = true
+                }
+            }
+        }
+    }
+
+    /// Footer / stats (normal) and the log (nerd): in a beat after the cover, out first and fast.
+    private var lowerTransition: AnyTransition {
+        if reduceMotion { return .opacity }
+        return .asymmetric(
+            insertion: AnyTransition.opacity
+                .combined(with: .offset(y: ModeMotion.lowerRise))
+                .animation(ModeMotion.spring.delay(ModeMotion.lowerDelay)),
+            removal: AnyTransition.opacity.animation(ModeMotion.lowerExit)
+        )
+    }
+
+    // MARK: Send state
 
     private func stageDidChange(_ stage: SendStage) {
         switch stage {
@@ -200,6 +286,8 @@ struct NowPlayingScreen: View {
         )
     }
 
+    // MARK: Photos
+
     /// Loads the picked photo, crops it square and sends it as a display-only frame.
     private func showPhoto(_ item: PhotosPickerItem) {
         Task {
@@ -209,6 +297,13 @@ struct NowPlayingScreen: View {
                 photoError = "Could not read that photo."
                 return
             }
+            sendPhoto(jpeg)
+        }
+    }
+
+    /// Same path as an upload: `BLEManager.sendPhoto(jpeg:)`.
+    private func sendPhoto(_ jpeg: Data) {
+        Task {
             do {
                 try await bleManager.sendPhoto(jpeg: jpeg)
             } catch is CancellationError {
@@ -224,66 +319,130 @@ struct NowPlayingScreen: View {
         Task { await spotifyManager.requestResync(reason: "photo removed") }
     }
 
-    // MARK: Columns
+    /// Cover tap: a photo is up -> back to Spotify; otherwise show the last uploaded photo again
+    /// (nothing happens when no photo was uploaded since the app was opened).
+    private func coverTapped() {
+        if bleManager.photoHold {
+            backToSpotify()
+        } else if let jpeg = bleManager.lastPhotoJPEG {
+            sendPhoto(jpeg)
+        }
+    }
 
-    /// Normal mode: the artboard layout.
-    private func column(size: CGSize) -> some View {
-        let side = ArtMetrics.side(for: size, margin: theme.margin)
+    // MARK: Layout
+
+    /// The whole player in one tree for both modes. Slots never change type, so the cover keeps
+    /// its identity; `if` blocks only add or remove the parts around it.
+    private func player(size: CGSize, scrolls: Bool) -> some View {
+        let nerd = layoutNerd
+        let bigSide = ArtMetrics.side(for: size, margin: theme.margin, accessibilityText: scrolls)
+        let side = nerd ? ArtMetrics.nerdSide(for: size) : bigSide
         return VStack(spacing: 0) {
-            Color.clear.frame(height: ArtMetrics.topGap(for: size))
-            art(side: side)
+            // Normal: flexible space above and below centres the column. Nerd: a small fixed gap.
+            Spacer(minLength: nerd ? 6 : ArtMetrics.topGap(for: size))
+                .frame(maxHeight: nerd ? 6 : CGFloat.infinity)
+
+            HStack(alignment: .top, spacing: 14) {
+                art(side: side)
+                if nerd {
+                    nerdTrackColumn(side: side)
+                        .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: nerd ? .leading : .center)
+
             strip
-                .frame(width: side)
+                .frame(width: nerd ? nil : bigSide)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.top, 10)
+
+            if !nerd {
+                normalTrackBlock(side: bigSide)
+                    .transition(.opacity)
+                normalLowerBlock(size: size)
+                    .transition(lowerTransition)
+                Spacer(minLength: 8)
+                    .frame(maxHeight: .infinity)
+            } else {
+                nerdLowerBlock(size: size, scrolls: scrolls)
+            }
+        }
+        .padding(.horizontal, theme.margin)
+        .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
+    }
+
+    /// Normal mode under the strip: track info, the photo banner and the controls.
+    private func normalTrackBlock(side: CGFloat) -> some View {
+        VStack(spacing: 0) {
             TrackInfo(title: trackTitle, subtitle: trackSubtitle)
                 .frame(width: side)
+                .matchedGeometryEffect(id: "track", in: playerNS, properties: .position)
                 .padding(.top, 20)
             if bleManager.photoHold {
                 photoBanner
                     .frame(width: side)
                     .padding(.top, 12)
             }
-            Spacer(minLength: 16)
             PlaybackControls(spotifyManager: spotifyManager)
-            NowPlayingFooter(primary: footerPrimary, secondary: footerSecondary)
-                .padding(.top, 6)
+                .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
+                .padding(.top, 18)
         }
-        .padding(.horizontal, theme.margin)
-        .frame(maxWidth: .infinity)
     }
 
-    /// Nerd mode: smaller cover, track info and controls, then the stats in their own scroll area.
-    /// The top part is fixed height; only the stats scroll, so the cover and controls stay put.
-    private func nerdColumn(size: CGSize) -> some View {
-        let side = ArtMetrics.compactSide(for: size, margin: theme.margin)
-        return VStack(spacing: 0) {
-            Color.clear.frame(height: 4)
-            art(side: side)
-            strip
-                .frame(width: side)
-                .padding(.top, 8)
-            TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: true)
+    /// Normal mode's footer and, when there is room, a quiet line of this session's stats.
+    private func normalLowerBlock(size: CGSize) -> some View {
+        VStack(spacing: 0) {
+            NowPlayingFooter(primary: footerPrimary, secondary: footerSecondary)
                 .padding(.top, 6)
+            if ArtMetrics.showsSummary(for: size, dynamicTypeSize: dynamicTypeSize),
+               !bleManager.transferLog.isEmpty {
+                SessionSummary(entries: bleManager.transferLog)
+                    .padding(.top, 18)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    /// Nerd mode, right of the cover: title and artist, then the controls, bottom-aligned with the art.
+    private func nerdTrackColumn(side: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: true, leading: true)
+                .matchedGeometryEffect(id: "track", in: playerNS, properties: .position)
+            Spacer(minLength: 0)
+            PlaybackControls(spotifyManager: spotifyManager, compact: true)
+                // The first button's 44 pt frame is wider than its glyph: line the glyph up with the text.
+                .padding(.leading, -10)
+                .matchedGeometryEffect(id: "controls", in: playerNS, properties: .position)
+        }
+        .frame(maxWidth: .infinity, minHeight: side, alignment: .topLeading)
+        .environment(\.themeTextScale, ArtMetrics.compactTextScale)
+    }
+
+    /// Nerd mode under the strip: the photo banner, then the live details + session log.
+    private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
+        VStack(spacing: 0) {
             if bleManager.photoHold {
                 photoBanner
             }
-            PlaybackControls(spotifyManager: spotifyManager, compact: true)
             ThemedDivider()
-                .padding(.top, 2)
-            ScrollView(.vertical, showsIndicators: true) {
-                NerdStatsView(bleManager: bleManager, spotifyManager: spotifyManager)
-                    .padding(.top, 12)
-                    .padding(.bottom, 16)
+                .padding(.top, 8)
+            if showsLower {
+                NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
+                    .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
+                    .frame(maxHeight: scrolls ? nil : CGFloat.infinity)
+                    .transition(lowerTransition)
+            } else {
+                Spacer(minLength: 0)
             }
         }
         .environment(\.themeTextScale, ArtMetrics.compactTextScale)
-        .padding(.horizontal, theme.margin)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .transition(lowerTransition)
     }
 
-    /// The cover. While an uploaded photo is up, tapping it goes back to Spotify (like the banner).
+    /// The cover. Tap: back to Spotify while a photo is up, otherwise the last photo again.
     private func art(side: CGFloat) -> some View {
         let photoUp = bleManager.photoHold
+        let canReshow = !photoUp && bleManager.lastPhotoJPEG != nil
         return ArtStage(
             image: shownImage,
             side: side,
@@ -292,14 +451,13 @@ struct NowPlayingScreen: View {
             event: bleManager.transitionEvent
         )
         .contentShape(Rectangle())
-        .onTapGesture {
-            if bleManager.photoHold { backToSpotify() }
-        }
-        .accessibilityAddTraits(photoUp ? .isButton : [])
-        .accessibilityHint(photoUp ? "Double-tap to go back to Spotify" : "")
-        .accessibilityAction {
-            if bleManager.photoHold { backToSpotify() }
-        }
+        .onTapGesture { coverTapped() }
+        .accessibilityAddTraits(photoUp || canReshow ? .isButton : [])
+        .accessibilityHint(
+            photoUp ? "Double-tap to go back to Spotify"
+                : (canReshow ? "Double-tap to show your last photo on the display" : "")
+        )
+        .accessibilityAction { coverTapped() }
     }
 
     private var strip: some View {
@@ -396,6 +554,69 @@ struct NowPlayingScreen: View {
             return "Spotify rate limited \u{2014} retrying soon"
         }
         return nil
+    }
+}
+
+/// Wraps `content` in a vertical ScrollView only when `enabled` (accessibility text sizes), so the
+/// normal layout keeps its centring and nerd mode's log keeps its own scrolling otherwise.
+private struct ScrollIf<Content: View>: View {
+    let enabled: Bool
+    private let content: () -> Content
+
+    init(enabled: Bool, @ViewBuilder content: @escaping () -> Content) {
+        self.enabled = enabled
+        self.content = content
+    }
+
+    var body: some View {
+        if enabled {
+            ScrollView(.vertical, showsIndicators: false) {
+                content()
+            }
+        } else {
+            content()
+        }
+    }
+}
+
+/// Normal mode's quiet stats line: the last transfer, cache hits and the average fresh send, from
+/// this session's transfer log (`BLEManager.transferLog`). The full stats are in Settings.
+struct SessionSummary: View {
+    let entries: [TransferLogEntry]
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 26) {
+            if let last = entries.last {
+                cell(
+                    value: "\(theme.id.seconds(last.totalMs)) \(theme.id.text(last.cacheHit ? .cachedWord : .freshWord))",
+                    label: theme.id.text(.summaryLast)
+                )
+            }
+            if let rate = SessionStats.hitRatePercent(entries) {
+                cell(value: "\(rate)%", label: theme.id.text(.summaryHitRate))
+            }
+            if let avg = SessionStats.averageMs(entries, cacheHit: false) {
+                cell(value: theme.id.seconds(avg), label: theme.id.text(.summaryAvgNew))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func cell(value: String, label: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .themeText(.phaseValue)
+                .foregroundStyle(theme.inkSoft)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(label)
+                .themeText(.statCaption)
+                .foregroundStyle(theme.inkFaint)
+                .lineLimit(1)
+        }
     }
 }
 
@@ -500,19 +721,32 @@ struct StatusHeader: View {
         return Button {
             extras.onToggleNerdMode()
         } label: {
-            Image(systemName: on ? "terminal.fill" : "terminal")
-                .font(.system(size: 18, weight: on ? .semibold : .regular))
-                .foregroundStyle(on ? theme.ink : theme.headerLink)
-                .frame(width: 44, height: 44)
-                .background {
-                    if on {
-                        // Highlight disc as a second "on" cue besides the filled symbol.
-                        Circle()
-                            .fill(theme.rule)
-                            .frame(width: 36, height: 36)
-                    }
-                }
-                .contentShape(Rectangle())
+            // Both symbols stay in the tree and cross-fade with a little scale (iOS 16 has no symbol
+            // content transitions). The highlight disc is a second "on" cue besides the filled symbol.
+            let pop: CGFloat = reduceMotion ? 1 : 0.6
+            ZStack {
+                Circle()
+                    .fill(theme.rule)
+                    .frame(width: 36, height: 36)
+                    .scaleEffect(on ? 1 : (reduceMotion ? 1 : 0.5))
+                    .opacity(on ? 1 : 0)
+                Image(systemName: "terminal")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(theme.headerLink)
+                    .scaleEffect(on ? pop : 1)
+                    .opacity(on ? 0 : 1)
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(theme.ink)
+                    .scaleEffect(on ? 1 : pop)
+                    .opacity(on ? 1 : 0)
+            }
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .animation(
+                reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 0.7),
+                value: on
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Nerd mode, live stats")
@@ -963,25 +1197,29 @@ struct LiveStrip: View {
 struct TrackInfo: View {
     let title: String
     let subtitle: String?
-    /// Nerd mode: one line each (the text itself is scaled down by `themeTextScale`).
+    /// Nerd mode: tighter (the text itself is scaled down by `themeTextScale`).
     var compact = false
+    /// Nerd mode's player row: left-aligned next to the cover; the title may take two lines.
+    var leading = false
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(spacing: compact ? 2 : 5) {
+        let textAlign: TextAlignment = leading ? .leading : .center
+        let frameAlign: Alignment = leading ? .leading : .center
+        VStack(alignment: leading ? .leading : .center, spacing: compact ? 2 : 5) {
             Text(title)
                 .themeText(.trackTitle)
                 .foregroundStyle(theme.ink)
-                .multilineTextAlignment(.center)
-                .lineLimit(compact ? 1 : 2)
-                .frame(maxWidth: .infinity)
+                .multilineTextAlignment(textAlign)
+                .lineLimit(compact && !leading ? 1 : 2)
+                .frame(maxWidth: .infinity, alignment: frameAlign)
             if let subtitle {
                 Text(subtitle)
                     .themeText(.trackArtist)
                     .foregroundStyle(theme.inkSoft)
-                    .multilineTextAlignment(.center)
+                    .multilineTextAlignment(textAlign)
                     .lineLimit(compact ? 1 : 2)
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, alignment: frameAlign)
             }
         }
         .accessibilityElement(children: .combine)
@@ -1001,7 +1239,8 @@ struct PlaybackControls: View {
     var body: some View {
         let skip = compact ? skipSize * 0.8 : skipSize
         let play = compact ? playSize * 0.75 : playSize
-        HStack(spacing: compact ? 26 : 34) {
+        // Compact sits beside the nerd-mode cover, so its 44 pt buttons nearly touch.
+        HStack(spacing: compact ? 8 : 34) {
             control(.previous, size: skip, minFrame: 44, color: theme.control, label: "Previous track") {
                 Task { await spotifyManager.skipToPrevious() }
             }

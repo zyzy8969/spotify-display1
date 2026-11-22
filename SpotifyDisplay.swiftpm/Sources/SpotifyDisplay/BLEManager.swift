@@ -137,6 +137,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupportsTransitionMask = false
     /// A photo the person uploaded is on the display: Spotify sends are paused until `endPhotoHold()`.
     @Published private(set) var photoHold = false
+    /// The last photo the person uploaded (square JPEG), so tapping the cover can show it again.
+    /// In memory only: gone when the app quits.
+    @Published private(set) var lastPhotoJPEG: Data?
 
     /// Set in `centralManager(_:willRestoreState:)` and consumed when the central becomes `.poweredOn`.
     private var pendingRestoredPeripheral: CBPeripheral?
@@ -377,10 +380,13 @@ final class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    /// Sends the person's enabled-transitions list to the board (BLE_PROTOCOL 1.12). Only boards that
-    /// announced `CAPS:transitions` get it; older firmware would just log a bad magic.
-    func applyTransitionPrefs() {
-        guard boardSupportsTransitionMask, isConnected, let p = peripheral, let c = cacheChar else { return }
+    /// Sends the person's enabled-transitions list to the board (BLE_PROTOCOL 1.12). Normally only
+    /// boards that announced `CAPS:transitions` get it. `beforeCaps`: send anyway (right after READY,
+    /// before the first cover is drawn and before the stats reply that carries `CAPS:` can arrive);
+    /// older firmware just logs "Bad magic" and ignores it. The board never replies to this write, so
+    /// it is not an owed cache reply.
+    func applyTransitionPrefs(beforeCaps: Bool = false) {
+        guard boardSupportsTransitionMask || beforeCaps, isConnected, let p = peripheral, let c = cacheChar else { return }
         let mask = TransitionPrefs.currentMask
         var packet = Data()
         withUnsafeBytes(of: transitionMaskMagic.littleEndian) { packet.append(contentsOf: $0) }
@@ -405,6 +411,7 @@ final class BLEManager: NSObject, ObservableObject {
         guard boardSupportsTransitionMask else {
             throw SpotifyDisplayError.bleTransferRejected("This display's firmware is too old for photo upload. Flash the latest firmware.")
         }
+        lastPhotoJPEG = jpeg
         holdTransferBackgroundTime()
         defer { releaseTransferBackgroundTime() }
         let hadHold = photoHold
@@ -1161,6 +1168,10 @@ final class BLEManager: NSObject, ObservableObject {
             // Re-apply persisted brightness value on every reconnect.
             setBrightness(brightness)
             setStatusLedLevel(statusLedLevel)
+            // The board's mask resets to all-on at boot. Send ours before the resync below draws the
+            // first cover (writes on one characteristic are handled in order, so the board has the
+            // mask before that cache check). The CAPS:transitions handler sends it again later.
+            applyTransitionPrefs(beforeCaps: true)
             // Trigger immediate SpotifyManager resync — works even if app is in background.
             onReadyCallback?()
             defer { sdCacheCountLoading = false }

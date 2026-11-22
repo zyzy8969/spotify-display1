@@ -12,6 +12,9 @@ import UIKit
 /// same time as the keychain, then ends on the real cover (`image`) once the screen hands it over.
 /// Older firmware: the effect it announced after drawing (`event`) is replayed approximately
 /// (`TransitionStage`). Reduce Motion: the cover cuts.
+/// Switched-off transitions (`TransitionPrefs`) never play here: a mirrored or replayed effect that is
+/// off, a board announcement of index 255 (everything off) and the plain crossfade for changes the
+/// board did not announce all cut to the new cover instead.
 struct ArtStage: View {
     let image: UIImage?
     let side: CGFloat
@@ -23,6 +26,8 @@ struct ArtStage: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var mirror = TransitionMirror.shared
+    /// The person's switched-off transitions (same storage as the picker).
+    @AppStorage(TransitionPrefs.storageKey) private var disabledRaw = ""
 
     // Approximate replay (older firmware).
     /// The cover that was showing before the latest change (kept only while its transition plays).
@@ -96,7 +101,17 @@ struct ArtStage: View {
     /// The board transition being mirrored right now, if any.
     private var activeMirror: TransitionMirror.Playback? {
         guard !reduceMotion, let pb = mirror.playback, pb.id != finishedMirrorID else { return nil }
+        // A real board transition the person switched off (the board drew it before our mask got
+        // there, or its firmware ignores the mask): don't play it here, cut when the cover arrives.
+        // Index 255 (none) stays: its single-frame render is a cut on the board's clock.
+        if TransitionCatalog.info(id: pb.index) != nil, !isSwitchedOn(pb.index) { return nil }
         return pb
+    }
+
+    /// Transition `id` may be shown: it is a known effect and not switched off (so at least one is on).
+    private func isSwitchedOn(_ id: Int) -> Bool {
+        guard TransitionCatalog.info(id: id) != nil else { return false }
+        return !TransitionPrefs.disabledSet(from: disabledRaw).contains(id)
     }
 
     /// Precomputed frames picked by the clock: no per-frame masks or effects on the main thread.
@@ -160,6 +175,12 @@ struct ArtStage: View {
         } else {
             playID = 22  // no announcement for this change: plain crossfade
             playDuration = 0.4
+        }
+        // Switched off (or everything is off): the cover cuts, like the board does.
+        guard isSwitchedOn(playID) else {
+            playStart = nil
+            outgoing = nil
+            return
         }
         outgoing = old
         playStart = Date()
