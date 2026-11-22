@@ -502,8 +502,14 @@ final class BLEManager: NSObject, ObservableObject {
         log("photo   released, Spotify resumes", kind: .info)
     }
 
-    /// Shows a user photo on the display. `jpeg` is already cropped square. Not saved to the SD cache
-    /// (header byte 0xFD) and Spotify sends stay paused (`photoHold`) until `endPhotoHold()`.
+    /// The last photo converted for the keychain (cache-key source, RGB565 frame), so showing the same
+    /// photo again skips the dithering.
+    private var photoFrameCache: (key: String, frame: Data)?
+
+    /// Shows a user photo on the display. `jpeg` is already cropped square. Spotify sends stay paused
+    /// (`photoHold`) until `endPhotoHold()`. Since 2026-11-22 a photo is saved on the keychain's card
+    /// under its own key (its bytes' hash) like a cover: the first show is a normal transfer, every
+    /// later show (album -> photo swap) is a cache hit drawn from the card, about a second.
     func sendPhoto(jpeg: Data) async throws {
         guard boardSupportsTransitionMask else {
             throw SpotifyDisplayError.bleTransferRejected("This display's firmware is too old for photo upload. Flash the latest firmware.")
@@ -524,27 +530,83 @@ final class BLEManager: NSObject, ObservableObject {
         defer { if sendStageGen == myStageGen { sendStage = .idle } }
         let epochAtStart = transferEpoch
         let totalStart = CFAbsoluteTimeGetCurrent()
+        let keySource = String.photoCacheKeySource(jpeg: jpeg)
+        let cacheKey = keySource.md5Digest
         do {
+            // The view takes the new picture when the stage goes back to idle with a new log entry.
             sendStage = .preparingFresh
             currentAlbumArt = jpeg
+            // Converted once per photo; a re-show reuses it (and it overlaps the cache check).
+            let cachedFrame = photoFrameCache?.key == keySource ? photoFrameCache?.frame : nil
+            let frameTask = Task<Data?, Never> {
+                if let cachedFrame { return cachedFrame }
+                return try? await Task.detached(priority: .userInitiated) {
+                    try ImageProcessor.convertToRGB565(imageData: jpeg)
+                }.value
+            }
+
+            // 1) Already on the card: the board draws it from SD.
+            setLivePhase("photo: cache check…")
+            let checkStart = CFAbsoluteTimeGetCurrent()
+            awaitingCacheRenderConfirm = true
+            cacheRenderConfirmed = false
+            noteDrawRequest(.cacheCheck(frameTask))
+            let hitDrawGen = drawRequestGen
+            var hit = false
+            do {
+                hit = try await checkCacheHit(cacheKey: cacheKey)
+            } catch {
+                awaitingCacheRenderConfirm = false
+                cacheRenderConfirmed = false
+                throw error
+            }
+            let checkMs = ms(since: checkStart)
+            try ensureTransferEpoch(epochAtStart)
+            if hit {
+                do {
+                    try await awaitCacheRenderConfirmation()
+                    Task { @MainActor in
+                        if let frame = await frameTask.value, self.drawRequestGen == hitDrawGen {
+                            self.boardFrame = frame
+                            self.photoFrameCache = (keySource, frame)
+                        }
+                    }
+                    let totalMs = ms(since: totalStart)
+                    lastTransferResult = "Photo from cache  \(secondsLabel(fromMs: totalMs))"
+                    boardAckStatus = "Board ACK: photo (cache hit)"
+                    appendLog(TransferLogEntry(
+                        cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: checkMs,
+                        downloadMs: nil, convertMs: nil, uploadMs: 0,
+                        totalMs: totalMs, outcome: "photo"
+                    ))
+                    setLivePhase("last: photo from cache \(secondsLabel(fromMs: totalMs))")
+                    return
+                } catch {
+                    setLivePhase("photo: cache render failed, sending…")
+                }
+            }
+            awaitingCacheRenderConfirm = false
+            cacheRenderConfirmed = false
+
+            // 2) First show (or the card lost it): send it, and the board saves it under the key.
             setLivePhase("photo: dithering…")
             let convertStart = CFAbsoluteTimeGetCurrent()
-            let rgb565 = try await Task.detached(priority: .userInitiated) {
-                try ImageProcessor.convertToRGB565(imageData: jpeg)
-            }.value
+            guard let rgb565 = await frameTask.value, rgb565.count == imagePayloadBytes else {
+                throw SpotifyDisplayError.conversionFailed
+            }
+            photoFrameCache = (keySource, rgb565)
             let convertMs = ms(since: convertStart)
             try ensureTransferEpoch(epochAtStart)
-            guard rgb565.count == imagePayloadBytes else { throw SpotifyDisplayError.conversionFailed }
 
             let uploadStart = CFAbsoluteTimeGetCurrent()
             setLivePhase("photo: sending BLE…")
-            _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, displayOnly: true)
+            _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart)
             let uploadMs = ms(since: uploadStart)
             let totalMs = ms(since: totalStart)
             lastTransferResult = "Photo shown  \(secondsLabel(fromMs: totalMs))"
-            boardAckStatus = "Board ACK: photo shown (not saved)"
+            boardAckStatus = "Board ACK: photo shown (saved for next time)"
             appendLog(TransferLogEntry(
-                cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: 0,
+                cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: checkMs,
                 downloadMs: nil, convertMs: convertMs, uploadMs: uploadMs,
                 totalMs: totalMs, outcome: "photo"
             ))

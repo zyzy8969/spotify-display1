@@ -18,6 +18,13 @@ extension String {
         ((albumId?.isEmpty == false) ? "album:\(albumId!)" : "url:\(imageURL)") + DitherMode.current.cacheKeySuffix
     }
 
+    /// Cache identifier source for an uploaded photo: its bytes' hash, so the same photo always maps to
+    /// the same entry on the keychain's card (and a re-show is a cache hit).
+    static func photoCacheKeySource(jpeg: Data) -> String {
+        let hex = Insecure.MD5.hash(data: jpeg).map { String(format: "%02x", $0) }.joined()
+        return "photo:" + hex + DitherMode.current.cacheKeySuffix
+    }
+
     /// BLE transport key: 16-byte digest of canonical source.
     static func cacheKeyDigest(albumId: String?, imageURL: String) -> Data {
         cacheKeySource(albumId: albumId, imageURL: imageURL).md5Digest

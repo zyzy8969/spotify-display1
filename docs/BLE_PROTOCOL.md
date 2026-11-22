@@ -10,6 +10,10 @@ then shows no "new" / "cache" word).
   fresh frames right after the transition (before the SD save and the `SUCCESS` ACK), cache hits after the
   draw. Not sent for store-only (`0xFE`) frames. The app pops its "new" / "cache" word on it, so the word
   appears when the keychain turns green. Photos (`0xFD`) send it too; the app ignores it for them.
+- App behaviour (no wire change): photos are no longer sent display-only. The app cache-checks a photo
+  under its own key (MD5 of `photo:<md5 of the JPEG>` + dither suffix); a hit draws it from SD, a miss sends
+  it with a `0xFF` header so the board saves it. The first show is a transfer, every later album -> photo
+  swap is a cache hit. `0xFD` stays valid for other clients.
 
 Changes in 1.17 summary: (new-song cache check: songs the keychain has never shown light the orange LED, even from SD.)
 
