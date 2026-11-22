@@ -42,7 +42,9 @@
 #define CACHE_INDEX_MAX_ENTRIES 1024
 
 // Performance and timing constants
-#define TFT_BRIGHTNESS_MAX 200
+// Backlight level at power-up, before the app sends its saved slider value (out of 255).
+// 180 = owner's preferred level (2026-11-22), ~70% of the panel's rated backlight current.
+#define TFT_BRIGHTNESS_MAX 180
 // LEDC PWM channel driving the backlight. NOT a GPIO: on Arduino-ESP32 core 2.x
 // ledcWrite()/ledcSetup() take a CHANNEL (0-7 on the S3), while ledcAttachPin()
 // binds that channel to the TFT_BL pin. Passing the pin number to ledcWrite()
@@ -2548,15 +2550,19 @@ void clearCacheDirectory() {
 //   idle / just showing a cover      -> off
 // Prefetch (store-only) transfers and prefetch probes stay dark: the song on screen isn't changing.
 // ============================================================================
-#define STATUS_LED_MAX 64  // ceiling out of 255 (~25%; was 26). Owner wanted it brighter 2026-11-22.
-                           // Full WS2812 is blinding through a thin case.
+#define STATUS_LED_MAX 120  // ceiling out of 255 (~47%). Owner: as bright as reasonable, under 50%
+                            // (2026-11-22). Only lit ~1-2 s per song, ~10 mA: no real heat.
+// A cache miss means a cover is coming, but the phone first downloads and dithers it (~0.5-1.5 s).
+// The LED goes orange right away (LED_WAITING) instead of sitting dark; if nothing arrives in this
+// long (skip, phone gave up), it goes off.
+#define LED_WAITING_TIMEOUT_MS 4000
 
 #define LED_RGB_BLUE   0x0050FF
 #define LED_RGB_ORANGE 0xFF5A00
 #define LED_RGB_GREEN  0x00FF28
 #define LED_RGB_RED    0xFF0000
 
-enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_TRANSFER, LED_DONE, LED_ERROR };
+enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR };
 static LedMode ledMode = LED_OFF;
 static unsigned long ledModeSince = 0;
 static uint32_t ledLastWritten = 0xFFFFFFFF;
@@ -2585,13 +2591,16 @@ static void ledUpdate() {
     case LED_CACHE:
       ledShow(LED_RGB_BLUE, 255);  // solid while the SD lookup / cache-hit draw blocks loop()
       break;
+    case LED_WAITING:  // same orange pulse at the 0% brightness (receivedBytes is 0 here)
+      if (t >= LED_WAITING_TIMEOUT_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); break; }
+      // fall through
     case LED_TRANSFER: {
       // Base brightness follows progress (40% -> 100%); a 1.2 s triangle pulse rides on top.
       // Progress is against this frame's wire size: a compressed frame (1.11) is smaller than
       // IMAGE_SIZE. Both are written on BTC_TASK; a torn read only nudges brightness.
       uint32_t want = expectedSize;
       if (want == 0 || want > IMAGE_SIZE) want = IMAGE_SIZE;
-      uint32_t got = receivedBytes;
+      uint32_t got = ledMode == LED_WAITING ? 0 : receivedBytes;
       if (got > want) got = want;
       uint32_t base = 100 + (got * 155) / want;
       uint32_t phase = t % 1200;
@@ -2799,7 +2808,7 @@ void loop() {
         pMsgChar->notify();
         ledSetMode(LED_DONE);
       } else {
-        ledSetMode(LED_OFF);  // a fresh transfer (orange) follows
+        ledSetMode(LED_WAITING);  // a fresh transfer follows
         Serial.println("ERROR: Cache load failed — reporting miss so the client sends fresh");
         // The client is waiting on the Cache characteristic, not the Image one; without this
         // reply it times out instead of falling back to a normal transfer.
@@ -2809,7 +2818,7 @@ void loop() {
       }
     } else {
       Serial.println("BLE: Cache MISS");
-      ledSetMode(LED_OFF);  // the phone now downloads + converts; orange starts with the first chunk
+      ledSetMode(LED_WAITING);  // orange now, while the phone downloads + converts the cover
       String missTiming = "CACHE_MISS_MS:" + String((unsigned long)cacheCheckMs);
       pMsgChar->setValue(missTiming.c_str());
       pMsgChar->notify();
@@ -2873,6 +2882,8 @@ void loop() {
     String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                                           pendingTransition, /*quick=*/true);
     unsigned long displayTime = millis() - displayStart;
+    // Green as soon as the cover is on screen, not after the SD save (~0.4 s later).
+    ledSetMode(LED_DONE);
 
     unsigned long saveStart = millis();
     saveToCache(transferCacheKey);
@@ -2889,7 +2900,6 @@ void loop() {
 
     pMsgChar->setValue("SUCCESS");
     pMsgChar->notify();
-    ledSetMode(LED_DONE);
 
     completedImageBytes = 0;
     }  // not store-only
