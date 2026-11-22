@@ -160,6 +160,19 @@ uint8_t pendingTransition = 0xFF;  // 0xFF means random transition
 #define TRANSITION_STORE_ONLY 0xFE
 volatile bool cacheProbeOnly = false;  // the pending cache check is a probe
 
+// BLE_PROTOCOL 1.12.
+// - TRANSITION_MASK_MAGIC on the Cache characteristic: 4-byte magic + 8-byte LE bitmask (bit i = header
+//   transition index i may be picked at random) + 8 padding bytes. Sent by the app on every connect.
+//   Not persisted: after a power cycle every transition is allowed until the app says otherwise.
+// - Image header transition byte TRANSITION_DISPLAY_ONLY: draw the frame (random enabled transition)
+//   but do NOT save it to SD. Used for photo uploads.
+#define TRANSITION_MASK_MAGIC 0xCAC4E1EBu
+#define TRANSITION_DISPLAY_ONLY 0xFD
+// Two 32-bit halves (written from the BLE callback, read in loop()); a torn update only ever mixes two
+// complete masks, which is harmless.
+static volatile uint32_t transitionMaskLo = 0xFFFFFFFFu;
+static volatile uint32_t transitionMaskHi = 0xFFFFFFFFu;
+
 // Transition effects enum. Values are the BLE header's transitionIndex (docs/BLE_PROTOCOL.md),
 // so they are fixed: never renumber. Retired slots stay reserved and draw their twin when forced.
 enum TransitionType {
@@ -410,6 +423,18 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
         // Stats request (iOS app): same 20-byte write, magic + padding — no cache key
         if (magic == 0xC0FFEEE1) {
             statsRequestPending = true;
+            return;
+        }
+
+        // Enabled-transitions mask (iOS app, 1.12): magic + u64 LE bitmask + 8 bytes padding.
+        // Only stores two words; nothing else to do, so it is safe on this task.
+        if (magic == TRANSITION_MASK_MAGIC) {
+            auto word = [&](size_t off) {
+                return (uint32_t)(uint8_t)value[off] | ((uint32_t)(uint8_t)value[off + 1] << 8) |
+                       ((uint32_t)(uint8_t)value[off + 2] << 16) | ((uint32_t)(uint8_t)value[off + 3] << 24);
+            };
+            transitionMaskLo = word(4);
+            transitionMaskHi = word(8);
             return;
         }
 
@@ -1074,6 +1099,11 @@ void drawTileFlip(const uint16_t* oldB, const uint16_t* newB) {
         int w = max(1, (int)(ts * fabsf(cosf(PI * lt))));
         const uint16_t* src = lt < 0.5f ? oldB : newB;
         int dx = tx * ts + (ts - w) / 2;
+        if (w >= ts) {  // tile not flipping yet / already done: plain row copies, no per-pixel math
+          for (int y = ty * ts; y < (ty + 1) * ts; y++)
+            memcpy(composeBuffer + y * CW + tx * ts, src + y * CW + tx * ts, ts * 2);
+          continue;
+        }
         for (int y = ty * ts; y < (ty + 1) * ts; y++)
           squashRow(composeBuffer + y * CW, src + y * CW, tx * ts, ts, dx, w);
       }
@@ -1288,16 +1318,37 @@ void drawCubeTurn(const uint16_t* oldB, const uint16_t* newB) {
   for (int f = 1; f <= frames; f++) {
     float th = easeInOut((float)f / frames) * (PI / 2), sn = sinf(th), cs = cosf(th);
     float wa = CW * cs;
-    memset(composeBuffer, 0, IMAGE_SIZE);
+    // Only the black margins above and below the squashed faces need clearing: every column rewrites
+    // rows y0..y1, and h >= 1 - 0.18 * max(sn, cs), so rows in [band, CH - band) are always overwritten.
+    int band = min(CH / 2, (int)ceilf(120.0f * 0.18f * fmaxf(sn, cs)) + 1);
+    memset(composeBuffer, 0, band * CW * 2);
+    memset(composeBuffer + (CH - band) * CW, 0, band * CW * 2);
     for (int x = 0; x < CW; x++) {
       const uint16_t* D; float u, h, sh;
       if (x < wa) { D = oldB; u = x / wa; h = 1.0f - 0.18f * sn * (1.0f - u); sh = 1.0f - 0.55f * sn; }
       else { D = newB; u = (x - wa) / fmaxf(1.0f, CW - wa); h = 1.0f - 0.18f * cs * u; sh = 1.0f - 0.55f * cs; }
       int sx = clampPx((int)(u * CW));
-      for (int y = 0; y < CH; y++) {
-        float sy = (y - 120) / h + 120;
-        if (sy < 0 || sy >= CH) continue;
-        composeBuffer[y * CW + x] = shade565(D[(int)sy * CW + sx], sh);
+      // Per column: the visible rows are a single range, source rows step by a constant (16.16 fixed
+      // point) and the shade factor is constant, so the inner loop has no float math, no divide and no
+      // per-pixel range test (it used to have all three, for each of 57,600 pixels per frame).
+      int y0 = max(0, (int)ceilf(120.0f - 120.0f * h)), y1 = min(CH, (int)ceilf(120.0f + 120.0f * h));
+      if (y1 <= y0) continue;
+      float inv = 1.0f / h;
+      int32_t step = (int32_t)(inv * 65536.0f);
+      int32_t pos = (int32_t)(((y0 - 120) * inv + 120.0f) * 65536.0f);
+      int k = (int)(sh * 256.0f);
+      if (k < 0) k = 0;
+      const uint16_t* col = D + sx;
+      uint16_t* out = composeBuffer + y0 * CW + x;
+      for (int y = y0; y < y1; y++, pos += step, out += CW) {
+        int syi = pos >> 16;
+        if (syi < 0) syi = 0; else if (syi > CH - 1) syi = CH - 1;
+        uint16_t c = col[syi * CW];
+        int r = (((c >> 11) & 31) * k) >> 8, g = (((c >> 5) & 63) * k) >> 8, b = ((c & 31) * k) >> 8;
+        if (r > 31) r = 31;
+        if (g > 63) g = 63;
+        if (b > 31) b = 31;
+        *out = (uint16_t)((r << 11) | (g << 5) | b);
       }
     }
     pushComposedFrame();
@@ -1502,6 +1553,14 @@ void drawSandPile(const uint16_t* oldB, const uint16_t* newB) {
     memcpy(composeBuffer, oldB, IMAGE_SIZE);
     for (int y = CH - 1; y >= 0; y--) {
       float rowLand = (CH - 1 - y) / (float)CH * 0.72f + 0.06f;
+      // Whole-row shortcuts (the per-pixel loop below is the slow part: hash + float math x 57,600):
+      // every grain in this row has landed -> copy the row; none has started falling -> skip it.
+      // Grain landing times span rowLand .. rowLand + 0.08 (hash/255 * 0.08), start = landing - 0.2.
+      if (t >= rowLand + 0.08f) {
+        memcpy(composeBuffer + y * CW, newB + y * CW, CW * 2);
+        continue;
+      }
+      if (t < rowLand - 0.2f) continue;
       for (int x = 0; x < CW; x++) {
         float tl = rowLand + cellHash(x, y) / 255.0f * 0.08f, ts = tl - 0.2f;
         if (t < ts) continue;
@@ -1788,12 +1847,17 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
   Serial.println("Transition complete!");
 }
 
+// True if the app left transition `t` switched on (BLE_PROTOCOL 1.12 mask).
+static bool transitionEnabled(int t) {
+  if (t < 0 || t >= TRANSITION_COUNT) return false;
+  return t < 32 ? ((transitionMaskLo >> t) & 1u) : ((transitionMaskHi >> (t - 32)) & 1u);
+}
+
+static TransitionType pickEnabledTransition(bool quickOnly);  // defined after QUICK_TRANSITIONS
+
 String drawImageWithRandomTransition(uint16_t* buffer, int width, int height) {
-  // Pick a random live transition (skip retired slots and the last one used)
-  TransitionType transition;
-  do {
-    transition = (TransitionType)random(0, TRANSITION_COUNT);
-  } while (isRetiredTransition(transition) || transition == lastTransition);
+  // Pick a random live, enabled transition (skip retired slots and the last one used)
+  TransitionType transition = pickEnabledTransition(false);
 
   lastTransition = transition;
   String transitionName = getTransitionName(transition);
@@ -1826,12 +1890,38 @@ static const TransitionType QUICK_TRANSITIONS[] = {
   TRANSITION_LUMA_WIPE,
 };
 
+// Picks a random transition that is live, enabled and (when there is a choice) not the last one used.
+// `quickOnly` restricts it to QUICK_TRANSITIONS; if none of those is enabled it falls back to any enabled
+// one, because an explicit choice in the app beats the "fast for new songs" preference. If the mask
+// leaves nothing enabled at all, everything is allowed (never get stuck without a transition).
+static TransitionType pickEnabledTransition(bool quickOnly) {
+  const int quickN = sizeof(QUICK_TRANSITIONS) / sizeof(QUICK_TRANSITIONS[0]);
+  auto isQuick = [quickN](int t) {
+    for (int i = 0; i < quickN; i++) if ((int)QUICK_TRANSITIONS[i] == t) return true;
+    return false;
+  };
+  for (int pass = 0; pass < 3; pass++) {
+    // pass 0: enabled (+quick), not the last one; pass 1: same but repeats allowed;
+    // pass 2: enabled at any speed (only reached when quickOnly found nothing).
+    TransitionType cand[TRANSITION_COUNT];
+    int n = 0;
+    for (int t = 0; t < TRANSITION_COUNT; t++) {
+      if (isRetiredTransition((TransitionType)t) || !transitionEnabled(t)) continue;
+      if (pass < 2 && quickOnly && !isQuick(t)) continue;
+      if (pass == 0 && (TransitionType)t == lastTransition) continue;
+      cand[n++] = (TransitionType)t;
+    }
+    if (n > 0) return cand[random(0, n)];
+  }
+  // Nothing enabled: allow every live transition except the last one used.
+  TransitionType t;
+  do { t = (TransitionType)random(0, TRANSITION_COUNT); }
+  while (isRetiredTransition(t) || t == lastTransition);
+  return t;
+}
+
 String drawImageWithQuickTransition(uint16_t* buffer, int width, int height) {
-  const int n = sizeof(QUICK_TRANSITIONS) / sizeof(QUICK_TRANSITIONS[0]);
-  TransitionType transition;
-  do {
-    transition = QUICK_TRANSITIONS[random(0, n)];
-  } while (transition == lastTransition);
+  TransitionType transition = pickEnabledTransition(true);
   lastTransition = transition;
   String transitionName = getTransitionName(transition);
   Serial.printf("Using transition: %s (quick, new song)\n", transitionName.c_str());
@@ -2693,6 +2783,10 @@ void loop() {
       pMsgChar->setValue("CAPS:deflate");
       pMsgChar->notify();
     }
+    // BLE_PROTOCOL 1.12: the board understands the enabled-transitions mask and the 0xFD display-only
+    // header byte, and announces TRANSITION:<name> after fresh draws too.
+    pMsgChar->setValue("CAPS:transitions");
+    pMsgChar->notify();
     publishCacheCount();
     publishCacheStats();
   }
@@ -2869,14 +2963,23 @@ void loop() {
     memcpy(imageBuffer, rxBuffer, IMAGE_SIZE);
     showingStartupScreen = false;
 
+    // 1.12: a photo upload is shown but never written to SD.
+    const bool displayOnly = (pendingTransition == TRANSITION_DISPLAY_ONLY);
     unsigned long displayStart = millis();
     String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
                                                           pendingTransition, /*quick=*/true);
     unsigned long displayTime = millis() - displayStart;
+    pendingTransition = 0xFF;  // a later cache hit must not inherit this frame's header byte
 
     unsigned long saveStart = millis();
-    saveToCache(transferCacheKey);
+    if (!displayOnly) saveToCache(transferCacheKey);
     unsigned long saveTime = millis() - saveStart;
+
+    // 1.12: tell the app which transition just ran (cache hits already do), before the ACK.
+    String freshTransitionMsg = "TRANSITION:" + transitionName;
+    pMsgChar->setValue(freshTransitionMsg.c_str());
+    pMsgChar->notify();
+    delay(5);
 
     Serial.printf("⚡ Processing: %s draw %lums, save %lums\n", transitionName.c_str(), displayTime, saveTime);
     Serial.println("Image processing complete!");

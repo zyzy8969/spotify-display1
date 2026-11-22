@@ -4,6 +4,7 @@ Last updated: 2026-04-15
 
 ## What was committed
 
+- **2026-11-22, `feat/transition-picker-stats-upload` (BLE 1.12, awaiting device test, uncommitted):** transition on/off picker with live examples (mask sent to the board), fresh draws now announce `TRANSITION:`, the app cover replays the board's announced effect, stats moved from a sheet to General/Live pages on the main screen (Live has a terminal log), photo upload (display-only `0xFD`, not saved to SD, pauses Spotify). Firmware compiles with PlatformIO; the Swift side has NOT been compiled (no Mac) — run the CI `ios` job first. Test script: `docs/VALIDATION_CHECKLIST.md`.
 - **2026-11-22, `feat/faster-transfer` (BLE 1.11, awaiting device test):** deflate-compressed frames, 7.5–15 ms interval + 251-byte DLE request, 5-song prefetch. Old behaviour and rollback steps: `docs/ROLLBACK_FASTER_TRANSFER.md`; pre-change code is tagged `backup/pre-faster-transfer`.
 - **Info.plist:** `UIBackgroundModes` → `bluetooth-central`.
 - **BLEManager:** Core Bluetooth state restoration (`CBCentralManagerOptionRestoreIdentifierKey`, `willRestoreState`, reconnect / rediscover services), `UIApplication.beginBackgroundTask` for the full `processTrack` scope, cancellable 32s post-chunk `SUCCESS` timeout.

@@ -98,8 +98,8 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
   still connected) both the app and the keychain keep the previous cover until the retry lands.
 - Skip right after a cache hit: play a cached song, then skip at once to an uncached one. The
   preview must end on the new song's cover, never flip back to the cached song's cover.
-- Stats sheet opens at half height with a grabber and drags to full; Settings opens full height
-  with no grabber. Both close by swiping down.
+- Settings, Transitions and Photo open as full-height sheets with no grabber and close by swiping down.
+  Stats are no longer a sheet (see the section below).
 - Client ID field: tapping it must not offer saved passwords above the keyboard.
 
 ## Status LED (WS2812B, GPIO15) — branch feat/status-led
@@ -115,3 +115,25 @@ checks in each theme (Settings > look / Theme: Crayon, Quiet, Serif).
   `STATUS_LED_MAX` (26 of 255) in `src/main.cpp`.
 - A red double blink means the board rejected data (`ERROR:*`). Note when it happens: a red blink right
   after a skip is the known stale-chunk race, not an LED bug.
+
+## Transition picker, live mirror, stats pages, photo upload — branch feat/transition-picker-stats-upload (BLE 1.12)
+Needs the new firmware flashed AND the new app build. Serial monitor on (`pio device monitor -b 921600`).
+- Connect: Live tab terminal shows `rx CAPS:transitions` then `tx transition mask: 49 of 49 on`. With
+  old firmware instead, Settings > Transitions shows the "older than 1.12" note and Photo refuses.
+- Picker: Settings > Transitions lists 49 rows, each with a looping A/B example. "Quick only", "All off"
+  and "All on" work; "All off" shows the "display will use all of them" note.
+- Toggle test: switch everything off except ONE transition. Skip through 6+ songs (cached and new): the
+  board must use only that effect every time (serial `Using transition: ...`), and the Live tab shows the
+  same name. Then switch a different one on and confirm it joins the rotation.
+- App vs board: on a cached song and on a new song, the in-app cover must play the same-named effect the
+  board just drew (approximate look, same family; slightly later than the board). Reduce Motion = cut.
+- Fresh draws announce: serial/Live tab show `TRANSITION:<name>` after a NEW (uncached) song too.
+- Stats on the main screen: with "Detailed stats" on, tabs Now Playing | General | Live appear under the
+  header; tap and swipe left/right switch them; vertical scroll still works; there is no Stats popup.
+  General = last transfer, phases, averages, recent records (now with `tr <name>`). Live = last
+  transition card, live status lines, scrolling terminal with tx/rx lines and transitions highlighted.
+- Photo: tap the small photo icon in the header corner, pick a library photo: it is centre-cropped square
+  and sent straight away (no sheet). The board draws it with a transition, serial shows NO `save` for it and the SD count does not rise. Spotify covers stay paused
+  (banner "Photo on display"); "Back to Spotify" redraws the current song. Disconnect/reconnect clears the
+  hold. Try a portrait, a landscape and a screenshot.
+- Regression: rapid skips, disconnect mid-transfer, and a cache-hit-then-skip must behave as before.

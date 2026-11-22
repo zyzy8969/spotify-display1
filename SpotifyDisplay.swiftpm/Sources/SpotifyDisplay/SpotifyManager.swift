@@ -615,6 +615,10 @@ final class SpotifyManager: ObservableObject {
             isPlaying = true
             currentTrack = item
 
+            // A photo the person uploaded is on the display: keep following Spotify for the app's own
+            // screen, but send nothing until they tap "Back to Spotify".
+            if bleManager.photoHold { return }
+
             if let inflight = artInFlightTrackId, inflight != item.id {
                 cancelPrefetch()
                 bleManager.cancelOngoingTransfer()

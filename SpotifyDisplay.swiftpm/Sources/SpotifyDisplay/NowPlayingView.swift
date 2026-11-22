@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 // MARK: - Layout metrics
 
@@ -38,6 +39,9 @@ struct NowPlayingScreen: View {
     let onOpen: (Panel) -> Void
 
     @Environment(\.theme) private var theme
+    /// Which page of the main screen is showing. Stats pages exist only while "show stats" is on.
+    @State private var tab: MainTab = .nowPlaying
+    @State private var photoError: String?
     /// What the keychain shows right now, decoded once per change instead of on every render.
     @State private var shownImage: UIImage?
     /// A fresh send's new cover, held back until the board confirms it. The firmware draws a new
@@ -53,9 +57,35 @@ struct NowPlayingScreen: View {
             let side = ArtMetrics.side(for: geo.size, margin: theme.margin)
             let topGap = ArtMetrics.topGap(for: geo.size)
             let bottomPad = ArtMetrics.bottomPadding(safeAreaBottom: geo.safeAreaInsets.bottom)
-            FitOrScroll {
-                column(side: side, topGap: topGap, bottomPad: bottomPad)
+            Group {
+                if activeTab == .nowPlaying {
+                    FitOrScroll {
+                        column(side: side, topGap: topGap, bottomPad: bottomPad)
+                    }
+                } else {
+                    statsPage(bottomPad: bottomPad)
+                }
             }
+            // Swipe left/right between the pages. Vertical drags still scroll.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 40).onEnded { drag in
+                    guard showStatsLink else { return }
+                    let dx = drag.translation.width
+                    let dy = drag.translation.height
+                    guard abs(dx) > abs(dy) * 1.5 else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        tab = dx < 0 ? activeTab.next : activeTab.previous
+                    }
+                }
+            )
+        }
+        .alert("Photo", isPresented: Binding(
+            get: { photoError != nil },
+            set: { if !$0 { photoError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(photoError ?? "")
         }
         .onAppear {
             shownImage = Self.decode(bleManager.currentAlbumArt)
@@ -95,20 +125,73 @@ struct NowPlayingScreen: View {
         }
     }
 
+    /// Stats off: always Now Playing, whatever page was last open.
+    private var activeTab: MainTab { showStatsLink ? tab : .nowPlaying }
+
+    private var header: some View {
+        StatusHeader(
+            spotifyOn: spotifyManager.isAuthenticated,
+            displayOn: bleManager.isConnected,
+            onPhotoPicked: { item in showPhoto(item) },
+            onOpen: onOpen
+        )
+    }
+
+    /// Loads the picked photo, crops it square and sends it as a display-only frame.
+    private func showPhoto(_ item: PhotosPickerItem) {
+        Task {
+            guard let data = try? await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data),
+                  let jpeg = PhotoPrep.squareJPEG(from: PhotoPrep.downscaled(image, maxSide: 1400)) else {
+                photoError = "Could not read that photo."
+                return
+            }
+            do {
+                try await bleManager.sendPhoto(jpeg: jpeg)
+            } catch is CancellationError {
+            } catch {
+                photoError = error.localizedDescription
+            }
+        }
+    }
+
+    /// General and Live pages: same header and tab bar, then scrolling content instead of the cover.
+    private func statsPage(bottomPad: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            header
+            MainTabBar(selection: $tab)
+                .padding(.top, 4)
+            ScrollView(.vertical, showsIndicators: false) {
+                Group {
+                    if activeTab == .general {
+                        GeneralStatsView(bleManager: bleManager, spotifyManager: spotifyManager)
+                    } else {
+                        LiveView(bleManager: bleManager, spotifyManager: spotifyManager, onOpen: onOpen)
+                    }
+                }
+                .padding(.top, 18)
+                .padding(.bottom, 24)
+            }
+        }
+        .padding(.horizontal, theme.margin)
+        .padding(.bottom, bottomPad)
+        .frame(maxWidth: .infinity)
+    }
+
     private func column(side: CGFloat, topGap: CGFloat, bottomPad: CGFloat) -> some View {
         VStack(spacing: 0) {
-            StatusHeader(
-                spotifyOn: spotifyManager.isAuthenticated,
-                displayOn: bleManager.isConnected,
-                showStatsLink: showStatsLink,
-                onOpen: onOpen
-            )
+            header
+            if showStatsLink {
+                MainTabBar(selection: $tab)
+                    .padding(.top, 4)
+            }
             Color.clear.frame(height: topGap)
             ArtStage(
                 image: shownImage,
                 side: side,
                 label: artLabel,
-                value: artValue
+                value: artValue,
+                event: bleManager.transitionEvent
             )
             LiveStrip(state: stripState)
                 .frame(width: side)
@@ -116,6 +199,11 @@ struct NowPlayingScreen: View {
             TrackInfo(title: trackTitle, subtitle: trackSubtitle)
                 .frame(width: side)
                 .padding(.top, 20)
+            if bleManager.photoHold {
+                photoBanner
+                    .frame(width: side)
+                    .padding(.top, 12)
+            }
             Spacer(minLength: 16)
             PlaybackControls(spotifyManager: spotifyManager)
             NowPlayingFooter(
@@ -182,6 +270,28 @@ struct NowPlayingScreen: View {
         return theme.id.text(.displayReady)
     }
 
+    /// Shown while a photo the person uploaded is on the display (Spotify sends are paused).
+    private var photoBanner: some View {
+        HStack(spacing: 10) {
+            Text("Photo on display")
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+            Spacer(minLength: 8)
+            Button {
+                bleManager.endPhotoHold()
+                Task { await spotifyManager.requestResync(reason: "photo removed") }
+            } label: {
+                Text("Back to Spotify")
+                    .themeText(.rowValue)
+                    .foregroundStyle(theme.ink)
+                    .underline()
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     private var footerSecondary: String? {
         if let error = spotifyManager.lastError, !error.isEmpty {
             return error
@@ -195,11 +305,71 @@ struct NowPlayingScreen: View {
 
 // MARK: - Header
 
+/// Which page of the signed-in main screen is showing.
+enum MainTab: String, CaseIterable, Identifiable {
+    case nowPlaying, general, live
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .nowPlaying: return "Now Playing"
+        case .general: return "General"
+        case .live: return "Live"
+        }
+    }
+
+    var next: MainTab {
+        let all = MainTab.allCases
+        let i = all.firstIndex(of: self) ?? 0
+        return all[min(all.count - 1, i + 1)]
+    }
+
+    var previous: MainTab {
+        let all = MainTab.allCases
+        let i = all.firstIndex(of: self) ?? 0
+        return all[max(0, i - 1)]
+    }
+}
+
+/// Segmented switch under the header. Selected = filled dot, others hollow ring, so the state never
+/// relies on colour alone.
+struct MainTabBar: View {
+    @Binding var selection: MainTab
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(MainTab.allCases) { item in
+                Button {
+                    selection = item
+                } label: {
+                    HStack(spacing: 6) {
+                        StateMarker(filled: selection == item, fillColor: theme.display, ringColor: theme.ringOff, size: 9)
+                        Text(item.title)
+                            .themeText(.statusLabel)
+                            .foregroundStyle(selection == item ? theme.ink : theme.inkFaint)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selection == item ? .isSelected : [])
+            }
+        }
+    }
+}
+
 struct StatusHeader: View {
     let spotifyOn: Bool
     let displayOn: Bool
-    let showStatsLink: Bool
+    /// Called with the photo picked from the library; nil hides the icon (signed-out screen).
+    var onPhotoPicked: ((PhotosPickerItem) -> Void)? = nil
     let onOpen: (Panel) -> Void
+
+    @State private var pickedPhoto: PhotosPickerItem?
 
     @Environment(\.theme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -210,16 +380,21 @@ struct StatusHeader: View {
             StatusDot(on: spotifyOn, name: "Spotify", color: theme.spotify, showsName: showsNames)
             StatusDot(on: displayOn, name: "Display", color: theme.display, showsName: showsNames)
             Spacer(minLength: 8)
-            if showStatsLink {
-                Button { onOpen(.stats) } label: {
-                    Text(theme.id.text(.stats))
-                        .themeText(.headerLink)
+            if let onPhotoPicked {
+                // Small corner icon: pick a library photo and it goes straight to the display.
+                PhotosPicker(selection: $pickedPhoto, matching: .images) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 18, weight: .regular))
                         .foregroundStyle(theme.headerLink)
-                        .lineLimit(1)
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .accessibilityLabel("Show a photo on the display")
+                .onChange(of: pickedPhoto) { item in
+                    guard let item else { return }
+                    pickedPhoto = nil
+                    onPhotoPicked(item)
+                }
             }
             Button { onOpen(.settings) } label: {
                 GlyphIcon(glyph: .gear, color: theme.headerLink, size: gearSize)
@@ -267,23 +442,51 @@ struct StatusDot: View {
 // MARK: - Album art
 
 /// The cover as the keychain shows it. A new cover replaces the old one in one piece, like the
-/// firmware's whole-frame draw; send progress lives in the strip below, not on the art.
+/// firmware's whole-frame draw; send progress lives in the strip below, not on the art. When the board
+/// announced the transition it just drew (`event`), the same effect is replayed here (an approximation:
+/// see `TransitionStage`); otherwise, and with Reduce Motion, the cover crossfades or cuts.
 struct ArtStage: View {
     let image: UIImage?
     let side: CGFloat
     let label: String
     let value: String
+    /// Newest `TRANSITION:` announcement from the board, if any.
+    var event: TransitionEvent? = nil
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// The cover that was showing before the latest change (kept only while its transition plays).
+    @State private var outgoing: UIImage?
+    /// The picture last seen, so a change knows what it replaces.
+    @State private var previous: UIImage?
+    @State private var playStart: Date?
+    @State private var playID = 22
+    @State private var playDuration = 0.4
+    @State private var playGen = 0
+    @State private var lastEventID: UUID?
+
+    /// An announcement older than this belongs to an earlier song, not to this cover.
+    private let freshWindow: TimeInterval = 10
+
     var body: some View {
         ZStack {
-            artLayer(image)
-                .id(imageID)
-                .transition(.opacity)
+            if let start = playStart, outgoing != nil {
+                TimelineView(.animation) { timeline in
+                    let elapsed = timeline.date.timeIntervalSince(start)
+                    let p = CGFloat(max(0, min(1, elapsed / playDuration)))
+                    TransitionStage(id: playID, progress: p) {
+                        artLayer(outgoing)
+                    } new: {
+                        artLayer(image)
+                    }
+                }
+            } else {
+                artLayer(image)
+            }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: imageID)
+        .onAppear { previous = image }
+        .onChange(of: imageID) { _ in imageDidChange() }
         .frame(width: side, height: side)
         .background(theme.artSurface)
         .clipShape(RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous))
@@ -296,9 +499,41 @@ struct ArtStage: View {
         .accessibilityAddTraits(.isImage)
     }
 
-    /// Identity of the picture, so a new cover crossfades in as one piece (Reduce Motion: cut).
+    /// Identity of the picture, so a new cover changes as one piece (Reduce Motion: cut).
     private var imageID: ObjectIdentifier? {
         image.map { ObjectIdentifier($0) }
+    }
+
+    private func imageDidChange() {
+        let old = previous
+        previous = image
+        guard !reduceMotion, old != nil, image != nil else {
+            playStart = nil
+            outgoing = nil
+            return
+        }
+        if let e = event, e.id != lastEventID,
+           Date().timeIntervalSince(e.date) < freshWindow,
+           let info = TransitionCatalog.info(named: e.name) {
+            lastEventID = e.id
+            playID = info.id
+            playDuration = info.duration
+        } else {
+            playID = 22  // no announcement for this change: plain crossfade
+            playDuration = 0.4
+        }
+        outgoing = old
+        playStart = Date()
+        playGen += 1
+        let gen = playGen
+        let wait = UInt64((playDuration + 0.1) * 1_000_000_000)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: wait)
+            if gen == playGen {
+                playStart = nil
+                outgoing = nil
+            }
+        }
     }
 
     @ViewBuilder

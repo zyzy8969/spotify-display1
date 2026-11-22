@@ -26,10 +26,10 @@ struct ContentView: View {
             sheetContent(panel)
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
-                // HIG sheets.md: a grabber belongs on a resizable sheet. Stats opens at medium
-                // height (a quick glance) and drags to full; Settings is a full-height task.
-                .presentationDetents(panel == .stats ? [.medium, .large] : [.large])
-                .presentationDragIndicator(panel == .stats ? .visible : .hidden)
+                // Settings, the transition picker and photo upload are full-height tasks. Stats are no
+                // longer a sheet: they are the General / Live pages of the main screen.
+                .presentationDetents([.large])
+                .presentationDragIndicator(.hidden)
         }
         .onAppear {
             bleManager.startScanning()
@@ -67,8 +67,8 @@ struct ContentView: View {
         switch panel {
         case .settings:
             SettingsView(spotifyManager: spotifyManager, bleManager: bleManager)
-        case .stats:
-            StatsView(bleManager: bleManager, spotifyManager: spotifyManager)
+        case .transitions:
+            TransitionPickerView(bleManager: bleManager)
         }
     }
 }
