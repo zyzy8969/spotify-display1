@@ -257,37 +257,19 @@ struct NowPlayingScreen: View {
     private func applyMode(_ on: Bool) {
         modeGen &+= 1
         let gen = modeGen
-        if reduceMotion {
-            withAnimation(.easeOut(duration: ModeMotion.reducedHalf)) { playerOpacity = 0 }
-            DispatchQueue.main.asyncAfter(deadline: .now() + ModeMotion.reducedHalf) {
-                guard gen == modeGen else { return }
-                var cut = Transaction()
-                cut.disablesAnimations = true
-                withTransaction(cut) {
-                    layoutNerd = on
-                    showsLower = true
-                }
-                withAnimation(.easeIn(duration: ModeMotion.reducedHalf)) { playerOpacity = 1 }
-            }
-            return
-        }
-        playerOpacity = 1
-        if on {
-            withAnimation(ModeMotion.spring) {
-                layoutNerd = true
+        // A quick dip to the background, an instant swap of two separate layouts, and back. Nothing is
+        // inserted or removed with an animation, so nothing from the other mode can stay behind and take
+        // space (it did: nerd mode's live details sat where the big cover ends). Reduce Motion: same.
+        withAnimation(.easeOut(duration: ModeMotion.reducedHalf)) { playerOpacity = 0 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + ModeMotion.reducedHalf) {
+            guard gen == modeGen else { return }
+            var cut = Transaction()
+            cut.disablesAnimations = true
+            withTransaction(cut) {
+                layoutNerd = on
                 showsLower = true
             }
-        } else {
-            guard layoutNerd else { return }
-            // The log leaves first, quickly; then the cover grows back.
-            withAnimation(ModeMotion.lowerExit) { showsLower = false }
-            DispatchQueue.main.asyncAfter(deadline: .now() + ModeMotion.exitLead) {
-                guard gen == modeGen else { return }
-                withAnimation(ModeMotion.spring) {
-                    layoutNerd = false
-                    showsLower = true
-                }
-            }
+            withAnimation(.easeIn(duration: ModeMotion.reducedHalf)) { playerOpacity = 1 }
         }
     }
 
@@ -500,49 +482,53 @@ struct NowPlayingScreen: View {
 
     // MARK: Layout
 
-    /// The whole player in one tree for both modes. Slots never change type, so the cover keeps
-    /// its identity; `if` blocks only add or remove the parts around it.
+    /// Two separate layouts, swapped without animation (`applyMode`): nerd mode is its own plain stack
+    /// (small cover row, progress line, live details + log), so its top is exactly the small cover.
+    @ViewBuilder
     private func player(size: CGSize, scrolls: Bool) -> some View {
-        let nerd = layoutNerd
-        let bigSide = ArtMetrics.side(for: size, margin: theme.margin, accessibilityText: scrolls)
-        let side = nerd ? ArtMetrics.nerdSide(for: size) : bigSide
-        return VStack(spacing: 0) {
-            // Normal: flexible space above and below centres the column. Nerd: a small fixed gap.
-            Spacer(minLength: nerd ? 2 : ArtMetrics.topGap(for: size))
-                .frame(maxHeight: nerd ? 2 : CGFloat.infinity)
+        if layoutNerd {
+            nerdPlayer(size: size, scrolls: scrolls)
+        } else {
+            normalPlayer(size: size, scrolls: scrolls)
+        }
+    }
 
+    /// Normal: the big cover centred with the line, title, controls, footer (and stats) under it.
+    private func normalPlayer(size: CGSize, scrolls: Bool) -> some View {
+        let bigSide = ArtMetrics.side(for: size, margin: theme.margin, accessibilityText: scrolls)
+        return VStack(spacing: 0) {
+            Spacer(minLength: ArtMetrics.topGap(for: size))
+                .frame(maxHeight: .infinity)
+            art(side: bigSide)
+                .frame(maxWidth: .infinity, alignment: .center)
+            strip(nerd: false)
+                .frame(width: bigSide)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 10)
+            normalTrackBlock(side: bigSide)
+            normalLowerBlock(size: size)
+            Spacer(minLength: 8)
+                .frame(maxHeight: .infinity)
+        }
+        .padding(.horizontal, theme.margin)
+        .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
+    }
+
+    /// Nerd: small cover top-left with title / controls beside it, the progress line right under that
+    /// row, then the live details, cache history and session log filling the rest.
+    private func nerdPlayer(size: CGSize, scrolls: Bool) -> some View {
+        let side = ArtMetrics.nerdSide(for: size)
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 14) {
                 art(side: side)
-                if nerd {
-                    nerdTrackColumn(side: side)
-                        .transition(.opacity)
-                }
+                nerdTrackColumn(side: side)
             }
-            .frame(maxWidth: .infinity, alignment: nerd ? .leading : .center)
-
-            // ONE progress line for both modes (it only changes width and thickness), so a mode switch
-            // can never leave the other mode's line behind. Two lines in an if/else used to: normal
-            // mode's full-width line stayed up in nerd mode and pushed the live details down.
-            strip(nerd: nerd)
-                .frame(width: nerd ? nil : bigSide)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, nerd ? 2 : 10)
-
-            // Both modes' lower areas are ALWAYS in the tree; the inactive one is collapsed to zero
-            // height (and hidden). They used to be inserted / removed with transitions, and normal mode's
-            // title + controls block could stay behind invisible in nerd mode, still taking its ~150 pt,
-            // so the live details sat where the big cover's lower half would be. A zero-height frame
-            // cannot linger.
-            VStack(spacing: 0) {
-                normalTrackBlock(side: bigSide)
-                normalLowerBlock(size: size)
-            }
-            .modeCollapsed(nerd)
+            .padding(.top, 2)
+            strip(nerd: true)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 2)
             nerdLowerBlock(size: size, scrolls: scrolls)
-                .modeCollapsed(!nerd)
-                .frame(maxHeight: nerd ? CGFloat.infinity : 0, alignment: .top)
-            Spacer(minLength: nerd ? 0 : 8)
-                .frame(maxHeight: nerd ? 0 : .infinity)
+                .frame(maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
         }
         .padding(.horizontal, theme.margin)
         .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
@@ -1538,18 +1524,5 @@ struct NowPlayingFooter: View {
             }
         }
         .frame(maxWidth: .infinity)
-    }
-}
-
-private extension View {
-    /// The other mode's area: zero height, invisible, not tappable, hidden from VoiceOver. Stays in the
-    /// view tree, so a mode switch never leaves a half-removed view taking space.
-    func modeCollapsed(_ collapsed: Bool) -> some View {
-        self
-            .frame(height: collapsed ? 0 : nil, alignment: .top)
-            .clipped()
-            .opacity(collapsed ? 0 : 1)
-            .allowsHitTesting(!collapsed)
-            .accessibilityHidden(collapsed)
     }
 }

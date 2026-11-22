@@ -183,6 +183,9 @@ final class BLEManager: NSObject, ObservableObject {
     }
     @Published private(set) var drawnPopup: DrawnPopup?
     private var popupForNextDraw: Bool?
+    /// The album the next `DRAWN` puts on screen: marked as played right then, so a skip that cuts the
+    /// send short on the phone still counts (going back to that song is "cache", not "new" again).
+    private var albumKeyForNextDraw: String?
     /// The view set this for a photo <-> cover swap: the next draw this app asks for (the photo, or the
     /// cover coming back) plays Card Flip on the keychain, like the app's card. Cleared once sent.
     var flipNextDraw = false
@@ -523,6 +526,7 @@ final class BLEManager: NSObject, ObservableObject {
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         sendSwapFlipIfAsked()
         popupForNextDraw = nil
+        albumKeyForNextDraw = nil
         sendIsNewSong = false
 
         sendStageGen &+= 1
@@ -690,6 +694,7 @@ final class BLEManager: NSObject, ObservableObject {
         sendIsNewSong = newToPerson
         // A hit says "cache" unless the album is new to the person; a miss (fresh send) says "new".
         popupForNextDraw = !newToPerson
+        albumKeyForNextDraw = albumKey
         sendSwapFlipIfAsked()
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
@@ -1231,6 +1236,9 @@ final class BLEManager: NSObject, ObservableObject {
                 drawnPopup = DrawnPopup(cached: cached)
             }
             popupForNextDraw = nil
+            // On screen now: this album has been shown, whatever happens to the send on the phone.
+            if let key = albumKeyForNextDraw, !photoHold { markAlbumPlayed(key) }
+            albumKeyForNextDraw = nil
         }
         if text == "CAPS:t128" {
             // Arrives after CAPS:speeds: send the speeds again, now for every index.
