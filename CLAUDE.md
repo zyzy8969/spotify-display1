@@ -96,7 +96,7 @@ SD; miss: raw-DEFLATE the frame if the board sent `CAPS:deflate` (BLE_PROTOCOL 1
 image write → (nothing drawn until complete) → firmware inflates (ROM `tinfl`, `rxPacked` → `rxBuffer`)
 → transition draw + SD save → ACK. The app also prefetches the next 5 queued covers (store-only).
 
-### Firmware (`src/main.cpp`, ~1900 lines, single file)
+### Firmware (`src/main.cpp`, ~2000 lines, plus the shared transition core)
 
 The critical structural constraint: **BLE callbacks run on `BTC_TASK`, which has a tiny stack.**
 Every callback class (`CacheCheckCallbacks`, `ImageTransferCallbacks`, `BrightnessCallbacks`,
@@ -123,6 +123,18 @@ it fills (owner's choice, 2026-11-20: "whole image, then show" — no progressiv
 completion `loop()` copies rx → `imageBuffer` and draws it with a transition, like a cache hit.
 `imageBuffer` is the picture on the panel (SD load/save, transitions). A transfer abandoned by a
 skip or an app suspension therefore never changes the screen.
+
+Transitions live in a **shared C++ core**, not in `main.cpp`:
+`SpotifyDisplay.swiftpm/Sources/TransitionsCore/transitions_core.cpp` + `include/transitions_core.h`
+(the `TransitionType` enum, every transition, the name table, `tx_name`/`tx_resolve`/`tx_run`). Both
+the firmware (built once via `src/transitions_core_fw.cpp`; `platformio.ini` adds the include path) and
+the iOS app compile it, so the app can draw exactly what the board draws. It must stay free of
+Arduino/ESP/Apple headers: all output goes through the `TxPanel` function pointers (bitmap, pixel,
+wait, large alloc), and randomness comes from a seeded xorshift (`tx_random`), never `random()`.
+**New transitions go in the core**, with a new enum value appended (indices are the BLE header's
+transitionIndex: never renumber). `main.cpp`'s `runTransition()` is the board wrapper: 1x1 window
+resync, `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>` notify (BLE_PROTOCOL 1.13, sent from
+`loop()`), then `tx_run` with an `esp_random()` seed, timed per index for the next `expectedMs`.
 
 Cache: 16-byte MD5 key from the app, stored as `/cache/v1_<key>.bin` with a CRC32 trailer.
 An in-memory index (`cacheIndex`, up to 1024 entries) is built at startup to avoid SD scans.

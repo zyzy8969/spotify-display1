@@ -1,64 +1,34 @@
 import SwiftUI
 
-/// The "Live" page of the main screen: what the display is doing right now (the transition it just
-/// drew, current phase, board and Spotify status) and a terminal-style log of every event the app sends
-/// to or hears from the board. In-memory only: it starts empty each launch.
+/// Nerd mode's stats area under the Now Playing controls: live details and the terminal, then the
+/// general transfer stats, all compacted. The caller provides the scrolling, the side margins and the
+/// smaller text (`themeTextScale`).
+struct NerdStatsView: View {
+    @ObservedObject var bleManager: BLEManager
+    @ObservedObject var spotifyManager: SpotifyManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            LiveView(bleManager: bleManager, spotifyManager: spotifyManager, compact: true)
+            ThemedDivider()
+            GeneralStatsView(bleManager: bleManager, spotifyManager: spotifyManager, compact: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// What the display is doing right now (phase, board and Spotify status) and a terminal-style log of
+/// every event the app sends to or hears from the board. In-memory only: it starts empty each launch.
+/// The last transition's name is no longer shown here: it is the sparkles icon in the header.
 struct LiveView: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
-    let onOpen: (Panel) -> Void
-
-    @Environment(\.theme) private var theme
+    var compact = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            transitionCard
+        VStack(alignment: .leading, spacing: compact ? 14 : 24) {
             LiveDetails(bleManager: bleManager, spotifyManager: spotifyManager)
-            TerminalView(lines: bleManager.eventLog)
-        }
-    }
-
-    private var transitionCard: some View {
-        let name = bleManager.lastTransitionName
-        let info = name.flatMap { TransitionCatalog.info(named: $0) }
-        return VStack(alignment: .leading, spacing: 10) {
-            Text("Last transition")
-                .themeText(.eyebrow)
-                .foregroundStyle(theme.inkFaint)
-            HStack(alignment: .center, spacing: 16) {
-                if let info {
-                    LoopingTransitionPreview(id: info.id, duration: info.duration)
-                        .frame(width: 84, height: 84)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .accessibilityHidden(true)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(name ?? "None yet")
-                        .themeText(.statNumber)
-                        .foregroundStyle(theme.ink)
-                        .lineLimit(2)
-                    if let info {
-                        Text(info.blurb)
-                            .themeText(.footnote)
-                            .foregroundStyle(theme.inkSoft)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text("Shows up after the display draws the next cover.")
-                            .themeText(.footnote)
-                            .foregroundStyle(theme.inkSoft)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Button { onOpen(.transitions) } label: {
-                        Text("Choose transitions")
-                            .themeText(.rowValue)
-                            .foregroundStyle(theme.ink)
-                            .underline()
-                            .frame(minHeight: 44, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
+            TerminalView(lines: bleManager.eventLog, height: compact ? 170 : 320)
         }
     }
 }
@@ -66,6 +36,7 @@ struct LiveView: View {
 /// Dark terminal pane. Newest line at the bottom; sticks to the bottom as lines arrive.
 struct TerminalView: View {
     let lines: [LogLine]
+    var height: CGFloat = 320
     @Environment(\.theme) private var theme
 
     private static let timeFormatter: DateFormatter = {
@@ -97,7 +68,7 @@ struct TerminalView: View {
                     }
                     .padding(10)
                 }
-                .frame(height: 320)
+                .frame(height: height)
                 .background(Color(white: 0.07))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .onChange(of: lines.count) { _ in

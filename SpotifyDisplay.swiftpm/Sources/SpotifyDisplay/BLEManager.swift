@@ -29,6 +29,14 @@ final class BLEManager: NSObject, ObservableObject {
         }
         return UInt8(clamping: stored)
     }()
+    /// Board status LED brightness (BLE_PROTOCOL 1.13, ffe6): 0...255 of the board's own safe cap
+    /// (~47 % of the LED's full power). 255 = the cap, 0 = off. Re-sent on every connect.
+    @Published private(set) var statusLedLevel: UInt8 = {
+        guard let stored = UserDefaults.standard.object(forKey: "ble_status_led") as? Int else { return 255 }
+        return UInt8(clamping: stored)
+    }()
+    /// The connected board has the status-LED characteristic (firmware with BLE_PROTOCOL 1.13+).
+    @Published private(set) var boardSupportsStatusLed = false
     @Published private(set) var transferLog: [TransferLogEntry] = []
     @Published private(set) var currentLivePhase: String? = "idle"
     /// Typed pipeline stage for the UI, so views never parse `currentLivePhase` / `boardAckStatus`
@@ -60,6 +68,8 @@ final class BLEManager: NSObject, ObservableObject {
     private var imageChar: CBCharacteristic?
     private var msgChar: CBCharacteristic?
     private var brightnessChar: CBCharacteristic?
+    /// Optional (older firmware lacks it); never part of the "GATT ready" check.
+    private var statusLedChar: CBCharacteristic?
 
     private var readyContinuation: CheckedContinuation<Void, Error>?
     private var cacheContinuation: CheckedContinuation<Bool, Error>?
@@ -101,6 +111,24 @@ final class BLEManager: NSObject, ObservableObject {
     /// Every `TRANSITION:` announcement (cache hits since 1.7, fresh draws too since 1.12). The main
     /// cover replays it so the app shows the effect the board just drew.
     @Published private(set) var transitionEvent: TransitionEvent?
+    /// The LE RGB565 frame the board shows now, i.e. what its next transition starts from. Set when
+    /// the board starts drawing a frame (`TRANSITION_START`) and again when a draw is confirmed:
+    /// a fresh send's bytes, a cache hit's downloaded cover converted exactly like a send (so it
+    /// matches the SD copy), a photo's bytes. nil = waiting screen (after a disconnect) or unknown.
+    @Published private(set) var boardFrame: Data?
+    /// Newest `TRANSITION_START` (BLE_PROTOCOL 1.13): the board is about to draw a transition.
+    /// `newFrame` is filled in when the app has it (for a cache hit, once the cover is converted).
+    @Published private(set) var transitionStart: TransitionStartEvent?
+    /// What the board was last asked to draw, so a `TRANSITION_START` knows its new frame. The board
+    /// works on one request at a time (the app waits out owed replies), so the newest one is it.
+    private enum DrawRequest {
+        case image(Data)
+        case cacheCheck(Task<Data?, Never>)
+    }
+    private var lastDrawRequest: DrawRequest?
+    /// Bumped per draw request; a late cache-hit conversion only sets `boardFrame` if none came after.
+    private var drawRequestGen: UInt64 = 0
+    private var mirror: TransitionMirror { TransitionMirror.shared }
     /// Rolling terminal-style log for the Live tab (newest last).
     @Published private(set) var eventLog: [LogLine] = []
     private let maxLogLines = 300
@@ -132,6 +160,7 @@ final class BLEManager: NSObject, ObservableObject {
     private let imageUUID = CBUUID(string: "0000FFE3-0000-1000-8000-00805F9B34FB")
     private let messageUUID = CBUUID(string: "0000FFE4-0000-1000-8000-00805F9B34FB")
     private let brightnessUUID = CBUUID(string: "0000FFE5-0000-1000-8000-00805F9B34FB")
+    private let statusLedUUID = CBUUID(string: "0000FFE6-0000-1000-8000-00805F9B34FB")
 
     /// Same as firmware `IMAGE_SIZE` (240×240×2).
     private let imagePayloadBytes = 115_200
@@ -457,6 +486,15 @@ final class BLEManager: NSObject, ObservableObject {
         let downloadStart = CFAbsoluteTimeGetCurrent()
         let download = Task { try await self.fetchAlbumArtData(urlCandidates: imageURLs) }
         activeDownloadTask = download
+        // The cover as the board will show it: the frame to send on a miss, and on a hit the
+        // same bytes as the SD copy (for the transition mirror and `boardFrame`). Converting as soon
+        // as the download lands overlaps it with the cache check.
+        let frameTask = Task<Data?, Never> {
+            guard let data = try? await download.value else { return nil }
+            return try? await Task.detached(priority: .userInitiated) {
+                try ImageProcessor.convertToRGB565(imageData: data)
+            }.value
+        }
 
         // After a skip the board may still owe the previous song's cache reply or image ACK.
         // Asking now would get that old answer back as this song's; wait it out (download keeps going).
@@ -478,6 +516,8 @@ final class BLEManager: NSObject, ObservableObject {
         let cacheKey = cacheKeySource.md5Digest
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
+        noteDrawRequest(.cacheCheck(frameTask))
+        let hitDrawGen = drawRequestGen
         do {
             cacheHit = try await checkCacheHit(cacheKey: cacheKey)
         } catch {
@@ -502,6 +542,11 @@ final class BLEManager: NSObject, ObservableObject {
                     // Skip if a newer track started meanwhile: its art must not be replaced by ours.
                     if let data = try? await previewDownload.value, self.sendStageGen == myStageGen {
                         self.currentAlbumArt = data
+                    }
+                }
+                Task { @MainActor in
+                    if let frame = await frameTask.value, self.drawRequestGen == hitDrawGen {
+                        self.boardFrame = frame
                     }
                 }
                 statusMessage = "Loaded from SD cache"
@@ -546,15 +591,13 @@ final class BLEManager: NSObject, ObservableObject {
         statusMessage = "Processing image…"
         setLivePhase("dithering…")
         let convertStart = CFAbsoluteTimeGetCurrent()
-        let capturedData = data
-        let rgb565 = try await Task.detached(priority: .userInitiated) {
-            try ImageProcessor.convertToRGB565(imageData: capturedData)
-        }.value
+        // Usually done already: it started when the download finished (see `frameTask`).
+        let converted = await frameTask.value
         let convertMs = ms(since: convertStart)
         setLivePhase("dither \(secondsLabel(fromMs: convertMs))")
         try ensureTransferEpoch(epochAtStart)
 
-        guard rgb565.count == imagePayloadBytes else {
+        guard let rgb565 = converted, rgb565.count == imagePayloadBytes else {
             throw SpotifyDisplayError.conversionFailed
         }
 
@@ -655,6 +698,13 @@ final class BLEManager: NSObject, ObservableObject {
             try ensureTransferEpoch(epochAtStart)
         }
         let payload = packed ?? rgb565
+
+        // A frame the board will draw (not a prefetch): its TRANSITION_START will be for these bytes.
+        var myDrawGen: UInt64 = 0
+        if !storeOnly {
+            noteDrawRequest(.image(rgb565))
+            myDrawGen = drawRequestGen
+        }
 
         var header = Data()
         // 0xFF = random (enabled) transition on firmware; 0xFE store-only; 0xFD display-only (photo)
@@ -765,6 +815,7 @@ final class BLEManager: NSObject, ObservableObject {
 
         if storeOnly { return total }
         log("rx      image ACK", kind: .rx)
+        if drawRequestGen == myDrawGen { boardFrame = rgb565 }
 
         isTransferring = false
         transferProgress = 0
@@ -857,10 +908,18 @@ final class BLEManager: NSObject, ObservableObject {
         imageChar = nil
         msgChar = nil
         brightnessChar = nil
+        statusLedChar = nil
+        boardSupportsStatusLed = false
         sawReady = false
         boardSupportsDeflate = false
         boardSupportsTransitionMask = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
+        // Waiting screen: nothing of ours is on the panel any more.
+        boardFrame = nil
+        lastDrawRequest = nil
+        drawRequestGen &+= 1
+        transitionStart = nil
+        mirror.reset()
         failPending(error: SpotifyDisplayError.notConnected)
     }
 
@@ -946,7 +1005,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         if text.hasPrefix("ERROR") {
             log("rx      \(text)", kind: .error)
-        } else if text.hasPrefix("TRANSITION:") {
+        } else if text.hasPrefix("TRANSITION:") || text.hasPrefix(TransitionStartEvent.prefix) {
             log("rx      \(text)", kind: .transition)
         } else {
             log("rx      \(text)", kind: .rx)
@@ -1036,6 +1095,49 @@ final class BLEManager: NSObject, ObservableObject {
                 transitionEvent = TransitionEvent(name: t)
             }
         }
+
+        if text.hasPrefix(TransitionStartEvent.prefix) {
+            handleTransitionStart(text)
+        }
+    }
+
+    /// Remembers what the board was just asked to draw (see `DrawRequest`).
+    private func noteDrawRequest(_ request: DrawRequest) {
+        lastDrawRequest = request
+        drawRequestGen &+= 1
+    }
+
+    /// `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>`: the board starts drawing now.
+    /// Publishes the event and starts the cover mirror from the board's current frame.
+    private func handleTransitionStart(_ text: String) {
+        guard var event = TransitionStartEvent.parse(text) else {
+            log("rx      unreadable \(text)", kind: .error)
+            return
+        }
+        let old: Data? = event.oldBlack ? nil : boardFrame
+        let request = lastDrawRequest
+        lastDrawRequest = nil  // one request, one draw
+        let gen = drawRequestGen
+        switch request {
+        case .image(let frame)?:
+            event.newFrame = frame
+            boardFrame = frame
+        case .cacheCheck(let frameTask)?:
+            // Hit: the cover is still downloading / converting; hand it over when ready.
+            let id = event.id
+            Task { @MainActor in
+                guard let frame = await frameTask.value else { return }
+                if self.drawRequestGen == gen { self.boardFrame = frame }
+                if self.transitionStart?.id == id {
+                    self.transitionStart?.newFrame = frame
+                    self.mirror.provideFrame(frame, for: id)
+                }
+            }
+        case nil:
+            break  // not something this app asked for: nothing to mirror
+        }
+        transitionStart = event
+        mirror.begin(event, old: old)
     }
 
     private func onCharacteristicsReady() async {
@@ -1058,6 +1160,7 @@ final class BLEManager: NSObject, ObservableObject {
             statusMessage = "Ready"
             // Re-apply persisted brightness value on every reconnect.
             setBrightness(brightness)
+            setStatusLedLevel(statusLedLevel)
             // Trigger immediate SpotifyManager resync — works even if app is in background.
             onReadyCallback?()
             defer { sdCacheCountLoading = false }
@@ -1171,7 +1274,8 @@ extension BLEManager: CBPeripheralDelegate {
             guard let services = peripheral.services else { return }
             for s in services where s.uuid == self.serviceUUID {
                 peripheral.discoverCharacteristics(
-                    [self.statusUUID, self.cacheUUID, self.imageUUID, self.messageUUID, self.brightnessUUID],
+                    [self.statusUUID, self.cacheUUID, self.imageUUID, self.messageUUID, self.brightnessUUID,
+                     self.statusLedUUID],
                     for: s
                 )
             }
@@ -1188,6 +1292,9 @@ extension BLEManager: CBPeripheralDelegate {
                 case self.imageUUID: self.imageChar = ch
                 case self.messageUUID: self.msgChar = ch
                 case self.brightnessUUID: self.brightnessChar = ch
+                case self.statusLedUUID:
+                    self.statusLedChar = ch
+                    self.boardSupportsStatusLed = true
                 default: break
                 }
             }
@@ -1282,6 +1389,17 @@ extension BLEManager {
         brightness = value
         UserDefaults.standard.set(Int(value), forKey: "ble_brightness")
         guard let p = peripheral, let c = brightnessChar else { return }
+        var b = value
+        let payload = Data(bytes: &b, count: 1)
+        p.writeValue(payload, for: c, type: .withResponse)
+    }
+
+    /// Status LED brightness, 0...255 of the board's safe cap (BLE_PROTOCOL 1.13). Saved, then sent
+    /// if the board has the characteristic; otherwise it is sent on the next connect to newer firmware.
+    func setStatusLedLevel(_ value: UInt8) {
+        statusLedLevel = value
+        UserDefaults.standard.set(Int(value), forKey: "ble_status_led")
+        guard let p = peripheral, let c = statusLedChar else { return }
         var b = value
         let payload = Data(bytes: &b, count: 1)
         p.writeValue(payload, for: c, type: .withResponse)

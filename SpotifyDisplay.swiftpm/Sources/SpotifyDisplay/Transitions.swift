@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - Catalog
 
@@ -134,8 +135,10 @@ enum TransitionPrefs {
     }
 }
 
-// MARK: - Preview engine
+// MARK: - Approximate engine (fallback for firmware older than BLE_PROTOCOL 1.13)
 
+/// Only `ArtStage` uses this now, for boards that do not announce `TRANSITION_START`: the picker,
+/// the Live page and the 1.13 cover mirror draw the real effect with `TransitionRenderer`.
 /// How an effect is drawn in the app. Most board effects are "reveal the new cover where a per-pixel
 /// threshold has passed" (the board's own quick effects work exactly this way), so those share one mask
 /// renderer; the rest move or fade whole covers. The app's versions are approximations of the board's.
@@ -396,9 +399,11 @@ struct TransitionStage<Old: View, New: View>: View {
     }
 }
 
-// MARK: - Sample covers + looping preview (for the picker)
 
-/// A stand-in "cover" so a transition can be seen without a real song. Two variants alternate.
+// MARK: - Sample covers + looping preview (picker, Live page)
+
+/// A stand-in "cover" so a transition can be seen without a real song. Two variants. Shown as is
+/// while a preview is still rendering.
 struct SampleCover: View {
     let variant: Int
 
@@ -426,26 +431,126 @@ struct SampleCover: View {
     }
 }
 
-/// Plays transition `id` between the two sample covers forever (A to B, then B to A, ...).
+/// The two sample covers as 240x240 LE RGB565 frames, drawn with Core Graphics (off the main thread).
+enum SampleCoverArt {
+    static func frame(variant: Int) -> Data? {
+        let side = CGFloat(TransitionRenderer.side)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
+        let image = renderer.image { ui in
+            let cg = ui.cgContext
+            let colors: [UIColor] = variant == 0
+                ? [UIColor(red: 0.98, green: 0.55, blue: 0.25, alpha: 1), UIColor(red: 0.85, green: 0.2, blue: 0.45, alpha: 1)]
+                : [UIColor(red: 0.2, green: 0.75, blue: 0.75, alpha: 1), UIColor(red: 0.25, green: 0.2, blue: 0.7, alpha: 1)]
+            let cgColors = colors.map { $0.cgColor } as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: cgColors, locations: [0, 1]) {
+                cg.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: side, y: side), options: [])
+            }
+            let d = side * 0.7
+            let cx = side / 2 + (variant == 0 ? -side * 0.15 : side * 0.15)
+            let cy = side / 2 + side * 0.1
+            cg.setFillColor(UIColor(white: 1, alpha: 0.25).cgColor)
+            cg.fillEllipse(in: CGRect(x: cx - d / 2, y: cy - d / 2, width: d, height: d))
+            let font = UIFont.systemFont(ofSize: side * 0.5, weight: .heavy)
+            let text = NSAttributedString(string: variant == 0 ? "A" : "B", attributes: [
+                .font: font,
+                .foregroundColor: UIColor(white: 1, alpha: 0.9)
+            ])
+            let size = text.size()
+            text.draw(at: CGPoint(x: (side - size.width) / 2, y: (side - size.height) / 2))
+        }
+        guard let cgImage = image.cgImage else { return nil }
+        return TransitionRenderer.rgb565(from: cgImage)
+    }
+}
+
+/// Real previews: every transition rendered A to B by the board's own code (`TransitionRenderer`),
+/// at preview size, on the renderer's queue, and kept for the rows most recently on screen.
+@MainActor
+final class TransitionPreviewStore: ObservableObject {
+    static let shared = TransitionPreviewStore()
+
+    @Published private(set) var previews: [Int: RenderedTransition] = [:]
+    private var inFlight = Set<Int>()
+    /// Least recently requested first.
+    private var recent: [Int] = []
+    /// About 1.7 MB per preview (30 frames of 120x120).
+    private let capacity = 12
+    private var samplesTask: Task<[Data]?, Never>?
+
+    private init() {}
+
+    func request(_ id: Int) {
+        recent.removeAll { $0 == id }
+        recent.append(id)
+        guard previews[id] == nil, !inFlight.contains(id) else { return }
+        inFlight.insert(id)
+        Task { @MainActor in
+            defer { self.inFlight.remove(id) }
+            guard let samples = await self.sampleFrames(), samples.count == 2 else { return }
+            let seed = UInt32(truncatingIfNeeded: (id + 1) &* 40_503)
+            let rendered = await TransitionRenderer.shared.render(
+                index: id, old: samples[0], new: samples[1], seed: seed, options: .preview
+            )
+            guard !rendered.isEmpty else { return }
+            self.previews[id] = rendered
+            self.evictIfNeeded()
+        }
+    }
+
+    private func sampleFrames() async -> [Data]? {
+        if samplesTask == nil {
+            samplesTask = Task.detached(priority: .userInitiated) { () -> [Data]? in
+                guard let a = SampleCoverArt.frame(variant: 0), let b = SampleCoverArt.frame(variant: 1) else {
+                    return nil
+                }
+                return [a, b]
+            }
+        }
+        guard let task = samplesTask else { return nil }
+        return await task.value
+    }
+
+    private func evictIfNeeded() {
+        while previews.count > capacity, let oldest = recent.first {
+            recent.removeFirst()
+            previews[oldest] = nil
+        }
+    }
+}
+
+/// Plays transition `id` from sample cover A to B, on a loop: hold A, the board's effect, hold B.
+/// Frames come precomputed from `TransitionPreviewStore`; each tick only picks one.
 struct LoopingTransitionPreview: View {
     let id: Int
+    /// Kept for callers; the real render's own length is used.
     var duration: Double = 1.1
+    @ObservedObject private var store = TransitionPreviewStore.shared
     private let hold = 0.55
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            let period = duration + hold * 2
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            let cycle = Int((t / period).rounded(.down))
-            let local = t - Double(cycle) * period
-            let raw = (local - hold) / duration
-            let progress = CGFloat(max(0, min(1, raw)))
-            let fromA = cycle % 2 == 0
-            TransitionStage(id: id, progress: progress) {
-                SampleCover(variant: fromA ? 0 : 1)
-            } new: {
-                SampleCover(variant: fromA ? 1 : 0)
+        Group {
+            if let rendered = store.previews[id], !rendered.isEmpty {
+                TimelineView(.animation) { timeline in
+                    let length = max(0.1, rendered.duration)
+                    let period = length + hold * 2
+                    let t = timeline.date.timeIntervalSinceReferenceDate
+                    let local = t.truncatingRemainder(dividingBy: period) - hold
+                    if let frame = rendered.frame(at: local) {
+                        Image(decorative: frame, scale: 1)
+                            .resizable()
+                            .interpolation(.medium)
+                    } else {
+                        SampleCover(variant: 0)
+                    }
+                }
+            } else {
+                SampleCover(variant: 0)
             }
         }
+        .onAppear { store.request(id) }
+        .onChange(of: id) { newID in store.request(newID) }
     }
 }

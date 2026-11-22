@@ -4,9 +4,14 @@ import UIKit
 // MARK: - Album art
 
 /// The cover as the keychain shows it. A new cover replaces the old one in one piece, like the
-/// firmware's whole-frame draw; send progress lives in the strip below, not on the art. When the board
-/// announced the transition it just drew (`event`), the same effect is replayed here (an approximation:
-/// see `TransitionStage`); otherwise, and with Reduce Motion, the cover crossfades or cuts.
+/// firmware's whole-frame draw; send progress lives in the strip below, not on the art.
+///
+/// Exact mirror (BLE_PROTOCOL 1.13 firmware): the board announces `TRANSITION_START` just before it
+/// draws. `TransitionMirror` renders that transition with the board's own code (TransitionsCore) and
+/// this view flips through the frames on the board's clock, so the phone plays the same effect at the
+/// same time as the keychain, then ends on the real cover (`image`) once the screen hands it over.
+/// Older firmware: the effect it announced after drawing (`event`) is replayed approximately
+/// (`TransitionStage`). Reduce Motion: the cover cuts.
 struct ArtStage: View {
     let image: UIImage?
     let side: CGFloat
@@ -17,7 +22,9 @@ struct ArtStage: View {
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var mirror = TransitionMirror.shared
 
+    // Approximate replay (older firmware).
     /// The cover that was showing before the latest change (kept only while its transition plays).
     @State private var outgoing: UIImage?
     /// The picture last seen, so a change knows what it replaces.
@@ -28,12 +35,23 @@ struct ArtStage: View {
     @State private var playGen = 0
     @State private var lastEventID: UUID?
 
+    // Exact mirror.
+    /// Mirror playback that is over (the view shows `image` again).
+    @State private var finishedMirrorID: UUID?
+    /// The screen handed over the new cover for this playback.
+    @State private var coverArrivedFor: UUID?
+
     /// An announcement older than this belongs to an earlier song, not to this cover.
     private let freshWindow: TimeInterval = 10
+    /// After the board's transition ends, keep its last frame up to this long while waiting for the
+    /// screen to hand over the new cover (a fresh send swaps it only after the board's ACK).
+    private let coverHold: TimeInterval = 3
 
     var body: some View {
         ZStack {
-            if let start = playStart, outgoing != nil {
+            if let pb = activeMirror {
+                mirrorLayer(pb)
+            } else if let start = playStart, outgoing != nil {
                 TimelineView(.animation) { timeline in
                     let elapsed = timeline.date.timeIntervalSince(start)
                     let p = CGFloat(max(0, min(1, elapsed / playDuration)))
@@ -47,8 +65,17 @@ struct ArtStage: View {
                 artLayer(image)
             }
         }
-        .onAppear { previous = image }
+        .onAppear {
+            previous = image
+            if let pb = mirror.playback {
+                // A view made after the playback began (back from another page) only joins a running one.
+                if Date() >= pb.end { finishedMirrorID = pb.id } else { watchMirror(pb.id) }
+            }
+        }
         .onChange(of: imageID) { _ in imageDidChange() }
+        .onChange(of: mirror.playback?.id) { id in
+            if let id { watchMirror(id) }
+        }
         .frame(width: side, height: side)
         .background(theme.artSurface)
         .clipShape(RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous))
@@ -66,15 +93,65 @@ struct ArtStage: View {
         image.map { ObjectIdentifier($0) }
     }
 
+    /// The board transition being mirrored right now, if any.
+    private var activeMirror: TransitionMirror.Playback? {
+        guard !reduceMotion, let pb = mirror.playback, pb.id != finishedMirrorID else { return nil }
+        return pb
+    }
+
+    /// Precomputed frames picked by the clock: no per-frame masks or effects on the main thread.
+    private func mirrorLayer(_ pb: TransitionMirror.Playback) -> some View {
+        TimelineView(.animation) { timeline in
+            let now = timeline.date
+            if now >= pb.end, coverArrivedFor == pb.id {
+                artLayer(image)
+            } else if let frame = pb.frame(at: now) {
+                Image(decorative: frame, scale: 1)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: side, height: side)
+            } else {
+                // Not rendered yet: the board is still showing the old cover too.
+                artLayer(image)
+            }
+        }
+    }
+
+    /// Ends the playback once the board is done and the real cover is here (or the hold ran out).
+    private func watchMirror(_ id: UUID) {
+        Task { @MainActor in
+            while true {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard let pb = mirror.playback, pb.id == id, finishedMirrorID != id else { return }
+                let now = Date()
+                let ended = now >= pb.end
+                let done = ended && (coverArrivedFor == id || now >= pb.end.addingTimeInterval(coverHold))
+                if done || now.timeIntervalSince(pb.start) > 30 {
+                    finishedMirrorID = id
+                    return
+                }
+            }
+        }
+    }
+
     private func imageDidChange() {
         let old = previous
         previous = image
+        if let pb = mirror.playback, coverArrivedFor != pb.id,
+           pb.id != finishedMirrorID || Date().timeIntervalSince(pb.end) < freshWindow {
+            // The cover the board is drawing (or just drew): the mirror already shows this change,
+            // so no second transition on top of it.
+            coverArrivedFor = pb.id
+            playStart = nil
+            outgoing = nil
+            return
+        }
         guard !reduceMotion, old != nil, image != nil else {
             playStart = nil
             outgoing = nil
             return
         }
-        if let e = event, e.id != lastEventID,
+        if !mirror.boardAnnouncesStart, let e = event, e.id != lastEventID,
            Date().timeIntervalSince(e.date) < freshWindow,
            let info = TransitionCatalog.info(named: e.name) {
             lastEventID = e.id
@@ -133,4 +210,3 @@ struct ArtStage: View {
         }
     }
 }
-

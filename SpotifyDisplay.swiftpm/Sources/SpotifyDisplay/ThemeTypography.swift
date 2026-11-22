@@ -229,6 +229,21 @@ enum ThemeFonts {
     }
 }
 
+// MARK: - Compact scale
+
+/// Multiplies every themed text size below it (1 = artboard sizes). Nerd mode sets it below 1 so the
+/// Now Playing column and the stats under it fit together. Dynamic Type still scales on top of it.
+private struct ThemeTextScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1
+}
+
+extension EnvironmentValues {
+    var themeTextScale: CGFloat {
+        get { self[ThemeTextScaleKey.self] }
+        set { self[ThemeTextScaleKey.self] = newValue }
+    }
+}
+
 // MARK: - Modifier
 
 /// Applies the current theme's face, size, tracking and case for `role`.
@@ -236,11 +251,16 @@ enum ThemeFonts {
 struct ThemeTextModifier: ViewModifier {
     let role: TextRole
     @Environment(\.theme) private var theme
+    @Environment(\.themeTextScale) private var textScale
     @Environment(\.legibilityWeight) private var legibilityWeight
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     func body(content: Content) -> some View {
-        let spec = theme.id.textSpec(role)
+        var spec = theme.id.textSpec(role)
+        if textScale != 1 {
+            // Compact (nerd mode) sizes: never below 11pt, or below the role's own size if smaller.
+            spec.size = max(min(spec.size, 11), (spec.size * textScale).rounded())
+        }
         let font: Font = role == .mono
             ? .system(.caption2, design: .monospaced)
             : ThemeFonts.font(

@@ -11,12 +11,13 @@ struct SettingsView: View {
     @Environment(\.theme) private var theme
     @AppStorage("showDebugInfo") private var showDebugInfo = false
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
-    @AppStorage(DitherMode.storageKey) private var ditherRaw = DitherMode.fallback.rawValue
     @AppStorage(TransitionPrefs.storageKey) private var disabledTransitions = ""
     @State private var showTransitions = false
 
     @State private var clientIDOverride = ""
     @State private var brightnessValue: Double = 200
+    /// Status light (the board's inner LED) as 0...100 % of its safe maximum.
+    @State private var statusLightPercent: Double = 100
     @State private var isClearingCache = false
     @State private var isSigningIn = false
     @State private var isSigningOut = false
@@ -27,11 +28,10 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 26) {
                 SheetHeader(title: theme.id.text(.settings)) { dismiss() }
                 brightnessRow
+                statusLightRow
                 statsToggleRow
                 ThemedDivider()
                 ThemePicker(selection: $themeRaw)
-                ThemedDivider()
-                DitherPicker(selection: $ditherRaw)
                 ThemedDivider()
                 transitionsRow
                 ThemedDivider()
@@ -46,17 +46,45 @@ struct SettingsView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(theme.background.ignoresSafeArea())
-        .onChange(of: ditherRaw) { _ in
-            // Redraw the current song in the new mode (new cache key, so a fresh send the first time).
-            Task { await spotifyManager.requestResync(reason: "dither mode changed") }
-        }
         .onAppear {
             clientIDOverride = spotifyManager.storedClientIdOverride
             brightnessValue = Double(bleManager.brightness)
+            statusLightPercent = (Double(bleManager.statusLedLevel) / 255 * 100).rounded()
         }
     }
 
     // MARK: Display
+
+    /// The board's inner status LED (BLE_PROTOCOL 1.13, ffe6). 100 % = the board's own safe maximum
+    /// (~47 % of the LED's full power), so this can never make it blinding; 0 % = always off.
+    private var statusLightRow: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Status light")
+                    .themeText(.row)
+                    .foregroundStyle(theme.ink)
+                Spacer()
+                Text(statusLightPercent < 1 ? "Off" : "\(Int(statusLightPercent))%")
+                    .themeText(.rowValue)
+                    .foregroundStyle(theme.inkSoft)
+            }
+            .accessibilityHidden(true)
+            Slider(value: $statusLightPercent, in: 0...100, step: 5)
+                .tint(theme.sliderTint)
+                .accessibilityLabel("Status light")
+                .accessibilityValue(statusLightPercent < 1 ? "Off" : "\(Int(statusLightPercent)) percent")
+                .onChange(of: statusLightPercent) { newValue in
+                    let level = (min(100.0, max(0.0, newValue)) / 100 * 255).rounded()
+                    bleManager.setStatusLedLevel(UInt8(level))
+                }
+            if bleManager.isConnected && !bleManager.boardSupportsStatusLed {
+                Text("This display's firmware has no status-light control yet. Flash the latest firmware.")
+                    .themeText(.footnote)
+                    .foregroundStyle(theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
 
     private var brightnessRow: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -365,51 +393,6 @@ struct ThemePicker: View {
         case .quiet: return .system(.body).weight(.semibold)
         case .serif: return .custom("TimesNewRomanPSMT", size: 20, relativeTo: .body)
         }
-    }
-}
-
-/// Dither mode for the board's covers. Same row style as `ThemePicker`.
-struct DitherPicker: View {
-    @Binding var selection: String
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Dither")
-                .themeText(.row)
-                .foregroundStyle(theme.ink)
-                .accessibilityAddTraits(.isHeader)
-                .padding(.bottom, 6)
-            ForEach(DitherMode.allCases) { option in
-                optionRow(option)
-            }
-        }
-    }
-
-    private func optionRow(_ option: DitherMode) -> some View {
-        let isSelected = (DitherMode(rawValue: selection) ?? .fallback) == option
-        return Button {
-            selection = option.rawValue
-        } label: {
-            HStack(spacing: 12) {
-                StateMarker(filled: isSelected, fillColor: theme.ink, ringColor: theme.ringOff, size: 14)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(option.displayName)
-                        .themeText(.row)
-                        .foregroundStyle(theme.ink)
-                    Text(option.blurb)
-                        .themeText(.footnote)
-                        .foregroundStyle(theme.inkSoft)
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(minHeight: 52)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(option.displayName) dither, \(option.blurb)")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 }
 

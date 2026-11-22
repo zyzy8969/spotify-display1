@@ -1,58 +1,58 @@
 #!/usr/bin/env python3
-"""Generate ios/SpotifyDisplay.xcodeproj/project.pbxproj for SpotifyDisplay iOS app."""
+"""Generate ios/SpotifyDisplay.xcodeproj/project.pbxproj for SpotifyDisplay iOS app.
+
+Every *.swift file in SpotifyDisplay.swiftpm/Sources/SpotifyDisplay is compiled (found by listing
+the folder, sorted), plus the shared C++ transition core in
+SpotifyDisplay.swiftpm/Sources/TransitionsCore (the same file the ESP32 firmware builds). Swift sees
+the core's C API through ios/SpotifyDisplay-Bridging-Header.h, which this script also writes.
+Object ids are derived from names, so re-running it gives the same project.
+"""
+import hashlib
 import os
-import uuid
 
-def uid():
-    return uuid.uuid4().hex[:24].upper()
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(HERE, "..", "SpotifyDisplay.swiftpm", "Sources", "SpotifyDisplay")
+CORE_REL = "../SpotifyDisplay.swiftpm/Sources/TransitionsCore"
+CORE_CPP = "transitions_core.cpp"
+CORE_H = "transitions_core.h"
+BRIDGING_HEADER = "SpotifyDisplay-Bridging-Header.h"
 
-PROJECT = uid()
-TARGET = uid()
-MAIN_GROUP = uid()
-PRODUCTS_GROUP = uid()
-SOURCES_PHASE = uid()
-FRAMEWORKS_PHASE = uid()
-RESOURCES_PHASE = uid()
-APP_REF = uid()
-SPOTIFY_GROUP = uid()
-PROJECT_CONF_LIST = uid()
-TARGET_CONF_LIST = uid()
-PROJ_DEBUG = uid()
-PROJ_REL = uid()
-TGT_DEBUG = uid()
-TGT_REL = uid()
 
-swift_files = [
-    "AppDelegate.swift",
-    "BLEManager.swift",
-    "ContentView.swift",
-    "CrayonShapes.swift",
-    "Extensions.swift",
-    "ImageProcessor.swift",
-    "KeychainHelper.swift",
-    "LiveView.swift",
-    "Models.swift",
-    "NowPlayingView.swift",
-    "PhotoUploadView.swift",
-    "SettingsView.swift",
-    "SignedOutView.swift",
-    "SpotifyAuthPresenter.swift",
-    "SpotifyDisplayApp.swift",
-    "SpotifyManager.swift",
-    "StatsView.swift",
-    "Theme.swift",
-    "ThemeComponents.swift",
-    "ThemeCopy.swift",
-    "ThemeTypography.swift",
-    "TransitionPickerView.swift",
-    "Transitions.swift",
-]
+def uid(key):
+    return hashlib.md5(("SpotifyDisplay:" + key).encode("utf-8")).hexdigest()[:24].upper()
+
+
+PROJECT = uid("project")
+TARGET = uid("target")
+MAIN_GROUP = uid("group.main")
+PRODUCTS_GROUP = uid("group.products")
+SOURCES_PHASE = uid("phase.sources")
+FRAMEWORKS_PHASE = uid("phase.frameworks")
+RESOURCES_PHASE = uid("phase.resources")
+APP_REF = uid("ref.app")
+SPOTIFY_GROUP = uid("group.spotify")
+CORE_GROUP = uid("group.core")
+CORE_INCLUDE_GROUP = uid("group.core.include")
+CORE_CPP_REF = uid("ref.core.cpp")
+CORE_CPP_BUILD = uid("build.core.cpp")
+CORE_H_REF = uid("ref.core.h")
+BRIDGING_REF = uid("ref.bridging")
+PROJECT_CONF_LIST = uid("conflist.project")
+TARGET_CONF_LIST = uid("conflist.target")
+PROJ_DEBUG = uid("conf.project.debug")
+PROJ_REL = uid("conf.project.release")
+TGT_DEBUG = uid("conf.target.debug")
+TGT_REL = uid("conf.target.release")
+
+swift_files = sorted(f for f in os.listdir(SRC_DIR) if f.endswith(".swift"))
+if not swift_files:
+    raise SystemExit("no Swift files found in " + SRC_DIR)
 
 file_refs = {}
 build_files = {}
 for name in swift_files:
-    file_refs[name] = uid()
-    build_files[name] = uid()
+    file_refs[name] = uid("ref.swift." + name)
+    build_files[name] = uid("build.swift." + name)
 
 lines = []
 
@@ -70,6 +70,8 @@ p("\tobjects = {")
 p("/* Begin PBXBuildFile section */")
 for name in swift_files:
     p(f"\t\t{build_files[name]} /* {name} in Sources */ = {{isa = PBXBuildFile; fileRef = {file_refs[name]} /* {name} */; }};")
+# -O2 even in Debug: the app renders every transition with the core, frame by frame.
+p(f"\t\t{CORE_CPP_BUILD} /* {CORE_CPP} in Sources */ = {{isa = PBXBuildFile; fileRef = {CORE_CPP_REF} /* {CORE_CPP} */; settings = {{COMPILER_FLAGS = \"-O2\"; }}; }};")
 p("/* End PBXBuildFile section */")
 p("")
 
@@ -77,6 +79,9 @@ p("/* Begin PBXFileReference section */")
 p(f"\t\t{APP_REF} /* SpotifyDisplay.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpotifyDisplay.app; sourceTree = BUILT_PRODUCTS_DIR; }};")
 for name in swift_files:
     p(f"\t\t{file_refs[name]} /* {name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {name}; sourceTree = \"<group>\"; }};")
+p(f"\t\t{CORE_CPP_REF} /* {CORE_CPP} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = {CORE_CPP}; sourceTree = \"<group>\"; }};")
+p(f"\t\t{CORE_H_REF} /* {CORE_H} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = {CORE_H}; sourceTree = \"<group>\"; }};")
+p(f"\t\t{BRIDGING_REF} /* {BRIDGING_HEADER} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = \"{BRIDGING_HEADER}\"; sourceTree = \"<group>\"; }};")
 p("/* End PBXFileReference section */")
 p("")
 
@@ -100,6 +105,19 @@ p("\t\t\tname = SpotifyDisplay;")
 p('\t\t\tpath = "../SpotifyDisplay.swiftpm/Sources/SpotifyDisplay";')
 p('\t\t\tsourceTree = "<group>";')
 p("\t\t};")
+p(f"\t\t{CORE_GROUP} /* TransitionsCore */ = {{")
+p("\t\t\tisa = PBXGroup;")
+p(f"\t\t\tchildren = ({CORE_CPP_REF} /* {CORE_CPP} */, {CORE_INCLUDE_GROUP} /* include */);")
+p("\t\t\tname = TransitionsCore;")
+p(f'\t\t\tpath = "{CORE_REL}";')
+p('\t\t\tsourceTree = "<group>";')
+p("\t\t};")
+p(f"\t\t{CORE_INCLUDE_GROUP} /* include */ = {{")
+p("\t\t\tisa = PBXGroup;")
+p(f"\t\t\tchildren = ({CORE_H_REF} /* {CORE_H} */);")
+p("\t\t\tpath = include;")
+p('\t\t\tsourceTree = "<group>";')
+p("\t\t};")
 p(f"\t\t{PRODUCTS_GROUP} /* Products */ = {{")
 p("\t\t\tisa = PBXGroup;")
 p(f"\t\t\tchildren = ({APP_REF} /* SpotifyDisplay.app */);")
@@ -108,7 +126,7 @@ p('\t\t\tsourceTree = "<group>";')
 p("\t\t};")
 p(f"\t\t{MAIN_GROUP} = {{")
 p("\t\t\tisa = PBXGroup;")
-p(f"\t\t\tchildren = ({SPOTIFY_GROUP} /* SpotifyDisplay */, {PRODUCTS_GROUP} /* Products */);")
+p(f"\t\t\tchildren = ({SPOTIFY_GROUP} /* SpotifyDisplay */, {CORE_GROUP} /* TransitionsCore */, {BRIDGING_REF} /* {BRIDGING_HEADER} */, {PRODUCTS_GROUP} /* Products */);")
 p('\t\t\tsourceTree = "<group>";')
 p("\t\t};")
 p("/* End PBXGroup section */")
@@ -185,6 +203,7 @@ p("\t\t\tbuildActionMask = 2147483647;")
 p("\t\t\tfiles = (")
 for name in swift_files:
     p(f"\t\t\t\t{build_files[name]} /* {name} in Sources */,")
+p(f"\t\t\t\t{CORE_CPP_BUILD} /* {CORE_CPP} in Sources */,")
 p("\t\t\t);")
 p("\t\t\trunOnlyForDeploymentPostprocessing = 0;")
 p("\t\t};")
@@ -194,6 +213,8 @@ p("")
 INFOPLIST_PATH = "../SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist"
 
 common_target_lines = [
+    "CLANG_CXX_LANGUAGE_STANDARD = \"gnu++17\";",
+    "CLANG_CXX_LIBRARY = \"libc++\";",
     "CODE_SIGN_STYLE = Automatic;",
     "CURRENT_PROJECT_VERSION = 1;",
     'DEVELOPMENT_TEAM = "";',
@@ -204,7 +225,10 @@ common_target_lines = [
     "MARKETING_VERSION = 1.0;",
     "PRODUCT_BUNDLE_IDENTIFIER = com.example.spotifydisplay;",
     'PRODUCT_NAME = "$(TARGET_NAME)";',
+    "GCC_C_LANGUAGE_STANDARD = gnu11;",
+    f'HEADER_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/{CORE_REL}/include");',
     "SWIFT_EMIT_LOC_STRINGS = YES;",
+    f'SWIFT_OBJC_BRIDGING_HEADER = "{BRIDGING_HEADER}";',
     "SWIFT_VERSION = 5.0;",
     "TARGETED_DEVICE_FAMILY = 1;",
 ]
@@ -311,7 +335,15 @@ p("}")
 
 text = "\n".join(lines) + "\n"
 
-proj_dir = os.path.join(os.path.dirname(__file__), "SpotifyDisplay.xcodeproj")
+# Bridging header (Xcode project only; SwiftPM imports the TransitionsCore module instead).
+# The quoted include resolves relative to this header's own folder (ios/).
+bridging_path = os.path.join(HERE, BRIDGING_HEADER)
+with open(bridging_path, "w", encoding="utf-8", newline="\n") as f:
+    f.write("// Generated by ios/gen_xcodeproj.py. Lets Swift call the shared C++ transition core.\n")
+    f.write(f'#include "{CORE_REL}/include/{CORE_H}"\n')
+print("Wrote", bridging_path)
+
+proj_dir = os.path.join(HERE, "SpotifyDisplay.xcodeproj")
 out = os.path.join(proj_dir, "project.pbxproj")
 os.makedirs(proj_dir, exist_ok=True)
 with open(out, "w", encoding="utf-8") as f:

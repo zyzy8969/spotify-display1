@@ -8,8 +8,15 @@ let package = Package(
         .executable(name: "SpotifyDisplay", targets: ["SpotifyDisplay"])
     ],
     targets: [
+        // The board's transition code, shared with the ESP32 firmware (C API in include/).
+        .target(
+            name: "TransitionsCore",
+            path: "Sources/TransitionsCore",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
             name: "SpotifyDisplay",
+            dependencies: ["TransitionsCore"],
             path: "Sources/SpotifyDisplay",
             resources: [.process("Resources")]
         )

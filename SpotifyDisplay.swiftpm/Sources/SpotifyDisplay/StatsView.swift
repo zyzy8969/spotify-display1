@@ -1,12 +1,13 @@
 import SwiftUI
 
-/// The "General" page of the main screen. Shows only what the app already records:
-/// `BLEManager.transferLog` (in memory, last 30 transfers since launch) and the SD cache count. The
-/// per-transfer specifics and the live terminal are on the "Live" page (`LiveView`). The caller
-/// provides the scrolling and the side margins.
+/// General transfer stats, shown in nerd mode under the live details (`NerdStatsView`). Shows only
+/// what the app already records: `BLEManager.transferLog` (in memory, last 30 transfers since launch)
+/// and the SD cache count. The caller provides the scrolling and the side margins.
 struct GeneralStatsView: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
+    /// Nerd mode: half the gaps and fewer recent rows.
+    var compact = false
 
     @Environment(\.theme) private var theme
 
@@ -16,27 +17,31 @@ struct GeneralStatsView: View {
             if let last = entries.last {
                 LastTransferHero(entry: last)
                 PhaseBreakdown(entry: last)
-                    .padding(.top, 28)
+                    .padding(.top, gap(28))
             } else {
                 Text(theme.id.text(.nothingYet))
                     .themeText(.row)
                     .foregroundStyle(theme.inkSoft)
             }
             ThemedDivider()
-                .padding(.vertical, 24)
+                .padding(.vertical, gap(24))
             AveragesRow(entries: entries, cachedCount: bleManager.sdCacheEntryCount)
             if !entries.isEmpty {
-                RecentTransfers(entries: Array(entries.suffix(8).reversed()))
-                    .padding(.top, 24)
+                RecentTransfers(entries: Array(entries.suffix(compact ? 5 : 8).reversed()))
+                    .padding(.top, gap(24))
                 MarkerLegend()
-                    .padding(.top, 18)
+                    .padding(.top, gap(18))
             }
             Text(theme.id.text(.sinceOpened))
                 .themeText(.statCaption)
                 .foregroundStyle(theme.inkFaint)
                 .frame(maxWidth: .infinity)
-                .padding(.top, 28)
+                .padding(.top, gap(28))
         }
+    }
+
+    private func gap(_ normal: CGFloat) -> CGFloat {
+        compact ? (normal / 2).rounded() : normal
     }
 }
 
@@ -358,7 +363,7 @@ struct MarkerLegend: View {
     }
 }
 
-// MARK: - Live details (former inline debug strip)
+// MARK: - Live details (former inline debug strip; the last transition is the header icon now)
 
 struct LiveDetails: View {
     @ObservedObject var bleManager: BLEManager
@@ -388,7 +393,6 @@ struct LiveDetails: View {
         ]
         if let ack = bleManager.boardAckStatus { out.append("ack: \(ack)") }
         if let result = bleManager.lastTransferResult { out.append("last: \(result)") }
-        if let transition = bleManager.lastTransitionName { out.append("transition: \(transition)") }
         if let poll = spotifyManager.pollStatus { out.append("spotify: \(poll)") }
         if let error = spotifyManager.lastError { out.append("error: \(error)") }
         if bleManager.isTransferring {

@@ -35,11 +35,11 @@ extension ThemeID {
         case .idleLead: return p ? "your password stays with spotify" : "Your password stays with Spotify."
         case .connectSpotify: return p ? "connect spotify" : "Connect Spotify"
         case .brightness: return p ? "bright" : "Brightness"
-        case .showStats: return p ? "show stats" : "Detailed stats"
+        case .showStats: return p ? "nerd mode (live stats)" : "Nerd mode (live stats)"
         case .showStatsHint:
             return p
-                ? "adds general and live pages (swipe or tap) to the main screen"
-                : "Adds General and Live pages to the main screen: swipe or tap to switch."
+                ? "shrinks the cover and shows live details, the terminal and transfer stats under it. same as the terminal icon at the top"
+                : "Shrinks the cover and shows live details, the terminal and transfer stats under it. Same as the terminal icon at the top of the main screen."
         case .themeTitle: return p ? "look" : "Theme"
         case .onTheDisplay: return p ? "on the keychain" : "On the display"
         case .emptyCache: return p ? "empty it" : "Clear display cache"

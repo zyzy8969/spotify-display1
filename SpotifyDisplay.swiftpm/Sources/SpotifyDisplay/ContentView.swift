@@ -11,7 +11,6 @@ struct ContentView: View {
     @StateObject private var bleManager = BLEManager()
     @StateObject private var spotifyManager = SpotifyManager()
     @State private var panel: Panel?
-    @AppStorage("showDebugInfo") private var showDebugInfo = false
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
 
     var body: some View {
@@ -26,8 +25,8 @@ struct ContentView: View {
             sheetContent(panel)
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
-                // Settings, the transition picker and photo upload are full-height tasks. Stats are no
-                // longer a sheet: they are the General / Live pages of the main screen.
+                // Settings and the transition picker are full-height tasks. Stats are not a sheet:
+                // nerd mode shows them on the Now Playing screen.
                 .presentationDetents([.large])
                 .presentationDragIndicator(.hidden)
         }
@@ -50,7 +49,6 @@ struct ContentView: View {
             NowPlayingScreen(
                 bleManager: bleManager,
                 spotifyManager: spotifyManager,
-                showStatsLink: showDebugInfo,
                 onOpen: { panel = $0 }
             )
         } else {

@@ -3,8 +3,8 @@ import CoreImage
 import CoreGraphics
 import Compression
 
-/// How the 24-bit cover is reduced to the panel's RGB565. Picked in Settings (stored under
-/// `ditherMode`) so the looks can be compared on the real panel.
+/// How the 24-bit cover is reduced to the panel's RGB565. The app always uses Atkinson now
+/// (`current`); the other cases are kept but unused.
 enum DitherMode: String, CaseIterable, Identifiable {
     /// Error diffusion: finest detail, but its noise compresses poorly (BLE_PROTOCOL 1.11 deflate).
     case atkinson
@@ -17,9 +17,8 @@ enum DitherMode: String, CaseIterable, Identifiable {
     static let fallback = DitherMode.atkinson
     var id: String { rawValue }
 
-    static var current: DitherMode {
-        DitherMode(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? fallback
-    }
+    /// Always Atkinson: the Settings dither picker was removed 2026-11-22 (a stored choice is ignored).
+    static var current: DitherMode { .atkinson }
 
     var displayName: String {
         switch self {

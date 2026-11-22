@@ -37,7 +37,7 @@ struct TransitionPickerView: View {
                         }
                     }
                 }
-                Text("Previews are close approximations of what the display draws, not frame-exact copies. New songs use quick transitions unless none of them is switched on.")
+                Text("Previews are drawn by the display's own transition code, so they show the real effect; only their speed is estimated. New songs use quick transitions unless none of them is switched on.")
                     .themeText(.statCaption)
                     .foregroundStyle(theme.inkFaint)
                     .fixedSize(horizontal: false, vertical: true)

@@ -2,7 +2,31 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.12** (Enabled-transitions mask; fresh draws announce their transition; display-only photo frames.)
+Version: **1.13** (`TRANSITION_START`: the board announces each transition as it starts, so the app can mirror it.)
+
+Changes in 1.13 (live transition mirror). Additive: old apps ignore the unknown message; old firmware never
+sends it; the Python sender is unaffected.
+- **Status LED brightness** — new optional characteristic `ffe6` (write, 1 byte). 0..255 scales the
+  on-board WS2812B within its fixed safety cap (`STATUS_LED_MAX`, ~47% of full power): 255 = the cap
+  (default after boot), 0 = LED always off. Not persisted on the board: the app re-sends its saved value
+  on every connect, like screen brightness. Clients must treat `ffe6` as optional (older firmware lacks
+  it). The service now reserves 30 attribute handles so it fits.
+- **Transition start** — Message `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>`, sent right
+  before the board starts drawing a transition (after the 1x1 panel-window resync pixel, before the first
+  transition draw). Sent for every drawn frame: cache hits, fresh covers and display-only `0xFD` photos.
+  Never for store-only `0xFE` prefetch frames (they are not drawn).
+  - `index` — decimal transition index that will actually be drawn: retired slots already resolved to
+    their twin, and `0` (Wipe Up) when the board lacks the compose buffers and the pick was a
+    frame-composed one (index >= 18).
+  - `seed` — decimal `uint32` the board passes to the shared core's `tx_run`; it drives the random
+    choices (Random Blocks, Crack Split). Same index + seed + frames = the same pictures.
+  - `expectedMs` — that index's measured draw time from its last draw since boot, `0` if not drawn yet.
+  - `oldBlack` — `1` if the old frame is all black (nothing was on the panel, so the board blanked its
+    copy of the previous cover), else `0`.
+- The transitions themselves now live in a shared C++ core
+  (`SpotifyDisplay.swiftpm/Sources/TransitionsCore`), compiled into both the firmware and the iOS app, so
+  the app can render the same frames as the board. `TRANSITION:<name>` and every other message are unchanged.
+
 
 Changes in 1.12 (transition picker + photo upload). Additive: old clients, old firmware and the Python
 sender are unaffected.
@@ -87,6 +111,7 @@ log or collect unknown messages must ignore it.
 | Image (write + notify) | `0000ffe3-0000-1000-8000-00805f9b34fb` |
 | Message (notify, UTF-8) | `0000ffe4-0000-1000-8000-00805f9b34fb` |
 | Brightness (write, 1 byte 0..255) | `0000ffe5-0000-1000-8000-00805f9b34fb` |
+| Status LED brightness (write, 1 byte 0..255; 1.13) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
 
 Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications after discovery. Firmware signals readiness with status byte `0x01` and/or message `READY`.
 
@@ -159,6 +184,7 @@ message they do not recognise.
 | `READY` | Connect callback (usually lost; read Status instead) | Readiness |
 | `HB` | Every ~1 s while connected | iOS: background poll tick. Not a reply to anything |
 | `CACHE_HIT_MS:<ms>` | Cache hit, after SD load + transition | Telemetry only |
+| `TRANSITION_START:<index>:<seed>:<expectedMs>:<oldBlack>` | Right before every drawn transition starts (cache hit, fresh frame, `0xFD` photo; not `0xFE`) (1.13) | iOS: start the live mirror of the board's transition with the shared core |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |
@@ -170,7 +196,9 @@ message they do not recognise.
 | `CACHE_CLEARED`, `CACHE_CLEAR_MS:<ms>` | Clear request | See Cache check |
 | `ERROR: <reason>` | Invalid header, size mismatch, buffer overflow, decompress failed (with Image `0x02`) | Fail the in-flight transfer |
 
-Cache-hit order on the wire: `CACHE_HIT_MS` → `TRANSITION` → `CACHE_RENDERED` → Cache `0x01` → `SUCCESS`.
+Cache-hit order on the wire: `TRANSITION_START` (before the draw) → `CACHE_HIT_MS` → `TRANSITION` → `CACHE_RENDERED` → Cache `0x01` → `SUCCESS`.
+
+Fresh-frame order (1.13): `TRANSITION_START` (before the draw) → `TRANSITION` (after draw + SD save) → Image `0x01` → `SUCCESS`.
 
 ## Image format
 

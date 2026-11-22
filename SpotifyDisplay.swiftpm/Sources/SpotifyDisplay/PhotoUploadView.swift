@@ -1,8 +1,8 @@
 import UIKit
 
 /// Prepares a library photo for the display (BLE_PROTOCOL 1.12 display-only frame). The picker is the
-/// photo icon in the main screen's header; there is no sheet. The photo is centre-cropped to a square,
-/// which `ImageProcessor` then resizes to 240x240 and dithers like a cover.
+/// photo icon in the main screen's header; there is no sheet. The whole photo is stretched to a square
+/// (no crop), which `ImageProcessor` then resizes to 240x240 and dithers like a cover.
 enum PhotoPrep {
     /// Keeps big library photos from filling memory; the display only needs 240 px.
     static func downscaled(_ image: UIImage, maxSide: CGFloat) -> UIImage {
@@ -17,7 +17,9 @@ enum PhotoPrep {
         }
     }
 
-    /// Renders `image` into a `side` x `side` square (centre crop) as JPEG, honouring its orientation.
+    /// Renders `image` into a `side` x `side` square as JPEG, honouring its orientation. The whole photo
+    /// is stretched to the square (owner's choice 2026-11-22: nothing cropped off, even if that changes
+    /// its proportions), so `ImageProcessor`'s centre crop then has nothing left to cut.
     static func squareJPEG(from image: UIImage, side: CGFloat = 480) -> Data? {
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1
@@ -26,13 +28,8 @@ enum PhotoPrep {
         let rendered = renderer.image { ctx in
             UIColor.black.setFill()
             ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
-            let w = image.size.width
-            let h = image.size.height
-            guard w > 0, h > 0 else { return }
-            let scale = max(side / w, side / h)
-            let dw = w * scale
-            let dh = h * scale
-            image.draw(in: CGRect(x: (side - dw) / 2, y: (side - dh) / 2, width: dw, height: dh))
+            guard image.size.width > 0, image.size.height > 0 else { return }
+            image.draw(in: CGRect(x: 0, y: 0, width: side, height: side))
         }
         return rendered.jpegData(compressionQuality: 0.92)
     }
