@@ -73,6 +73,55 @@ enum PlayedTracks {
     }
 }
 
+/// How the keychain's status LED behaves (BLE_PROTOCOL 1.19, 2nd byte of the ffe6 write). Saved on the
+/// phone and, since 1.19, on the board too, so its power-on light follows the choice.
+enum LightStyle: Int, CaseIterable, Identifiable {
+    /// Calm lights: white breathing while looking for the phone, a rainbow on connect, a slow pulse in
+    /// the loading colour while a cover loads, one green pulse when it is drawn, amber when disconnected.
+    case consumer = 0
+    /// The per-song lights: blue = cache hit, orange = new song / transfer, blue / orange flashes = saved
+    /// ahead, green = done.
+    case developer = 1
+
+    var id: Int { rawValue }
+    var title: String { self == .consumer ? "Consumer" : "Developer" }
+    static let storageKey = "statusLightStyle"
+    static var current: LightStyle {
+        LightStyle(rawValue: UserDefaults.standard.integer(forKey: storageKey)) ?? .consumer
+    }
+}
+
+/// The consumer loading pulse's colour (3rd byte of the ffe6 write). Same RGB as firmware `LED_LOAD_RGB`.
+enum LoadingColour: Int, CaseIterable, Identifiable {
+    case blue = 0, purple, white, amber, pink, teal
+
+    var id: Int { rawValue }
+    var title: String {
+        switch self {
+        case .blue: return "Blue"
+        case .purple: return "Purple"
+        case .white: return "White"
+        case .amber: return "Amber"
+        case .pink: return "Pink"
+        case .teal: return "Teal"
+        }
+    }
+    var hex: UInt32 {
+        switch self {
+        case .blue: return 0x0050FF
+        case .purple: return 0x7A28FF
+        case .white: return 0xFFFFFF
+        case .amber: return 0xFFA000
+        case .pink: return 0xFF3C8C
+        case .teal: return 0x00D2B4
+        }
+    }
+    static let storageKey = "statusLightColour"
+    static var current: LoadingColour {
+        LoadingColour(rawValue: UserDefaults.standard.integer(forKey: storageKey)) ?? .blue
+    }
+}
+
 /// Cache-key sources of covers the queue prefetch stored on the card and that have not been drawn yet
 /// ("saved ahead"). Saved on the phone so an app relaunch between the prefetch and the song keeps it.
 enum SavedAhead {

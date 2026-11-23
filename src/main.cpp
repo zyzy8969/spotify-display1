@@ -15,6 +15,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <esp_gap_ble_api.h>
+#include <Preferences.h>
 // Inflate (raw DEFLATE) lives in the S3 ROM: no library, no flash cost. BLE_PROTOCOL 1.11.
 #include "esp32s3/rom/miniz.h"
 
@@ -607,12 +608,30 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 // so the app can never push the LED past ~47%. 255 = the full cap (default), 0 = LED always off.
 // Callback only stores the byte; loop() picks it up on the next LED update.
 volatile uint8_t statusLedLevel = 255;
+// BLE_PROTOCOL 1.19: the same write may carry 3 bytes [level, style, loading colour]. Style 0 = consumer
+// lights (default), 1 = developer lights (the per-song blue / orange / green). Colour 0-5 = blue, purple,
+// white, amber, pink, teal (consumer loading pulse). loop() saves style + colour in NVS when they change.
+#define LED_STYLE_CONSUMER 0
+#define LED_STYLE_DEVELOPER 1
+#define LED_LOAD_COLOURS 6
+volatile uint8_t ledStyle = LED_STYLE_CONSUMER;
+volatile uint8_t ledLoadColour = 0;
+volatile bool ledPrefsDirty = false;
 
 class StatusLedCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
         std::string value = pCharacteristic->getValue();
-        if (value.length() != 1) return;
+        if (value.length() != 1 && value.length() < 3) return;
         statusLedLevel = (uint8_t)value[0];
+        if (value.length() >= 3) {
+            const uint8_t style = (uint8_t)value[1] == LED_STYLE_DEVELOPER ? LED_STYLE_DEVELOPER : LED_STYLE_CONSUMER;
+            const uint8_t colour = (uint8_t)value[2] < LED_LOAD_COLOURS ? (uint8_t)value[2] : 0;
+            if (style != ledStyle || colour != ledLoadColour) {
+                ledStyle = style;
+                ledLoadColour = colour;
+                ledPrefsDirty = true;
+            }
+        }
     }
 };
 
@@ -1198,6 +1217,17 @@ void setup() {
   gfx->fillScreen(WHITE);
   ledcWrite(TFT_BL_PWM_CHANNEL, 50);
   neopixelWrite(STATUS_LED_PIN, 0, 0, 0);  // status LED starts dark (it can latch junk at power-up)
+  {
+    // 1.19: light style and loading colour from the last app write, so the power-on light follows it.
+    Preferences prefs;
+    if (prefs.begin("lights", true)) {
+      const uint8_t style = prefs.getUChar("style", LED_STYLE_CONSUMER);
+      const uint8_t colour = prefs.getUChar("colour", 0);
+      ledStyle = style == LED_STYLE_DEVELOPER ? LED_STYLE_DEVELOPER : LED_STYLE_CONSUMER;
+      ledLoadColour = colour < LED_LOAD_COLOURS ? colour : 0;
+      prefs.end();
+    }
+  }
 
   // Configure MADCTL register (0x36) for RGB/BGR color order
   // Using 0x00: RGB mode (matches RGB565 format from Python)
@@ -1693,7 +1723,19 @@ void clearCacheDirectory() {
 // Status LED — the board's WS2812B on GPIO15 (Waveshare ESP32-S3; was unused).
 // Driven ONLY from loop(): neopixelWrite() uses the RMT peripheral and must not run on the tiny
 // BTC_TASK stack. Callbacks only set flags / counters that loop() already reads.
-// Owner's rules (2026-11-23):
+// Two styles (BLE_PROTOCOL 1.19, picked in the app, saved in NVS):
+// CONSUMER (default, 2026-11-23):
+//   powered on, no phone yet           -> slow white breathing (2.5 s)
+//   phone connected                    -> one rainbow sweep (1 s), then off
+//   loading a cover (cache check until -> slow pulse (1.6 s) in the loading colour (default blue)
+//     it is fully drawn)
+//   drawn                              -> one green pulse (0.7 s), then off
+//   disconnected after a connection    -> slow amber blink (2 s) until the phone is back (then rainbow)
+//   error                              -> three red blinks
+//   low battery / charging             -> stubbed: the board has no charge-status pin, and the battery
+//                                         sense (GPIO6) is not read yet (owner, 2026-11-23)
+//   playing otherwise                  -> off
+// DEVELOPER (the owner's rules, 2026-11-23):
 //   song played before, cover on SD    -> blue while it draws, then green
 //   new song, cover sent over BLE      -> orange (pulsing, brighter as the frame fills), then green
 //   cover saved ahead by the queue     -> quick blue / orange flashes while it draws, then green
@@ -1709,14 +1751,32 @@ void clearCacheDirectory() {
 // long (skip, phone gave up), it goes off.
 #define LED_WAITING_TIMEOUT_MS 10000  // the app's line stays orange this long too (download + dither)
 // LED_BOTH: each blue / orange half of the flash. The app's line uses the same (StripTiming.aheadFlash).
-#define LED_BOTH_FLASH_MS 150
+// 170 ms halves = 2.9 changes a second: under the ~3 flashes/s photosensitivity limit.
+#define LED_BOTH_FLASH_MS 170
 
 #define LED_RGB_BLUE   0x0050FF
 #define LED_RGB_ORANGE 0xFF5A00
 #define LED_RGB_GREEN  0x00FF28
 #define LED_RGB_RED    0xFF0000
 
-enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR };
+enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR,
+                         LED_LOADING, LED_RAINBOW };  // the last two: consumer style only
+#define LED_LOADING_TIMEOUT_MS 12000  // consumer: a load that never finishes (phone gave up) goes dark
+#define LED_ERROR_BLINK_MS 170        // three red blinks, 2.9 a second
+// Consumer loading colours, index = the 1.19 colour byte. The app shows the same six.
+static const uint32_t LED_LOAD_RGB[LED_LOAD_COLOURS] = {
+  0x0050FF,  // blue
+  0x7A28FF,  // purple
+  0xFFFFFF,  // white
+  0xFFA000,  // amber
+  0xFF3C8C,  // pink
+  0x00D2B4,  // teal
+};
+#define LED_RGB_WHITE  0xFFFFFF
+#define LED_RGB_AMBER  0xFFA000
+static bool ledEverConnected = false;
+static bool ledWasReceiving = false;   // consumer: last ledPoll saw a frame arriving  // consumer: amber blink only after a phone has connected once
+static inline bool ledConsumer() { return ledStyle == LED_STYLE_CONSUMER; }
 static LedMode ledMode = LED_OFF;
 static unsigned long ledModeSince = 0;
 static uint32_t ledLastWritten = 0xFFFFFFFF;
@@ -1736,10 +1796,74 @@ static void ledShow(uint32_t rgb, uint16_t level) {
               (uint8_t)((rgb & 0xFF) * k / 255));
 }
 
+// 0..255 on a cosine: 0 at t = 0, 255 at half the period.
+static uint16_t ledWave(unsigned long t, unsigned long period) {
+  const float x = (float)(t % period) / (float)period;
+  return (uint16_t)((1.0f - cosf(x * 2.0f * (float)M_PI)) * 127.5f);
+}
+
+// Hue 0..1535 at full saturation.
+static uint32_t ledHue(uint32_t h) {
+  h %= 1536;
+  const uint32_t f = h & 0xFF;
+  switch (h >> 8) {
+    case 0: return 0xFF0000 | (f << 8);
+    case 1: return ((255 - f) << 16) | 0x00FF00;
+    case 2: return 0x00FF00 | f;
+    case 3: return ((255 - f) << 8) | 0x0000FF;
+    case 4: return (f << 16) | 0x0000FF;
+    default: return 0xFF0000 | (255 - f);
+  }
+}
+
+// Stubs (owner, 2026-11-23): the board has no charge-status pin, and reading the battery sense on GPIO6
+// was not approved yet. Low battery would be a brief red blink every ~10 s; charging steady green.
+static bool ledBatteryLow() { return false; }
+static bool ledCharging() { return false; }
+
+// Consumer style. Returns true when it drew the LED (false = the shared modes below, i.e. LED_ERROR).
+static bool ledUpdateConsumer(unsigned long t) {
+  switch (ledMode) {
+    case LED_OFF: {
+      const unsigned long now = millis();
+      if (!deviceConnected) {
+        if (ledEverConnected) ledShow(LED_RGB_AMBER, (now % 2000) < 700 ? 200 : 0);  // slow amber blink
+        else ledShow(LED_RGB_WHITE, 15 + ledWave(now, 2500) * 200 / 255);            // white breathing
+      } else if (ledCharging()) {
+        ledShow(LED_RGB_GREEN, 120);
+      } else if (ledBatteryLow() && (now % 10000) < 150) {
+        ledShow(LED_RGB_RED, 160);
+      } else {
+        ledWriteRaw(0, 0, 0);
+      }
+      return true;
+    }
+    case LED_LOADING:
+      if (t >= LED_LOADING_TIMEOUT_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
+      // Slow pulse, starting dim: 25% -> 100% -> 25% every 1.6 s.
+      ledShow(LED_LOAD_RGB[ledLoadColour % LED_LOAD_COLOURS], 64 + ledWave(t, 1600) * 191 / 255);
+      return true;
+    case LED_RAINBOW:
+      if (t >= 1000) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
+      ledShow(ledHue(t * 1536 / 1000), 255);
+      return true;
+    case LED_DONE:
+      // One green pulse: fade in, fade out, 0.7 s.
+      if (t >= 700) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
+      ledShow(LED_RGB_GREEN, (uint16_t)(sinf((float)t / 700.0f * (float)M_PI) * 255.0f));
+      return true;
+    default:
+      return false;
+  }
+}
+
 static void ledUpdate() {
   unsigned long t = millis() - ledModeSince;
+  if (ledConsumer() && ledUpdateConsumer(t)) return;
   switch (ledMode) {
     case LED_OFF:
+    case LED_LOADING:
+    case LED_RAINBOW:
       ledWriteRaw(0, 0, 0);
       break;
     case LED_CACHE:
@@ -1779,7 +1903,7 @@ static void ledUpdate() {
       else { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); }
       break;
     case LED_ERROR:
-      if (t < 450) ledShow(LED_RGB_RED, ((t / 150) % 2) ? 0 : 140);  // on-off-on
+      if (t < LED_ERROR_BLINK_MS * 5) ledShow(LED_RGB_RED, ((t / LED_ERROR_BLINK_MS) % 2) ? 0 : 140);  // 3 blinks
       else { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); }
       break;
   }
@@ -1795,6 +1919,14 @@ static void notifyDrawn() {
 }
 
 static void ledSetMode(LedMode m) {
+  if (ledConsumer()) {
+    // Consumer: every per-song colour is one "loading" pulse, from the cache check until DRAWN. A
+    // change between them keeps the pulse going (no restart).
+    if (m == LED_CACHE || m == LED_NEW || m == LED_BOTH || m == LED_WAITING || m == LED_TRANSFER) m = LED_LOADING;
+    if (m == LED_LOADING && ledMode == LED_LOADING) { ledUpdate(); return; }
+  } else if (m == LED_LOADING || m == LED_RAINBOW) {
+    return;  // consumer-only effects
+  }
   ledMode = m;
   ledModeSince = millis();
   ledUpdate();  // show it now: the caller may be about to block on SD or a transition
@@ -1816,9 +1948,28 @@ static void ledPoll() {
     ledErrorPending = false;
     ledSetMode(LED_ERROR);
   }
+  if (ledPrefsDirty) {
+    ledPrefsDirty = false;
+    Preferences prefs;
+    if (prefs.begin("lights", false)) {
+      prefs.putUChar("style", ledStyle);
+      prefs.putUChar("colour", ledLoadColour);
+      prefs.end();
+    }
+    // Style switched: drop whatever the other style was showing.
+    ledSetMode(LED_OFF);
+  }
   bool receiving = deviceConnected && imageState == RECEIVING_DATA &&
                    pendingTransition != TRANSITION_STORE_ONLY;
-  if (receiving && ledMode != LED_TRANSFER && ledMode != LED_ERROR) {
+  const LedMode receivingMode = ledConsumer() ? LED_LOADING : LED_TRANSFER;
+  // Consumer: a frame that stops arriving without completing (skip / app suspended) ends the pulse, like
+  // developer style's LED_TRANSFER -> off below. A cache check clears ledWasReceiving first, so the next
+  // song's pulse is not cut.
+  if (ledConsumer() && ledWasReceiving && !receiving && !imageTransferComplete && ledMode == LED_LOADING) {
+    ledSetMode(LED_OFF);
+  }
+  ledWasReceiving = receiving;
+  if (receiving && ledMode != receivingMode && ledMode != LED_ERROR) {
     ledSetMode(LED_TRANSFER);
   } else if (!receiving && ledMode == LED_TRANSFER && !imageTransferComplete) {
     ledSetMode(LED_OFF);  // frame abandoned (skip / resync / disconnect)
@@ -1903,6 +2054,9 @@ void loop() {
     // BLE_PROTOCOL 1.17: the board takes the new-song cache check (orange LED).
     pMsgChar->setValue("CAPS:newsong");
     pMsgChar->notify();
+    // BLE_PROTOCOL 1.19: ffe6 takes [level, style, loading colour] (consumer / developer lights).
+    pMsgChar->setValue("CAPS:lights");
+    pMsgChar->notify();
     publishCacheCount();
     publishCacheStats();
   }
@@ -1960,6 +2114,9 @@ void loop() {
     // before the board knows (the lookup is the in-memory index, well under 1 ms).
     const bool newSong = cacheCheckNewSong;
     cacheCheckNewSong = false;
+    // Consumer: the loading pulse starts with the check and runs until DRAWN.
+    ledWasReceiving = false;
+    if (ledConsumer()) ledSetMode(LED_LOADING);
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
@@ -1972,7 +2129,7 @@ void loop() {
       Serial.println("BLE: Cache HIT");
 
       // Dark during the SD load; blue / the flashes start with TRANSITION_START (ledApplyDrawStart).
-      ledSetMode(LED_OFF);
+      if (!ledConsumer()) ledSetMode(LED_OFF);
       ledAtDrawStart = newSong ? LED_BOTH : LED_CACHE;
       // Load and display cached image
       if (loadFromCache(currentCacheKey)) {
@@ -2147,6 +2304,8 @@ void loop() {
   if (deviceConnected && !oldDeviceConnected) {
     // Client just connected
     oldDeviceConnected = deviceConnected;
+    ledEverConnected = true;
+    ledSetMode(LED_RAINBOW);  // consumer: one rainbow sweep (developer style ignores it)
     connIntervalFallbackSent = false;
 
     showingStartupScreen = false;

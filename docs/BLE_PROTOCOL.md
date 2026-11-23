@@ -2,7 +2,30 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.18** (`DRAWN`: the board says when a cover is fully on screen, with its green LED.)
+Version: **1.19** (consumer / developer status lights and the loading colour, on the ffe6 write.)
+
+Changes in 1.19 (2026-11-23; owner-approved format). Additive: old firmware never announces `CAPS:lights`,
+so the app keeps sending it the 1-byte write; old apps never send 3 bytes, so new firmware keeps its saved
+style.
+- **Status light write (ffe6) may carry 3 bytes**: `[level, style, colour]`.
+  - `level` — as in 1.13 (0..255 of the safety cap, 0 = off).
+  - `style` — `0` = consumer lights (default), `1` = developer lights (the per-song blue / orange / green of
+    1.17-1.18). Other values = consumer.
+  - `colour` — consumer loading colour: `0` blue, `1` purple, `2` white, `3` amber, `4` pink, `5` teal.
+    Out of range = blue.
+  A 1-byte write still sets only the level. Any other length is ignored (as before). The board saves
+  `style` and `colour` in NVS (namespace `lights`), so its power-on light follows the last choice. Send the
+  3-byte form only to boards that announced `CAPS:lights`: older firmware drops it, level included.
+- **`CAPS:lights`** — sent on every stats request after `CAPS:newsong`.
+- Consumer lights (firmware behaviour, no further wire change): white breathing (2.5 s) until a phone
+  connects; one rainbow sweep (1 s) on connect; a slow pulse (1.6 s) in the loading colour from the cache
+  check until `DRAWN`; one green pulse (0.7 s) with `DRAWN`; slow amber blink (2 s) after a connection is
+  lost; three red blinks on an error. Low battery / charging are stubbed (no charge-status pin; the battery
+  sense is not read). Nothing flashes faster than ~3 a second: the developer saved-ahead flash and the red
+  blinks now use 170 ms halves (were 150 ms).
+- App behaviour (no wire change since 1.18): the blue / orange developer flash means "cover saved ahead by
+  the app's queue prefetch, not drawn yet"; the 1.17 new-song magic is sent only for those. The board lights
+  the LED next to the notify the app mirrors (`TRANSITION_START`, the miss reply, `DRAWN`).
 
 Changes in 1.18 (2026-11-22). Additive: old apps ignore the message; old firmware never sends it (the app
 then shows no "new" / "cache" word).
@@ -202,7 +225,7 @@ log or collect unknown messages must ignore it.
 | Image (write + notify) | `0000ffe3-0000-1000-8000-00805f9b34fb` |
 | Message (notify, UTF-8) | `0000ffe4-0000-1000-8000-00805f9b34fb` |
 | Brightness (write, 1 byte 0..255) | `0000ffe5-0000-1000-8000-00805f9b34fb` |
-| Status LED brightness (write, 1 byte 0..255; 1.13) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
+| Status LED (write: 1 byte level 0..255, 1.13; or 3 bytes level + style + colour, 1.19) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
 
 Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications after discovery. Firmware signals readiness with status byte `0x01` and/or message `READY`.
 
@@ -281,6 +304,7 @@ message they do not recognise.
 | `CAPS:next` | Stats request, after `CAPS:t128` (1.16) | iOS: may send the one-shot next-draw transition (swap flip) |
 | `CAPS:newsong` | Stats request, after `CAPS:next` (1.17) | iOS: may send the new-song cache check (orange LED) |
 | `DRAWN` | A cover is fully on screen, with the green LED (1.18) | iOS: pop the "new" / "cache" word now |
+| `CAPS:lights` | Stats request, after `CAPS:newsong` (1.19) | iOS: may send the 3-byte status-light write (style + loading colour) |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |

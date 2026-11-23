@@ -645,6 +645,11 @@ struct NowPlayingScreen: View {
             bleFloor: stripBleFloor,
             failed: stripFailed,
             light: bleManager.boardLight,
+            style: bleManager.lightStyle,
+            loadingColour: bleManager.loadingColour,
+            connected: bleManager.isConnected,
+            everConnected: bleManager.everConnected,
+            connectedAt: bleManager.connectedAt,
             thickness: nerd ? ArtMetrics.nerdStripThickness : nil
         )
     }
@@ -1226,8 +1231,16 @@ enum StripRun: Equatable {
 /// approaches `creepCeiling` but never reaches it; real BLE progress fills the rest.
 enum StripTiming {
     /// A never-played song found on the card (saved ahead): the line flashes blue / orange, each half this
-    /// long, until the board is done, like the keychain's light (firmware `LED_BOTH_FLASH_MS`).
-    static let aheadFlash = 0.15
+    /// long, until the board is done, like the keychain's light (firmware `LED_BOTH_FLASH_MS`; 2.9 changes
+    /// a second, under the ~3 flashes/s photosensitivity limit).
+    static let aheadFlash = 0.17
+    // Consumer lights (firmware `ledUpdateConsumer`), seconds.
+    static let consumerLoadingPeriod = 1.6
+    static let consumerDonePulse = 0.7
+    static let consumerBreathPeriod = 2.5
+    static let consumerRainbow = 1.0
+    static let consumerAmberPeriod = 2.0
+    static let consumerAmberOn = 0.7
     static let creepCeiling = 0.6
     static let creepTau = 0.6
     /// Time to run from the current fill to 100% on success (short: the LED snaps to green).
@@ -1268,6 +1281,19 @@ enum StripColors {
     static func error(_ theme: Theme) -> Color {
         Color(hex: 0xFF0000)
     }
+
+    /// Consumer colours. White on a white page would vanish, so the light themes get a mid grey for it.
+    static func loading(_ colour: LoadingColour, _ theme: Theme) -> Color {
+        colour == .white ? white(theme) : Color(hex: colour.hex)
+    }
+
+    static func white(_ theme: Theme) -> Color {
+        theme.colorScheme == .dark ? Color(hex: 0xFFFFFF) : Color(hex: 0x8C8C8C)
+    }
+
+    static func amber(_ theme: Theme) -> Color {
+        Color(hex: 0xFFA000)
+    }
 }
 
 struct LiveStrip: View {
@@ -1280,6 +1306,13 @@ struct LiveStrip: View {
     var failed = false
     /// What the keychain's LED shows right now (`BLEManager.boardLight`); the line uses the same colour.
     var light: BLEManager.BoardLight = .off
+    /// Consumer lights (BLE_PROTOCOL 1.19): the line mirrors the calm LED instead of the per-song colours.
+    var style: LightStyle = .developer
+    var loadingColour: LoadingColour = .blue
+    /// Connection, for the consumer "looking" breathing, amber "lost" blink and connect rainbow.
+    var connected = true
+    var everConnected = false
+    var connectedAt: Date? = nil
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
 
@@ -1322,6 +1355,10 @@ struct LiveStrip: View {
     private var lineWidth: CGFloat { thickness ?? theme.stripThickness }
 
     private var isAnimating: Bool {
+        if style == .consumer {
+            if !connected { return true }  // breathing / amber blink
+            if let at = connectedAt, Date().timeIntervalSince(at) < StripTiming.consumerRainbow { return true }
+        }
         switch run {
         case .idle: return false
         case .running, .finished: return true
@@ -1346,6 +1383,7 @@ struct LiveStrip: View {
     }
 
     private func appearance(at now: Date) -> Look {
+        if style == .consumer { return consumerAppearance(at: now) }
         switch run {
         case .idle:
             return Look(fill: 0, color: .clear, opacity: 0, dashedTrack: false, marker: restingMarker)
@@ -1396,6 +1434,56 @@ struct LiveStrip: View {
             let dt = now.timeIntervalSince(at)
             let opacity = reduceMotion ? 0 : max(0, 1 - dt / StripTiming.endFade)
             return Look(fill: from, color: StripColors.fresh(theme), opacity: opacity, dashedTrack: false, marker: .none)
+        }
+    }
+
+    /// 0...1 on a cosine: 0 at the start of each period, 1 half-way (firmware `ledWave`).
+    private func wave(_ t: TimeInterval, period: TimeInterval) -> Double {
+        let x = (max(0, t).truncatingRemainder(dividingBy: period)) / period
+        return (1 - cos(x * 2 * .pi)) / 2
+    }
+
+    /// The consumer LED, full width, brightness as opacity (firmware `ledUpdateConsumer`).
+    private func consumerAppearance(at now: Date) -> Look {
+        func lit(_ color: Color, _ level: Double, dashed: Bool = false) -> Look {
+            Look(fill: 1, color: color, opacity: max(0, min(1, level)), dashedTrack: dashed, marker: .none)
+        }
+        let dark = Look(fill: 0, color: .clear, opacity: 0, dashedTrack: false, marker: .none)
+        let epoch = now.timeIntervalSince1970
+        if !connected {
+            if everConnected {
+                // Slow amber blink (Reduce Motion: steady amber).
+                let on = reduceMotion || epoch.truncatingRemainder(dividingBy: StripTiming.consumerAmberPeriod) < StripTiming.consumerAmberOn
+                return on ? lit(StripColors.amber(theme), 0.8) : dark
+            }
+            let level = reduceMotion ? 0.5 : 0.06 + 0.8 * wave(epoch, period: StripTiming.consumerBreathPeriod)
+            return lit(StripColors.white(theme), level)
+        }
+        switch run {
+        case .running(let start):
+            // Slow pulse in the loading colour, from the cache check until DRAWN; 25% -> 100% -> 25%.
+            let level = reduceMotion ? 0.8 : 0.25 + 0.75 * wave(now.timeIntervalSince(start), period: StripTiming.consumerLoadingPeriod)
+            return lit(StripColors.loading(loadingColour, theme), level, dashed: stage == .checking)
+        case .finished(let at, _):
+            let dt = now.timeIntervalSince(at)
+            guard dt < StripTiming.consumerDonePulse else { return dark }
+            let level = reduceMotion ? 1 : sin(dt / StripTiming.consumerDonePulse * .pi)
+            return lit(StripColors.done(theme), level)
+        case .ended(let at, _):
+            if failed {
+                return Look(fill: 1, color: StripColors.error(theme), opacity: 1, dashedTrack: false, marker: .failed)
+            }
+            let dt = now.timeIntervalSince(at)
+            return lit(StripColors.loading(loadingColour, theme), reduceMotion ? 0 : max(0, 0.5 - dt / StripTiming.endFade))
+        case .idle:
+            if let at = connectedAt {
+                let dt = now.timeIntervalSince(at)
+                if dt >= 0 && dt < StripTiming.consumerRainbow {
+                    // One rainbow sweep (Reduce Motion: skipped).
+                    return reduceMotion ? dark : lit(Color(hue: dt / StripTiming.consumerRainbow, saturation: 1, brightness: 1), 1)
+                }
+            }
+            return dark
         }
     }
 

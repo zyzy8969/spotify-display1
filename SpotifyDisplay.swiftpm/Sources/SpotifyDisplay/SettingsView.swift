@@ -100,6 +100,87 @@ struct SettingsView: View {
                     .foregroundStyle(theme.inkSoft)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            lightStylePicker
+            if bleManager.lightStyle == .consumer {
+                loadingColourPicker
+            }
+            if bleManager.isConnected && bleManager.boardSupportsStatusLed && !bleManager.boardSupportsLights {
+                Text("This display's firmware only knows the developer lights. Flash the latest firmware for the consumer lights and loading colour.")
+                    .themeText(.footnote)
+                    .foregroundStyle(theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Consumer (calm, default) or Developer (per-song colours) lights (BLE_PROTOCOL 1.19).
+    private var lightStylePicker: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 0) {
+                ForEach(LightStyle.allCases) { style in
+                    let selected = bleManager.lightStyle == style
+                    Button { bleManager.setLightStyle(style) } label: {
+                        HStack(spacing: 6) {
+                            StateMarker(filled: selected, fillColor: theme.display, ringColor: theme.ringOff, size: 9)
+                            Text(style.title)
+                                .themeText(.rowValue)
+                                .foregroundStyle(selected ? theme.ink : theme.inkSoft)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(style.title) lights")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+            Text(bleManager.lightStyle == .consumer
+                 ? "Calm: white breathing while it looks for your phone, a rainbow when it connects, a slow pulse while a cover loads, one green pulse when it's drawn, amber blinking if the phone is lost."
+                 : "Per song: blue = from the card, orange = new cover being sent, blue / orange flashes = saved ahead from your queue, green = drawn, red = error.")
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The consumer loading pulse's colour: swatches with their names, so the choice never depends on
+    /// telling colours apart.
+    private var loadingColourPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Loading colour")
+                .themeText(.rowValue)
+                .foregroundStyle(theme.ink)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 6) {
+                ForEach(LoadingColour.allCases) { colour in
+                    let selected = bleManager.loadingColour == colour
+                    Button { bleManager.setLoadingColour(colour) } label: {
+                        VStack(spacing: 4) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color(hex: colour.hex))
+                                    .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
+                                    .frame(width: 26, height: 26)
+                                if selected {
+                                    Circle()
+                                        .stroke(theme.ink, lineWidth: 2)
+                                        .frame(width: 34, height: 34)
+                                }
+                            }
+                            .frame(width: 36, height: 36)
+                            Text(colour.title)
+                                .themeText(.statCaption)
+                                .foregroundStyle(selected ? theme.ink : theme.inkSoft)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(colour.title) loading colour")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
         }
     }
 

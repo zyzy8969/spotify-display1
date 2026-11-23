@@ -37,6 +37,15 @@ final class BLEManager: NSObject, ObservableObject {
     }()
     /// The connected board has the status-LED characteristic (firmware with BLE_PROTOCOL 1.13+).
     @Published private(set) var boardSupportsStatusLed = false
+    /// Board said `CAPS:lights` (BLE_PROTOCOL 1.19): ffe6 takes [level, style, loading colour].
+    @Published private(set) var boardSupportsLights = false
+    /// Consumer / developer lights and the loading colour (saved on the phone; sent with the level).
+    @Published private(set) var lightStyle: LightStyle = .current
+    @Published private(set) var loadingColour: LoadingColour = .current
+    /// When the current connection came up (the consumer rainbow plays from then) and whether one ever
+    /// did this launch (then a lost connection is the amber blink, not the white "looking" breathing).
+    @Published private(set) var connectedAt: Date?
+    @Published private(set) var everConnected = false
     /// Slider settings whose writes are throttled (see `throttledWrite`).
     private enum ThrottledSetting { case brightness, statusLed }
     private var lastSettingWriteAt: [ThrottledSetting: Date] = [:]
@@ -322,7 +331,9 @@ final class BLEManager: NSObject, ObservableObject {
     private func enterConnectedStateAndDiscover(_ peripheral: CBPeripheral) {
         self.peripheral = peripheral
         peripheral.delegate = self
+        if !isConnected { connectedAt = Date() }
         isConnected = true
+        everConnected = true
         sdCacheEntryCount = nil
         sdCacheCountLoading = true
         sawReady = false
@@ -1110,6 +1121,8 @@ final class BLEManager: NSObject, ObservableObject {
         brightnessChar = nil
         statusLedChar = nil
         boardSupportsStatusLed = false
+        boardSupportsLights = false
+        connectedAt = nil
         sawReady = false
         boardSupportsDeflate = false
         boardSupportsTransitionMask = false
@@ -1231,6 +1244,12 @@ final class BLEManager: NSObject, ObservableObject {
         }
         if text == "CAPS:next" { boardSupportsNextTransition = true }
         if text == "CAPS:newsong" { boardSupportsNewSong = true }
+        if text == "CAPS:lights" {
+            // Repeated on every stats reply: send the style + colour once per connection.
+            let firstTime = !boardSupportsLights
+            boardSupportsLights = true
+            if firstTime { writeStatusLight() }
+        }
         if text == "DRAWN" {
             // The board's LED turned green as it sent this: the line does the same now.
             drawnAt = Date()
@@ -1641,8 +1660,33 @@ extension BLEManager {
         throttledWrite(.statusLed) { [weak self] in
             guard let self else { return }
             UserDefaults.standard.set(Int(self.statusLedLevel), forKey: "ble_status_led")
-            self.writeByte(self.statusLedLevel, to: self.statusLedChar)
+            self.writeStatusLight()
         }
+    }
+
+    /// Consumer / developer lights (BLE_PROTOCOL 1.19). Saved, then sent with the level.
+    func setLightStyle(_ style: LightStyle) {
+        lightStyle = style
+        UserDefaults.standard.set(style.rawValue, forKey: LightStyle.storageKey)
+        writeStatusLight()
+        log("tx      status light: \(style.title)", kind: .tx)
+    }
+
+    /// The consumer loading pulse's colour (BLE_PROTOCOL 1.19).
+    func setLoadingColour(_ colour: LoadingColour) {
+        loadingColour = colour
+        UserDefaults.standard.set(colour.rawValue, forKey: LoadingColour.storageKey)
+        writeStatusLight()
+    }
+
+    /// ffe6: [level, style, colour] to boards that said `CAPS:lights`; just [level] to older ones (they
+    /// drop any other length, which would lose the level too).
+    private func writeStatusLight() {
+        guard let p = peripheral, let c = statusLedChar else { return }
+        let bytes: [UInt8] = boardSupportsLights
+            ? [statusLedLevel, UInt8(lightStyle.rawValue), UInt8(loadingColour.rawValue)]
+            : [statusLedLevel]
+        p.writeValue(Data(bytes), for: c, type: .withResponse)
     }
 
     func clearDisplayCache() async throws {
