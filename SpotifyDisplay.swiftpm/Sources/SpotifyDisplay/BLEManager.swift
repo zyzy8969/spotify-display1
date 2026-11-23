@@ -792,6 +792,10 @@ final class BLEManager: NSObject, ObservableObject {
 
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         try ensureTransferEpoch(epochAtStart)
+        // A photo upload cancels only the transfer on the link. A prefetch caught between covers would
+        // otherwise start its probe mid-photo (the board drops a partial frame on any cache check).
+        // CancellationError ends the whole prefetch loop in SpotifyManager.
+        if photoHold { throw CancellationError() }
 
         let cacheKey = String.cacheKeySource(albumId: albumId, imageURL: primaryURL).md5Digest
         if try await sendCacheQuery(magic: cacheProbeMagic, cacheKey: cacheKey) { return .alreadyCached }
@@ -813,6 +817,7 @@ final class BLEManager: NSObject, ObservableObject {
             try ImageProcessor.convertToRGB565(imageData: data)
         }.value
         try ensureTransferEpoch(epochAtStart)
+        if photoHold { throw CancellationError() }
         guard rgb565.count == imagePayloadBytes else { throw SpotifyDisplayError.conversionFailed }
 
         _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
