@@ -1239,7 +1239,7 @@ enum StripTiming {
     // Consumer lights (firmware `ledUpdateConsumer`), seconds.
     static let consumerLoadingPeriod = 1.6
     /// Rainbow loading colour: one hue turn (firmware `LED_LOAD_RAINBOW_MS`).
-    static let consumerRainbowLoading = 2.0
+    static let consumerRainbowLoading = 0.5
     /// Firmware `LED_GREEN_PULSE_MS`: the short green "confirmed" pulse after DRAWN.
     static let consumerGreenPulse = 0.5
     static let consumerBreathPeriod = 2.5

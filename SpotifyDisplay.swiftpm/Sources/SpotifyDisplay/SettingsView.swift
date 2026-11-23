@@ -156,17 +156,9 @@ struct SettingsView: View {
                     Button { bleManager.setLoadingColour(colour) } label: {
                         VStack(spacing: 4) {
                             ZStack {
-                                Group {
-                                    if colour == .rainbow {
-                                        Circle().fill(AngularGradient(
-                                            colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
-                                            center: .center))
-                                    } else {
-                                        Circle().fill(Color(hex: colour.hex))
-                                    }
-                                }
-                                .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
-                                .frame(width: 26, height: 26)
+                                LoadingSwatch(colour: colour, pulsing: selected)
+                                    .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
+                                    .frame(width: 26, height: 26)
                                 if selected {
                                     Circle()
                                         .stroke(theme.ink, lineWidth: 2)
@@ -629,6 +621,34 @@ struct DayNightSwitch: View {
         .buttonStyle(.plain)
         .accessibilityLabel("\(themeName) \(label)")
         .accessibilityAddTraits(on ? [.isButton, .isSelected] : [.isButton])
+    }
+}
+
+/// One loading-colour swatch. The picked one pulses like the keychain's LED (100% -> 25% -> 100% every
+/// 1.6 s; Rainbow also turns, one turn per 0.5 s), so you see the colour while choosing; the board
+/// pulses it twice too. Reduce Motion: still.
+private struct LoadingSwatch: View {
+    let colour: LoadingColour
+    let pulsing: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(paused: !pulsing || reduceMotion)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let animate = pulsing && !reduceMotion
+            let level = animate ? 1 - 0.75 * (1 - cos(t.truncatingRemainder(dividingBy: 1.6) / 1.6 * 2 * .pi)) / 2 : 1
+            Group {
+                if colour == .rainbow {
+                    Circle()
+                        .fill(AngularGradient(colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
+                                              center: .center))
+                        .rotationEffect(.degrees(animate ? t.truncatingRemainder(dividingBy: 0.5) / 0.5 * 360 : 0))
+                } else {
+                    Circle().fill(Color(hex: colour.hex))
+                }
+            }
+            .opacity(level)
+        }
     }
 }
 

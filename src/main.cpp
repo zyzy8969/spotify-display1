@@ -618,6 +618,8 @@ volatile uint8_t statusLedLevel = 255;
 volatile uint8_t ledStyle = LED_STYLE_CONSUMER;
 volatile uint8_t ledLoadColour = 0;
 volatile bool ledPrefsDirty = false;
+volatile bool ledStyleChanged = false;   // drop what the other style was showing
+volatile bool ledColourChanged = false;  // consumer: preview the new loading colour (two pulses)
 
 class StatusLedCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
@@ -628,6 +630,8 @@ class StatusLedCallbacks: public BLECharacteristicCallbacks {
             const uint8_t style = (uint8_t)value[1] == LED_STYLE_DEVELOPER ? LED_STYLE_DEVELOPER : LED_STYLE_CONSUMER;
             const uint8_t colour = (uint8_t)value[2] < LED_LOAD_COLOURS ? (uint8_t)value[2] : 0;
             if (style != ledStyle || colour != ledLoadColour) {
+                if (style != ledStyle) ledStyleChanged = true;
+                if (colour != ledLoadColour) ledColourChanged = true;
                 ledStyle = style;
                 ledLoadColour = colour;
                 ledPrefsDirty = true;
@@ -1761,7 +1765,8 @@ void clearCacheDirectory() {
 #define LED_RGB_RED    0xFF0000
 
 enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR,
-                         LED_LOADING, LED_RAINBOW };  // the last two: consumer style only
+                         LED_LOADING, LED_RAINBOW, LED_PREVIEW };  // the last three: consumer only
+#define LED_PREVIEW_MS 3200           // consumer: a new loading colour pulses twice so you can see it
 #define LED_GREEN_PULSE_MS 500        // consumer: one short green "confirmed" pulse after DRAWN
 #define LED_LOADING_TIMEOUT_MS 12000  // consumer: a load that never finishes (phone gave up) goes dark
 #define LED_ERROR_BLINK_MS 170        // three red blinks, 2.9 a second
@@ -1780,7 +1785,8 @@ static const uint32_t LED_LOAD_RGB[LED_LOAD_COLOURS] = {
   0xFF6450,  // coral
   0xFFFFFF,  // rainbow: placeholder, the hue turns instead (LED_LOAD_RAINBOW)
 };
-#define LED_LOAD_RAINBOW_MS 2000  // rainbow loading colour: one full hue turn
+#define LED_LOAD_RAINBOW_MS 500   // rainbow loading colour: one full hue turn (fast: cached covers
+                                  // draw in under a second). 2 red passes a second, under ~3/s.
 #define LED_RGB_WHITE  0xFFFFFF
 #define LED_RGB_AMBER  0xFFA000
 static bool ledEverConnected = false;
@@ -1847,8 +1853,13 @@ static bool ledUpdateConsumer(unsigned long t) {
       }
       return true;
     }
+    case LED_PREVIEW:  // the loading pulse, twice, after the colour changed in the app
     case LED_LOADING:
-      if (t >= LED_LOADING_TIMEOUT_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
+      if (t >= (ledMode == LED_PREVIEW ? LED_PREVIEW_MS : LED_LOADING_TIMEOUT_MS)) {
+        ledMode = LED_OFF;
+        ledWriteRaw(0, 0, 0);
+        return true;
+      }
       // "A cover is coming": pulse in the loading colour, starting bright, 100% -> 25% -> 100% every 1.6 s.
       {
         const uint8_t c = ledLoadColour % LED_LOAD_COLOURS;
@@ -1878,6 +1889,7 @@ static void ledUpdate() {
     case LED_OFF:
     case LED_LOADING:
     case LED_RAINBOW:
+    case LED_PREVIEW:
       ledWriteRaw(0, 0, 0);
       break;
     case LED_CACHE:
@@ -1938,7 +1950,7 @@ static void ledSetMode(LedMode m) {
     // change between them keeps the pulse going (no restart).
     if (m == LED_CACHE || m == LED_NEW || m == LED_BOTH || m == LED_WAITING || m == LED_TRANSFER) m = LED_LOADING;
     if (m == LED_LOADING && ledMode == LED_LOADING) { ledUpdate(); return; }
-  } else if (m == LED_LOADING || m == LED_RAINBOW) {
+  } else if (m == LED_LOADING || m == LED_RAINBOW || m == LED_PREVIEW) {
     return;  // consumer-only effects
   }
   ledMode = m;
@@ -1978,7 +1990,11 @@ static void ledPoll() {
       prefs.end();
     }
     // Style switched: drop whatever the other style was showing.
-    ledSetMode(LED_OFF);
+    if (ledStyleChanged) ledSetMode(LED_OFF);
+    ledStyleChanged = false;
+    // New loading colour (consumer, nothing else lit): pulse it twice right away so it can be seen.
+    if (ledColourChanged && ledConsumer() && deviceConnected && ledMode == LED_OFF) ledSetMode(LED_PREVIEW);
+    ledColourChanged = false;
   }
   bool receiving = deviceConnected && imageState == RECEIVING_DATA &&
                    pendingTransition != TRANSITION_STORE_ONLY;
