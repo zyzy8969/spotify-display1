@@ -40,7 +40,7 @@
 #define DISPLAY_HEIGHT 240
 #define IMAGE_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)
 #define CACHE_KEY_VERSION 1
-#define CACHE_INDEX_MAX_ENTRIES 1024
+#define CACHE_INDEX_MAX_ENTRIES 4096  // ~68 KB RAM; covers + photos (owner, 2026-11-23). Past this, lookups fall back to SD.exists
 
 // Performance and timing constants
 // Backlight level at power-up, before the app sends its saved slider value (out of 255).

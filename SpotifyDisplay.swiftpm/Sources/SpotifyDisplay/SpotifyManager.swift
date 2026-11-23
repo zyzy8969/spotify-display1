@@ -841,7 +841,7 @@ final class SpotifyManager: ObservableObject {
 
     /// How many upcoming queue entries to put on the board ahead of time. Each costs one probe
     /// (~50 ms) when already cached, or one compressed store-only transfer when not.
-    private let prefetchDepth = 5
+    private let prefetchDepth = 3  // owner, 2026-11-23 (was 5)
 
     /// Sends the covers of the next `prefetchDepth` queued songs to the board's SD card (not drawn),
     /// nearest first. Runs at most once per current song, only when no real send is in flight. Failures are silent: prefetch is an
