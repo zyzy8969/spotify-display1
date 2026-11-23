@@ -31,7 +31,7 @@ enum ArtMetrics {
 // MARK: - Now playing
 
 /// Main screen while signed in to Spotify. Covers the Crayon "playing" and "sending" artboards
-/// (and their Quiet / Serif counterparts) — sending is a state of this screen, not a new screen.
+/// (and their Quiet / Keyring counterparts) — sending is a state of this screen, not a new screen.
 struct NowPlayingScreen: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
@@ -470,6 +470,28 @@ struct ArtStage: View {
     private let freshWindow: TimeInterval = 10
 
     var body: some View {
+        Group {
+            if let housing = theme.housing {
+                KeychainHousing(housing: housing, side: side) { framedArt }
+            } else {
+                framedArt
+            }
+        }
+        .onAppear { previous = image }
+        .onChange(of: imageID) { _ in imageDidChange() }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(value)
+        .accessibilityAddTraits(.isImage)
+    }
+
+    /// Side of the picture itself: the full slot, or the keychain's screen inside its drawing.
+    private var artSide: CGFloat {
+        theme.housing == nil ? side : KeychainMetrics.screenSide(for: side)
+    }
+
+    /// The cover in its theme frame (surface, corners, border, shadow, Crayon's doodle).
+    private var framedArt: some View {
         ZStack {
             if let start = playStart, outgoing != nil {
                 TimelineView(.animation) { timeline in
@@ -485,18 +507,12 @@ struct ArtStage: View {
                 artLayer(image)
             }
         }
-        .onAppear { previous = image }
-        .onChange(of: imageID) { _ in imageDidChange() }
-        .frame(width: side, height: side)
+        .frame(width: artSide, height: artSide)
         .background(theme.artSurface)
         .clipShape(RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous))
         .overlay(border)
         .shadow(color: theme.artShadowColor, radius: theme.artShadowRadius, x: 0, y: theme.artShadowY)
         .background(frameDoodle)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(label)
-        .accessibilityValue(value)
-        .accessibilityAddTraits(.isImage)
     }
 
     /// Identity of the picture, so a new cover changes as one piece (Reduce Motion: cut).
@@ -542,10 +558,10 @@ struct ArtStage: View {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
-                .frame(width: side, height: side)
+                .frame(width: artSide, height: artSide)
                 .clipped()
         } else {
-            ArtPlaceholder(side: side)
+            ArtPlaceholder(side: artSide)
         }
     }
 
@@ -569,6 +585,59 @@ struct ArtStage: View {
             )
             .offset(x: 6, y: 7)
         }
+    }
+}
+
+/// Keyring: the keychain drawn around its screen, so what you see is what is on your keys.
+/// The screen is square like the board's 240x240 panel; the case is a rounded slab with a
+/// slightly deeper bottom bezel, hung from a key ring. Purely decorative: the art's own
+/// accessibility label describes the picture.
+/// Sizes for `KeychainHousing`, outside the generic view so `ArtStage` can ask for them.
+enum KeychainMetrics {
+    /// Case width as a share of the art slot.
+    static let caseShare: CGFloat = 0.92
+    /// Side bezel as a share of the case width.
+    static let bezelShare: CGFloat = 0.085
+
+    static func screenSide(for side: CGFloat) -> CGFloat {
+        let caseWidth = side * caseShare
+        return (caseWidth - 2 * caseWidth * bezelShare).rounded(.down)
+    }
+}
+
+struct KeychainHousing<Screen: View>: View {
+    let housing: Housing
+    /// Width of the art slot the layout reserved; the case fills most of it.
+    let side: CGFloat
+    @ViewBuilder let screen: () -> Screen
+
+    var body: some View {
+        let caseWidth = side * KeychainMetrics.caseShare
+        let bezel = caseWidth * KeychainMetrics.bezelShare
+        let screenSide = KeychainMetrics.screenSide(for: side)
+        let caseHeight = screenSide + bezel + bezel * 1.7
+        let ringSize = side * 0.15
+        let ringWidth = max(3, side * 0.018)
+        let caseShape = RoundedRectangle(cornerRadius: caseWidth * 0.11, style: .continuous)
+
+        VStack(spacing: 0) {
+            Circle()
+                .stroke(housing.ring, lineWidth: ringWidth)
+                .frame(width: ringSize, height: ringSize)
+            Capsule()
+                .fill(housing.ring)
+                .frame(width: ringSize * 0.3, height: ringSize * 0.5)
+                .padding(.top, -ringWidth)
+                .padding(.bottom, -ringSize * 0.12)
+                .zIndex(-1)
+            screen()
+                .padding(.top, bezel)
+                .frame(width: caseWidth, height: caseHeight, alignment: .top)
+                .background(caseShape.fill(housing.body))
+                .overlay(caseShape.strokeBorder(housing.edge, lineWidth: 1.5))
+                .shadow(color: housing.body.opacity(0.22), radius: 14, x: 0, y: 10)
+        }
+        .frame(width: side)
     }
 }
 

@@ -8,24 +8,27 @@ enum ThemeID: String, CaseIterable, Identifiable {
     case crayon
     /// Theme B: near-black, system font, small colour accents.
     case quiet
-    /// Theme C: white page, Times New Roman, hairline rules, dot leaders, one rust accent.
-    case serif
+    /// Theme C: warm paper, the keychain itself drawn around the live cover, tag-style labels,
+    /// one signal-orange accent. Replaced the earlier Serif theme.
+    case keyring
 
     static let storageKey = "uiTheme"
     static let fallback: ThemeID = .crayon
 
     var id: String { rawValue }
 
-    /// Reads the stored raw value, falling back to Crayon for anything unknown.
+    /// Reads the stored raw value, falling back to Crayon for anything unknown. Anyone who had
+    /// picked the retired Serif theme lands on Keyring, its replacement.
     static func from(_ raw: String) -> ThemeID {
-        ThemeID(rawValue: raw) ?? fallback
+        if raw == "serif" { return .keyring }
+        return ThemeID(rawValue: raw) ?? fallback
     }
 
     var theme: Theme {
         switch self {
         case .crayon: return .crayon
         case .quiet: return .quiet
-        case .serif: return .serif
+        case .keyring: return .keyring
         }
     }
 }
@@ -38,6 +41,16 @@ enum StatsStyle {
     case thinBars
     /// No bars: dotted leaders between name and value, slowest step in the accent (Serif).
     case dotLeaders
+}
+
+/// Colours of the drawn keychain around the cover (Keyring theme).
+struct Housing {
+    /// The keychain's case.
+    var body: Color
+    /// Thin edge highlight on the case, so a dark case still reads on any page.
+    var edge: Color
+    /// The metal key ring and its link.
+    var ring: Color
 }
 
 /// What the album-art slot shows before any cover has arrived.
@@ -105,6 +118,9 @@ struct Theme {
     var artShadowRadius: CGFloat = 0
     var artShadowY: CGFloat = 0
     var artBorder: Color? = nil
+    /// Keyring: the cover sits in a drawing of the keychain (body, screen bezel, key ring),
+    /// so the screen reads as "this is on your keys right now". nil draws the bare cover.
+    var housing: Housing? = nil
     var buttonCornerRadius: CGFloat = 27
     var doodleWidthScale: CGFloat = 1
     var margin: CGFloat = 22
@@ -232,52 +248,60 @@ extension Theme {
         return t
     }()
 
-    /// Theme C — Serif. Pure white, Times New Roman, rules and dot leaders, one rust accent.
-    static let serif: Theme = {
-        var t = Theme(id: .serif, colorScheme: .light)
-        t.background = Color(hex: 0xFFFFFF)
-        t.artSurface = Color(hex: 0xFFFFFF)
-        t.ink = Color(hex: 0x111110)            // 18.9:1
-        t.inkSoft = Color(hex: 0x4A4A48)        // 8.9:1
-        t.inkFaint = Color(hex: 0x6A6A66)       // 5.4:1
-        t.headerLink = Color(hex: 0x6A6A66)
-        t.backTint = Color(hex: 0x4A4A48)
-        t.control = Color(hex: 0x4A4A48)
-        t.controlStrong = Color(hex: 0x111110)
-        t.spotify = Color(hex: 0x111110)
-        t.display = Color(hex: 0x111110)
-        t.fresh = Color(hex: 0xA33B2A)          // 6.5:1, the one rust accent
-        t.accent = Color(hex: 0xA33B2A)
-        t.destructive = Color(hex: 0xA33B2A)
-        t.ringOff = Color(hex: 0x6A6A66)
-        t.toggleOff = Color(hex: 0x8A8884)      // 3.5:1 (mockup #B4B2AA is 2.1:1)
-        t.toggleOnFill = Color(hex: 0x111110)
-        t.toggleOnKnob = Color(hex: 0xFFFFFF)
-        t.sliderTint = Color(hex: 0x111110)
-        t.primaryFill = Color(hex: 0x111110)
-        t.onPrimary = Color(hex: 0xFFFFFF)
-        t.phaseColors = [Color(hex: 0x111110)]
-        t.rule = Color(hex: 0xDEDCD6)
-        t.artPalette = [Color(hex: 0x111110), Color(hex: 0xA33B2A)]
+    /// Theme C — Keyring. Warm paper, the keychain drawn around the live cover, tag-style mono
+    /// labels, one signal orange that means "the keychain" (linked, cached).
+    /// Contrast figures are against the #F4F1EA page.
+    static let keyring: Theme = {
+        var t = Theme(id: .keyring, colorScheme: .light)
+        t.background = Color(hex: 0xF4F1EA)
+        t.artSurface = Color(hex: 0x2A2925)     // the keychain's screen while it is dark
+        t.ink = Color(hex: 0x1C1B19)            // 15.3:1
+        t.inkSoft = Color(hex: 0x57554F)        // 6.6:1
+        t.inkFaint = Color(hex: 0x67645D)       // 5.2:1
+        t.headerLink = Color(hex: 0x1C1B19)
+        t.backTint = Color(hex: 0x1C1B19)
+        t.control = Color(hex: 0x1C1B19)
+        t.controlStrong = Color(hex: 0x1C1B19)
+        t.spotify = Color(hex: 0x2E7D32)        // 4.55:1
+        t.display = Color(hex: 0xC2410C)        // 4.6:1, the one signal orange
+        t.fresh = Color(hex: 0x1C1B19)          // sent fresh: plain ink with a hollow marker
+        t.accent = Color(hex: 0xC2410C)
+        t.destructive = Color(hex: 0xB3261E)    // 5.8:1
+        t.ringOff = Color(hex: 0x7D7A72)        // 3.8:1
+        t.toggleOff = Color(hex: 0x7D7A72)
+        t.toggleOnFill = Color(hex: 0x1C1B19)
+        t.toggleOnKnob = Color(hex: 0xF4F1EA)
+        t.sliderTint = Color(hex: 0xC2410C)
+        t.primaryFill = Color(hex: 0x1C1B19)
+        t.onPrimary = Color(hex: 0xF4F1EA)      // 15.3:1
+        t.phaseColors = [Color(hex: 0x1C1B19)]
+        t.rule = Color(hex: 0xDDD8CC)
+        t.artPalette = [
+            Color(hex: 0x3A3833), Color(hex: 0x4E4B45), Color(hex: 0x66625A),
+            Color(hex: 0x86827A), Color(hex: 0xC2410C)
+        ]
         t.doodle = [
-            Color(hex: 0x8A8884), Color(hex: 0x111110), Color(hex: 0x111110),
-            Color(hex: 0x111110), Color(hex: 0xA33B2A), Color(hex: 0x111110)
+            Color(hex: 0x9A968C), Color(hex: 0x1C1B19), Color(hex: 0x57554F),
+            Color(hex: 0xC2410C), Color(hex: 0x9A968C), Color(hex: 0x1C1B19)
         ]
         t.artFrame = nil
+        t.housing = Housing(
+            body: Color(hex: 0x1C1B19),
+            edge: Color(hex: 0x3A3833),
+            ring: Color(hex: 0x9A968C)
+        )
         t.wobble = 0
-        t.iconStroke = 1.2
-        t.stripThickness = 2
-        t.artCornerRadius = 0
+        t.iconStroke = 1.6
+        t.stripThickness = 3
+        t.artCornerRadius = 4
         t.artShadowColor = .clear
         t.artShadowRadius = 0
         t.artShadowY = 0
-        t.artBorder = Color(hex: 0xDEDCD6)
-        t.buttonCornerRadius = 0
-        t.doodleWidthScale = 0.35
-        t.margin = 26
-        t.statsStyle = .dotLeaders
-        t.placeholder = .hairlineRings
-        t.heroLabelAbove = true
+        t.buttonCornerRadius = 12
+        t.doodleWidthScale = 0.6
+        t.margin = 22
+        t.statsStyle = .thinBars
+        t.placeholder = .filledRings
         return t
     }()
 }

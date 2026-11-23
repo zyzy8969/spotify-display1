@@ -1,7 +1,8 @@
 import Foundation
 
 /// User-facing words. Crayon speaks in lowercase, playful words ("empty it");
-/// Quiet and Serif use plain sentence case ("Clear the display"), as on their artboards.
+/// Quiet and Keyring use plain sentence case ("Clear display cache"). Keyring calls the device
+/// "your keychain", since that is what its main screen draws.
 enum CopyKey {
     case stats, settings, close
     case nothingPlaying, playSomething
@@ -21,6 +22,7 @@ extension ThemeID {
     private var playful: Bool { self == .crayon }
 
     func text(_ key: CopyKey) -> String {
+        if self == .keyring, let words = keyringText(key) { return words }
         let p = playful
         switch key {
         case .stats: return p ? "stats" : "Stats"
@@ -68,27 +70,30 @@ extension ThemeID {
         }
     }
 
-    /// "47 saved" / "47 cached" / "Forty-seven cached".
+    /// Keyring's own words where they differ from Quiet's sentence case; nil falls through.
+    private func keyringText(_ key: CopyKey) -> String? {
+        switch key {
+        case .lookingForDisplay: return "Looking for your keychain"
+        case .displayReady: return "Keychain linked"
+        case .onTheDisplay: return "On your keychain"
+        case .emptyCache: return "Clear keychain cache"
+        case .emptyCacheConfirm: return "Clear the keychain cache?"
+        case .idleHeading: return "What\u{2019}s playing,\non your keys"
+        default: return nil
+        }
+    }
+
+    /// "47 saved" / "47 cached" / "47 on your keys".
     func countText(_ n: Int) -> String {
         switch self {
         case .crayon:
             return "\(n) saved"
         case .quiet:
             return "\(n) cached"
-        case .serif:
-            let words = Self.spellOut.string(from: NSNumber(value: n)) ?? "\(n)"
-            let first = String(words.prefix(1)).uppercased()
-            let rest = String(words.dropFirst())
-            return first + rest + " cached"
+        case .keyring:
+            return "\(n) on your keys"
         }
     }
-
-    /// Built once: the footer asks for the count on every render, including each progress tick.
-    private static let spellOut: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .spellOut
-        return formatter
-    }()
 
     /// Seconds from milliseconds, always with its unit ("0.9s"): most timings on Stats stand
     /// alone in a row, with no label nearby to say what the number is.
@@ -105,7 +110,7 @@ extension ThemeID {
         switch self {
         case .crayon: return "Crayon"
         case .quiet: return "Quiet"
-        case .serif: return "Serif"
+        case .keyring: return "Keyring"
         }
     }
 
@@ -113,7 +118,7 @@ extension ThemeID {
         switch self {
         case .crayon: return "hand-drawn, white"
         case .quiet: return "dark, a little colour"
-        case .serif: return "white, Times, rules"
+        case .keyring: return "your keychain, live on screen"
         }
     }
 }

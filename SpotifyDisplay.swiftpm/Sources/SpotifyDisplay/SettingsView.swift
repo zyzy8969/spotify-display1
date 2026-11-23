@@ -363,7 +363,7 @@ struct ThemePicker: View {
         switch option {
         case .crayon: return .custom("ChalkboardSE-Bold", size: 19, relativeTo: .body)
         case .quiet: return .system(.body).weight(.semibold)
-        case .serif: return .custom("TimesNewRomanPSMT", size: 20, relativeTo: .body)
+        case .keyring: return .system(.body, design: .monospaced).weight(.semibold)
         }
     }
 }
