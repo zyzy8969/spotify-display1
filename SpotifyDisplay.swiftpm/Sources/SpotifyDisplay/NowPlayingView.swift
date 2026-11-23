@@ -650,7 +650,7 @@ struct NowPlayingScreen: View {
             connected: bleManager.isConnected,
             everConnected: bleManager.everConnected,
             connectedAt: bleManager.connectedAt,
-            drawStartedAt: bleManager.drawStartedAt,
+            loadingSince: bleManager.loadingSince,
             thickness: nerd ? ArtMetrics.nerdStripThickness : nil
         )
     }
@@ -1237,9 +1237,8 @@ enum StripTiming {
     static let aheadFlash = 0.17
     // Consumer lights (firmware `ledUpdateConsumer`), seconds.
     static let consumerLoadingPeriod = 1.6
-    /// Firmware `LED_GREEN_PULSE_MS` / `LED_GREEN_TAIL_MS`.
-    static let consumerGreenPulse = 1.2
-    static let consumerGreenTail = 0.8
+    /// Firmware `LED_GREEN_PULSE_MS`: the short green "confirmed" pulse after DRAWN.
+    static let consumerGreenPulse = 0.5
     static let consumerBreathPeriod = 2.5
     static let consumerRainbow = 1.0
     static let consumerAmberPeriod = 2.0
@@ -1316,8 +1315,8 @@ struct LiveStrip: View {
     var connected = true
     var everConnected = false
     var connectedAt: Date? = nil
-    /// The board's latest `TRANSITION_START`: consumer green runs from then until DRAWN.
-    var drawStartedAt: Date? = nil
+    /// When the board started its loading-colour pulse for the current cover (`BLEManager.loadingSince`).
+    var loadingSince: Date? = nil
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
 
@@ -1448,12 +1447,6 @@ struct LiveStrip: View {
         return (1 - cos(x * 2 * .pi)) / 2
     }
 
-    /// Consumer green while the transition draws: 100% -> 40% -> 100% every 1.2 s from TRANSITION_START
-    /// (firmware `LED_DRAWING`). Reduce Motion: steady.
-    private func greenPulse(at now: Date, drawStart: Date) -> Double {
-        reduceMotion ? 1 : 1 - 0.6 * wave(now.timeIntervalSince(drawStart), period: StripTiming.consumerGreenPulse)
-    }
-
     /// The consumer LED, full width, brightness as opacity (firmware `ledUpdateConsumer`).
     private func consumerAppearance(at now: Date) -> Look {
         func lit(_ color: Color, _ level: Double, dashed: Bool = false) -> Look {
@@ -1472,21 +1465,16 @@ struct LiveStrip: View {
         }
         switch run {
         case .running(let start):
-            // The board started this cover's transition: steady green until DRAWN (owner, 2026-11-23).
-            if let drawStart = drawStartedAt, drawStart >= start {
-                return lit(StripColors.done(theme), greenPulse(at: now, drawStart: drawStart))
-            }
-            // The board has not said yet: dark on both (a cached cover goes straight to green).
-            guard light == .new else { return dark }
-            // A new cover (miss reply): slow pulse in the loading colour until its transition starts.
-            let level = reduceMotion ? 0.8 : 0.25 + 0.75 * wave(now.timeIntervalSince(start), period: StripTiming.consumerLoadingPeriod)
+            // "A cover is coming": loading-colour pulse from the miss reply (or a hit's TRANSITION_START,
+            // `loadingSince`) until DRAWN; dark before the board has said (owner, 2026-11-23).
+            guard let since = loadingSince, since >= start else { return dark }
+            let level = reduceMotion ? 0.8 : 1 - 0.75 * wave(now.timeIntervalSince(since), period: StripTiming.consumerLoadingPeriod)
             return lit(StripColors.loading(loadingColour, theme), level, dashed: stage == .checking)
         case .finished(let at, _):
-            // Fully drawn (DRAWN): the green lingers, fading out from where its pulse was, like the LED.
+            // Fully drawn (DRAWN): one short green "confirmed" pulse, like the LED.
             let dt = now.timeIntervalSince(at)
-            guard dt < StripTiming.consumerGreenTail, !reduceMotion else { return dark }
-            let from = drawStartedAt.map { greenPulse(at: at, drawStart: $0) } ?? 1
-            return lit(StripColors.done(theme), from * (1 - dt / StripTiming.consumerGreenTail))
+            guard dt < StripTiming.consumerGreenPulse else { return dark }
+            return lit(StripColors.done(theme), reduceMotion ? 1 : sin(dt / StripTiming.consumerGreenPulse * .pi))
         case .ended(let at, _):
             if failed {
                 return Look(fill: 1, color: StripColors.error(theme), opacity: 1, dashedTrack: false, marker: .failed)

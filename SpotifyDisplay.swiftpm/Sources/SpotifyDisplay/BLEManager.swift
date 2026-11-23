@@ -193,8 +193,9 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardLight: BoardLight = .off
     /// When the board last said `DRAWN` (its LED turns green at that moment).
     @Published private(set) var drawnAt: Date?
-    /// When the board last said `TRANSITION_START`: consumer lights are green from then until `DRAWN`.
-    @Published private(set) var drawStartedAt: Date?
+    /// When the board's consumer loading pulse started for the current cover: its miss reply, or (a cache
+    /// hit) its `TRANSITION_START`. Reset with each new cache check. The app line pulses in the same phase.
+    @Published private(set) var loadingSince: Date?
     /// The cache check in flight was sent with the new-song magic because its cover was saved ahead.
     private var checkIsSavedAhead = false
     /// What a song cover shows when it lands.
@@ -551,6 +552,7 @@ final class BLEManager: NSObject, ObservableObject {
         trackForNextDraw = nil
         checkIsSavedAhead = false
         boardLight = .off
+        loadingSince = nil
 
         sendStageGen &+= 1
         let myStageGen = sendStageGen
@@ -615,6 +617,7 @@ final class BLEManager: NSObject, ObservableObject {
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
             boardLight = .new  // the board went orange with its miss reply
+            if loadingSince == nil { loadingSince = Date() }
 
             // 2) First show (or the card lost it): send it, and the board saves it under the key.
             setLivePhase("photo: dithering…")
@@ -724,6 +727,7 @@ final class BLEManager: NSObject, ObservableObject {
         let savedAhead = prefetchedKeySources.contains(cacheKeySource)
         checkIsSavedAhead = savedAhead
         boardLight = .off
+        loadingSince = nil
         popupForNextDraw = newToPerson ? .both : .cache
         trackForNextDraw = trackId
         sendSwapFlipIfAsked()
@@ -789,6 +793,7 @@ final class BLEManager: NSObject, ObservableObject {
         cacheRenderConfirmed = false
         // Fresh send: the board went orange with its miss reply; "new" when it turns green.
         boardLight = .new
+        if loadingSince == nil { loadingSince = Date() }
         popupForNextDraw = .new
 
         let data: Data
@@ -1340,7 +1345,7 @@ final class BLEManager: NSObject, ObservableObject {
             if awaitingCacheRenderConfirm {
                 boardLight = checkIsSavedAhead && !photoHold ? .ahead(since: Date()) : .cache
             }
-            drawStartedAt = Date()
+            if loadingSince == nil { loadingSince = Date() }
             handleTransitionStart(text)
         }
     }
