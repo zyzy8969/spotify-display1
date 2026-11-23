@@ -78,6 +78,10 @@ the `SpotifyDisplay-unsigned-ipa` artifact. On a Mac the equivalent is
 `swift build` on the swiftpm package is unreliable in sandboxed environments and is not the
 authoritative check.
 
+Unit tests live in `ios/SpotifyDisplayTests/` (a test target only in the generated xcodeproj, not in
+`SpotifyDisplay.swiftpm`). CI runs them on a simulator after the IPA upload. Add a new test file to
+`test_files` in `gen_xcodeproj.py`.
+
 ### Python tools
 
 ```powershell
@@ -146,7 +150,7 @@ dithering happens app-side.)
   because firmware's `READY` notify fires before the client has subscribed. Owns
   `processTrack` (cache probe → transfer), write-without-response queueing via
   `peripheralIsReadyToSendWriteWithoutResponse`, a `readyEpoch` guard that invalidates
-  in-flight transfers across reconnects, a 32 s post-chunk SUCCESS timeout, and
+  in-flight transfers across reconnects, an 8 s post-chunk SUCCESS timeout, and
   counted background time (`holdTransferBackgroundTime`/`releaseTransferBackgroundTime`):
   `SpotifyManager` takes a hold *before* launching a send and `processTrack` takes its own, so an
   overlapping cancelled send can't end the live one's background time.

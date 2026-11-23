@@ -355,14 +355,8 @@ final class SpotifyManager: ObservableObject {
                     await requestResync(reason: "ble-ready-\(bleEpoch)", immediatePoll: true)
                 }
                 if networkIsReachable {
-                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                        ProcessInfo.processInfo.performExpiringActivity(withReason: "SpotifyPollRecovery") { _ in
-                            Task { @MainActor in
-                                await self.pollOnce(bleManager: bleManager)
-                                cont.resume()
-                            }
-                        }
-                    }
+                    // Background polling comes from the board heartbeat (`handleBoardHeartbeat`).
+                    await pollOnce(bleManager: bleManager)
                 } else {
                     pollStatus = "Offline — waiting for network"
                 }
@@ -507,6 +501,10 @@ final class SpotifyManager: ObservableObject {
         heartbeatBackgroundTaskID = .invalid
     }
 
+    private func setIfChanged<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<SpotifyManager, T>, _ value: T) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+    }
+
     private func pollOnce(bleManager: BLEManager) async {
         lastPollStartedAt = Date()
         guard isAuthenticated else {
@@ -526,7 +524,6 @@ final class SpotifyManager: ObservableObject {
         let mySeq = pollSeq
 
         do {
-            pollStatus = "Polling Spotify…"
             let state = try await fetchCurrentlyPlayingWithRefresh()
             guard mySeq > lastAppliedPollSeq else { return }
             lastAppliedPollSeq = mySeq
@@ -541,7 +538,7 @@ final class SpotifyManager: ObservableObject {
                 newestPlaybackTimestamp = ts
                 olderTimestampSince = nil
             }
-            lastError = nil
+            setIfChanged(\.lastError, nil)
 
             guard let item = state.item else {
                 // If we were playing and now get nil, keep currentTrack briefly so
@@ -569,11 +566,13 @@ final class SpotifyManager: ObservableObject {
                 return
             }
 
-            // Keep last track metadata on pause so UI can show "Paused" with controls.
-            if !state.isPlaying {
-                isPlaying = false
-                currentTrack = item
-                pollStatus = "Paused"
+            // Paused on the song the board already has (or is getting): just show "Paused" with controls.
+            // A different song while paused (skipped while paused, app opened paused) falls through
+            // and is sent like a playing one, so the keychain matches the app.
+            if !state.isPlaying, item.id == lastSentToDisplayTrackId || item.id == artInFlightTrackId {
+                setIfChanged(\.isPlaying, false)
+                if currentTrack?.id != item.id { currentTrack = item }
+                setIfChanged(\.pollStatus, "Paused")
                 let pauseArtURLs = preferredArtURLs(from: item)
                 if !pauseArtURLs.isEmpty {
                     ensureAlbumArtPreview(trackId: item.id, artURLs: pauseArtURLs, bleManager: bleManager)
@@ -611,9 +610,10 @@ final class SpotifyManager: ObservableObject {
                 recentlyReplaced[previous] = now
             }
 
-            pollStatus = "Playing: \(item.name)"
-            isPlaying = true
-            currentTrack = item
+            // Only write on change: every @Published write redraws every observing view, ~2x a second.
+            setIfChanged(\.pollStatus, state.isPlaying ? "Playing: \(item.name)" : "Paused")
+            setIfChanged(\.isPlaying, state.isPlaying)
+            if currentTrack?.id != item.id { currentTrack = item }
 
             // A photo the person uploaded is on the display: keep following Spotify for the app's own
             // screen, but send nothing until they tap "Back to Spotify".
@@ -693,7 +693,6 @@ final class SpotifyManager: ObservableObject {
 
             let capturedId = item.id
             let capturedURL = artURL
-            let capturedName = item.name
             // The album id must come from the song being sent, not from `currentTrack` when the task
             // runs: after a skip that is the next song, and the old art would be cached under the
             // new album's key (that album would then load the wrong picture from SD).
@@ -716,128 +715,48 @@ final class SpotifyManager: ObservableObject {
                         trackId: capturedId
                     )
                     guard self.artSendGeneration == myGeneration else { return }
-                    guard !Task.isCancelled else {
-                        self.artInFlightTrackId = nil
-                        self.artSendTask = nil
-                        await self.flushPendingResyncIfNeeded()
-                        return
-                    }
-                    // Pause/stop clears `currentTrack` before this task finishes; do not mark dedupe or the next
-                    // play will think art was already sent and skip (poll "overrides" / stale state).
-                    if self.currentTrack == nil {
+                    let cancelled = Task.isCancelled
+                    let sentIsCurrent = !cancelled && self.currentTrack?.id == capturedId
+                    if !cancelled {
+                        // Pause/stop clears `currentTrack` before this finishes: then no dedupe mark, or
+                        // the next play would think the art was already sent and skip it.
+                        if let current = self.currentTrack {
+                            // Mark sent even if the UI already moved on, so the 1 Hz poll does not resend it.
+                            self.lastSentToDisplayTrackId = capturedId
+                            self.lastSentToDisplayArtURL = capturedURL
+                            self.lastSentToDisplayReadyEpoch = ble.readyEpoch
+                            self.lastDisplayFailureAt = nil
+                            self.lastDisplayFailureTrackId = nil
+                            self.lastAnyDisplayFailureAt = nil
+                            if sentIsCurrent { self.lastError = nil }
+                            self.pollStatus = self.isPlaying ? "Playing: \(current.name)" : "Paused"
+                        }
                         self.pendingTrack = nil
                         self.pendingSince = nil
-                        self.artInFlightTrackId = nil
-                        self.artSendTask = nil
-                        await self.flushPendingResyncIfNeeded()
-                        return
                     }
-                    if self.currentTrack?.id == capturedId {
-                        self.lastError = nil
-                        self.lastSentToDisplayTrackId = capturedId
-                        self.lastSentToDisplayArtURL = capturedURL
-                        self.lastSentToDisplayReadyEpoch = ble.readyEpoch
-                        self.lastDisplayFailureAt = nil
-                        self.lastDisplayFailureTrackId = nil
-                        self.lastAnyDisplayFailureAt = nil
-                        self.pendingTrack = nil
-                        self.pendingSince = nil
-                        self.artInFlightTrackId = nil
-                        self.artSendTask = nil
-                        self.pollStatus = "Playing: \(self.currentTrack?.name ?? capturedName)"
-                        await self.flushPendingResyncIfNeeded()
-                        // The current song is on the board: use the idle link for the next one.
+                    await self.finishSend()
+                    // The current song is on the board: use the idle link for the next one.
+                    if sentIsCurrent {
                         self.schedulePrefetch(bleManager: ble, currentTrackId: capturedId,
                                               currentAlbumId: capturedAlbumId)
-                    } else {
-                        // Transfer finished for `capturedId` but UI already moved — still dedupe so we do not 1 Hz resend.
-                        self.lastSentToDisplayTrackId = capturedId
-                        self.lastSentToDisplayArtURL = capturedURL
-                        self.lastSentToDisplayReadyEpoch = ble.readyEpoch
-                        self.lastDisplayFailureAt = nil
-                        self.lastDisplayFailureTrackId = nil
-                        self.lastAnyDisplayFailureAt = nil
-                        self.pendingTrack = nil
-                        self.pendingSince = nil
-                        self.artInFlightTrackId = nil
-                        self.artSendTask = nil
-                        if let t = self.currentTrack {
-                            self.pollStatus = "Playing: \(t.name)"
-                        }
-                        await self.flushPendingResyncIfNeeded()
                     }
-                } catch let error as URLError where error.code == .cancelled {
+                } catch let error where error is CancellationError || (error as? URLError)?.code == .cancelled {
                     guard self.artSendGeneration == myGeneration else { return }
-                    self.artInFlightTrackId = nil
-                    self.artSendTask = nil
-                    await self.flushPendingResyncIfNeeded()
-                } catch is CancellationError {
-                    guard self.artSendGeneration == myGeneration else { return }
-                    self.artInFlightTrackId = nil
-                    self.artSendTask = nil
-                    await self.flushPendingResyncIfNeeded()
-                } catch let error as SpotifyDisplayError {
-                    guard self.artSendGeneration == myGeneration else { return }
-                    // #region agent log
-                    let errLabel: String = {
-                        switch error {
-                        case .bleTimeout: return "bleTimeout"
-                        case let .bleTransferRejected(s): return "bleTransferRejected:\(s.prefix(60))"
-                        case .notConnected: return "notConnected"
-                        case .conversionFailed: return "conversionFailed"
-                        case .authFailed: return "authFailed"
-                        case .missingClientId: return "missingClientId"
-                        }
-                    }()
-                    AgentDebugLog.ingest(
-                        hypothesisId: "H4",
-                        location: "SpotifyManager.artSendTask",
-                        message: "caught_SpotifyDisplayError",
-                        data: ["kind": errLabel, "capturedId": String(capturedId.prefix(12))]
-                    )
-                    // #endregion agent log
-                    switch error {
-                    case .bleTimeout, .bleTransferRejected:
-                        ble.cancelOngoingTransfer()
-                        try? await Task.sleep(nanoseconds: 200_000_000)
-                    case .notConnected, .conversionFailed, .authFailed, .missingClientId:
-                        break
-                    }
-                    guard self.artSendGeneration == myGeneration else { return }
-                    self.lastError = error.localizedDescription
-                    self.pollStatus = "Display transfer failed"
-                    let now = Date()
-                    self.lastDisplayFailureAt = now
-                    self.lastDisplayFailureTrackId = capturedId
-                    self.lastAnyDisplayFailureAt = now
-                    if let latest = self.currentTrack {
-                        self.pendingTrack = latest
-                        self.pendingSince = Date().addingTimeInterval(-self.debounceSeconds)
-                    } else {
-                        self.pendingTrack = nil
-                        self.pendingSince = nil
-                    }
-                    self.artInFlightTrackId = nil
-                    self.artSendTask = nil
-                    await self.flushPendingResyncIfNeeded()
+                    await self.finishSend()
                 } catch {
                     guard self.artSendGeneration == myGeneration else { return }
-                    self.lastError = error.localizedDescription
-                    self.pollStatus = "Display transfer failed"
-                    let now = Date()
-                    self.lastDisplayFailureAt = now
-                    self.lastDisplayFailureTrackId = capturedId
-                    self.lastAnyDisplayFailureAt = now
-                    if let latest = self.currentTrack {
-                        self.pendingTrack = latest
-                        self.pendingSince = Date().addingTimeInterval(-self.debounceSeconds)
-                    } else {
-                        self.pendingTrack = nil
-                        self.pendingSince = nil
+                    if let displayError = error as? SpotifyDisplayError {
+                        switch displayError {
+                        case .bleTimeout, .bleTransferRejected:
+                            ble.cancelOngoingTransfer()
+                            try? await Task.sleep(nanoseconds: 200_000_000)
+                            guard self.artSendGeneration == myGeneration else { return }
+                        case .notConnected, .conversionFailed, .authFailed:
+                            break
+                        }
                     }
-                    self.artInFlightTrackId = nil
-                    self.artSendTask = nil
-                    await self.flushPendingResyncIfNeeded()
+                    self.recordSendFailure(trackId: capturedId, error: error)
+                    await self.finishSend()
                 }
             }
         } catch {
@@ -853,6 +772,25 @@ final class SpotifyManager: ObservableObject {
                 pollStatus = "Spotify request failed"
             }
         }
+    }
+
+    /// Shared exit for every `artSendTask` outcome: frees the slot and runs any resync queued behind it.
+    private func finishSend() async {
+        artInFlightTrackId = nil
+        artSendTask = nil
+        await flushPendingResyncIfNeeded()
+    }
+
+    /// After a failed send: show the error, start both cooldowns, and queue the current song for a retry.
+    private func recordSendFailure(trackId: String, error: Error) {
+        lastError = error.localizedDescription
+        pollStatus = "Display transfer failed"
+        let now = Date()
+        lastDisplayFailureAt = now
+        lastDisplayFailureTrackId = trackId
+        lastAnyDisplayFailureAt = now
+        pendingTrack = currentTrack
+        pendingSince = currentTrack == nil ? nil : now.addingTimeInterval(-debounceSeconds)
     }
 
     private func preferredArtURLs(from track: Track) -> [String] {
@@ -902,6 +840,13 @@ final class SpotifyManager: ObservableObject {
     /// nearest first. Runs at most once per current song, only when no real send is in flight. Failures are silent: prefetch is an
     /// optimisation, the normal path still sends the cover when the song starts.
     private func schedulePrefetch(bleManager: BLEManager, currentTrackId: String, currentAlbumId: String?) {
+        if prefetchedForReadyEpoch != bleManager.readyEpoch {
+            // New BLE session: the board may have been reflashed or its cache cleared. Forget what
+            // was prefetched, including "already tried for this song", so a mid-song reconnect retries.
+            prefetchedTrackIds.removeAll()
+            prefetchAttemptedForTrackId = nil
+            prefetchedForReadyEpoch = bleManager.readyEpoch
+        }
         guard !prefetchUnavailable, prefetchTask == nil, artSendTask == nil,
               prefetchAttemptedForTrackId != currentTrackId else { return }
         // Locked / backgrounded: iOS keeps the app alive only on borrowed background time. Prefetch is
@@ -910,11 +855,6 @@ final class SpotifyManager: ObservableObject {
         let app = UIApplication.shared
         if app.applicationState != .active, app.backgroundTimeRemaining < 15 { return }
         prefetchAttemptedForTrackId = currentTrackId
-        if prefetchedForReadyEpoch != bleManager.readyEpoch {
-            // New BLE session: the board may have been reflashed or its cache cleared.
-            prefetchedTrackIds.removeAll()
-            prefetchedForReadyEpoch = bleManager.readyEpoch
-        }
         prefetchGeneration &+= 1
         let myGen = prefetchGeneration
         // Hold background time for the whole prefetch (1 s wait + queue read + transfer), taken now,

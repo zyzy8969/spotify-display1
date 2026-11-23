@@ -21,9 +21,19 @@ PROJ_DEBUG = uid()
 PROJ_REL = uid()
 TGT_DEBUG = uid()
 TGT_REL = uid()
+# Unit tests (ios/SpotifyDisplayTests), hosted in the app so `@testable import SpotifyDisplay` works.
+TEST_TARGET = uid()
+TEST_SOURCES_PHASE = uid()
+TEST_FRAMEWORKS_PHASE = uid()
+TEST_PRODUCT_REF = uid()
+TEST_GROUP = uid()
+TEST_CONF_LIST = uid()
+TEST_DEBUG = uid()
+TEST_REL = uid()
+TEST_PROXY = uid()
+TEST_DEPENDENCY = uid()
 
 swift_files = [
-    "AppDelegate.swift",
     "BLEManager.swift",
     "ContentView.swift",
     "CrayonShapes.swift",
@@ -54,6 +64,11 @@ for name in swift_files:
     file_refs[name] = uid()
     build_files[name] = uid()
 
+test_files = ["CacheKeyAndPackingTests.swift"]
+for name in test_files:
+    file_refs[name] = uid()
+    build_files[name] = uid()
+
 lines = []
 
 def p(s=""):
@@ -68,20 +83,39 @@ p("\tobjectVersion = 56;")
 p("\tobjects = {")
 
 p("/* Begin PBXBuildFile section */")
-for name in swift_files:
+for name in swift_files + test_files:
     p(f"\t\t{build_files[name]} /* {name} in Sources */ = {{isa = PBXBuildFile; fileRef = {file_refs[name]} /* {name} */; }};")
 p("/* End PBXBuildFile section */")
 p("")
 
 p("/* Begin PBXFileReference section */")
 p(f"\t\t{APP_REF} /* SpotifyDisplay.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpotifyDisplay.app; sourceTree = BUILT_PRODUCTS_DIR; }};")
-for name in swift_files:
+p(f"\t\t{TEST_PRODUCT_REF} /* SpotifyDisplayTests.xctest */ = {{isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpotifyDisplayTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; }};")
+for name in swift_files + test_files:
     p(f"\t\t{file_refs[name]} /* {name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {name}; sourceTree = \"<group>\"; }};")
 p("/* End PBXFileReference section */")
 p("")
 
+p("/* Begin PBXContainerItemProxy section */")
+p(f"\t\t{TEST_PROXY} /* PBXContainerItemProxy */ = {{")
+p("\t\t\tisa = PBXContainerItemProxy;")
+p(f"\t\t\tcontainerPortal = {PROJECT} /* Project object */;")
+p("\t\t\tproxyType = 1;")
+p(f"\t\t\tremoteGlobalIDString = {TARGET};")
+p("\t\t\tremoteInfo = SpotifyDisplay;")
+p("\t\t};")
+p("/* End PBXContainerItemProxy section */")
+p("")
+
 p("/* Begin PBXFrameworksBuildPhase section */")
 p(f"\t\t{FRAMEWORKS_PHASE} /* Frameworks */ = {{")
+p("\t\t\tisa = PBXFrameworksBuildPhase;")
+p("\t\t\tbuildActionMask = 2147483647;")
+p("\t\t\tfiles = (")
+p("\t\t\t);")
+p("\t\t\trunOnlyForDeploymentPostprocessing = 0;")
+p("\t\t};")
+p(f"\t\t{TEST_FRAMEWORKS_PHASE} /* Frameworks */ = {{")
 p("\t\t\tisa = PBXFrameworksBuildPhase;")
 p("\t\t\tbuildActionMask = 2147483647;")
 p("\t\t\tfiles = (")
@@ -100,15 +134,22 @@ p("\t\t\tname = SpotifyDisplay;")
 p('\t\t\tpath = "../SpotifyDisplay.swiftpm/Sources/SpotifyDisplay";')
 p('\t\t\tsourceTree = "<group>";')
 p("\t\t};")
+ch_test = ", ".join([f"{file_refs[n]} /* {n} */" for n in test_files])
+p(f"\t\t{TEST_GROUP} /* SpotifyDisplayTests */ = {{")
+p("\t\t\tisa = PBXGroup;")
+p(f"\t\t\tchildren = ({ch_test});")
+p("\t\t\tpath = SpotifyDisplayTests;")
+p('\t\t\tsourceTree = "<group>";')
+p("\t\t};")
 p(f"\t\t{PRODUCTS_GROUP} /* Products */ = {{")
 p("\t\t\tisa = PBXGroup;")
-p(f"\t\t\tchildren = ({APP_REF} /* SpotifyDisplay.app */);")
+p(f"\t\t\tchildren = ({APP_REF} /* SpotifyDisplay.app */, {TEST_PRODUCT_REF} /* SpotifyDisplayTests.xctest */);")
 p("\t\t\tname = Products;")
 p('\t\t\tsourceTree = "<group>";')
 p("\t\t};")
 p(f"\t\t{MAIN_GROUP} = {{")
 p("\t\t\tisa = PBXGroup;")
-p(f"\t\t\tchildren = ({SPOTIFY_GROUP} /* SpotifyDisplay */, {PRODUCTS_GROUP} /* Products */);")
+p(f"\t\t\tchildren = ({SPOTIFY_GROUP} /* SpotifyDisplay */, {TEST_GROUP} /* SpotifyDisplayTests */, {PRODUCTS_GROUP} /* Products */);")
 p('\t\t\tsourceTree = "<group>";')
 p("\t\t};")
 p("/* End PBXGroup section */")
@@ -132,6 +173,23 @@ p("\t\t\tproductName = SpotifyDisplay;")
 p(f"\t\t\tproductReference = {APP_REF} /* SpotifyDisplay.app */;")
 p("\t\t\tproductType = \"com.apple.product-type.application\";")
 p("\t\t};")
+p(f"\t\t{TEST_TARGET} /* SpotifyDisplayTests */ = {{")
+p("\t\t\tisa = PBXNativeTarget;")
+p(f"\t\t\tbuildConfigurationList = {TEST_CONF_LIST} /* Build configuration list for PBXNativeTarget \"SpotifyDisplayTests\" */;")
+p("\t\t\tbuildPhases = (")
+p(f"\t\t\t\t{TEST_SOURCES_PHASE} /* Sources */,")
+p(f"\t\t\t\t{TEST_FRAMEWORKS_PHASE} /* Frameworks */,")
+p("\t\t\t);")
+p("\t\t\tbuildRules = (")
+p("\t\t\t);")
+p("\t\t\tdependencies = (")
+p(f"\t\t\t\t{TEST_DEPENDENCY} /* PBXTargetDependency */,")
+p("\t\t\t);")
+p("\t\t\tname = SpotifyDisplayTests;")
+p("\t\t\tproductName = SpotifyDisplayTests;")
+p(f"\t\t\tproductReference = {TEST_PRODUCT_REF} /* SpotifyDisplayTests.xctest */;")
+p("\t\t\tproductType = \"com.apple.product-type.bundle.unit-test\";")
+p("\t\t};")
 p("/* End PBXNativeTarget section */")
 p("")
 
@@ -145,6 +203,10 @@ p("\t\t\t\tLastUpgradeCheck = 1500;")
 p("\t\t\t\tTargetAttributes = {")
 p(f"\t\t\t\t\t{TARGET} = {{")
 p("\t\t\t\t\t\tCreatedOnToolsVersion = 15.0;")
+p("\t\t\t\t\t};")
+p(f"\t\t\t\t\t{TEST_TARGET} = {{")
+p("\t\t\t\t\t\tCreatedOnToolsVersion = 15.0;")
+p(f"\t\t\t\t\t\tTestTargetID = {TARGET};")
 p("\t\t\t\t\t};")
 p("\t\t\t\t};")
 p("\t\t\t};")
@@ -162,6 +224,7 @@ p('\t\t\tprojectDirPath = "";')
 p('\t\t\tprojectRoot = "";')
 p("\t\t\ttargets = (")
 p(f"\t\t\t\t{TARGET} /* SpotifyDisplay */,")
+p(f"\t\t\t\t{TEST_TARGET} /* SpotifyDisplayTests */,")
 p("\t\t\t);")
 p("\t\t};")
 p("/* End PBXProject section */")
@@ -188,7 +251,25 @@ for name in swift_files:
 p("\t\t\t);")
 p("\t\t\trunOnlyForDeploymentPostprocessing = 0;")
 p("\t\t};")
+p(f"\t\t{TEST_SOURCES_PHASE} /* Sources */ = {{")
+p("\t\t\tisa = PBXSourcesBuildPhase;")
+p("\t\t\tbuildActionMask = 2147483647;")
+p("\t\t\tfiles = (")
+for name in test_files:
+    p(f"\t\t\t\t{build_files[name]} /* {name} in Sources */,")
+p("\t\t\t);")
+p("\t\t\trunOnlyForDeploymentPostprocessing = 0;")
+p("\t\t};")
 p("/* End PBXSourcesBuildPhase section */")
+p("")
+
+p("/* Begin PBXTargetDependency section */")
+p(f"\t\t{TEST_DEPENDENCY} /* PBXTargetDependency */ = {{")
+p("\t\t\tisa = PBXTargetDependency;")
+p(f"\t\t\ttarget = {TARGET} /* SpotifyDisplay */;")
+p(f"\t\t\ttargetProxy = {TEST_PROXY} /* PBXContainerItemProxy */;")
+p("\t\t};")
+p("/* End PBXTargetDependency section */")
 p("")
 
 INFOPLIST_PATH = "../SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist"
@@ -281,6 +362,30 @@ p("\t\t\t\tSWIFT_COMPILATION_MODE = wholemodule;")
 p("\t\t\t};")
 p("\t\t\tname = Release;")
 p("\t\t};")
+test_target_lines = [
+    'BUNDLE_LOADER = "$(TEST_HOST)";',
+    "CODE_SIGN_STYLE = Automatic;",
+    'DEVELOPMENT_TEAM = "";',
+    "GENERATE_INFOPLIST_FILE = YES;",
+    "IPHONEOS_DEPLOYMENT_TARGET = 16.0;",
+    "PRODUCT_BUNDLE_IDENTIFIER = com.example.spotifydisplay.tests;",
+    'PRODUCT_NAME = "$(TARGET_NAME)";',
+    "SWIFT_VERSION = 5.0;",
+    "TARGETED_DEVICE_FAMILY = 1;",
+    'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SpotifyDisplay.app/SpotifyDisplay";',
+]
+for conf_id, conf_name, extra in [
+    (TEST_DEBUG, "Debug", ["SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;", 'SWIFT_OPTIMIZATION_LEVEL = "-Onone";']),
+    (TEST_REL, "Release", ["SWIFT_COMPILATION_MODE = wholemodule;"]),
+]:
+    p(f"\t\t{conf_id} /* {conf_name} */ = {{")
+    p("\t\t\tisa = XCBuildConfiguration;")
+    p("\t\t\tbuildSettings = {")
+    for line in test_target_lines + extra:
+        p("\t\t\t\t" + line)
+    p("\t\t\t};")
+    p(f"\t\t\tname = {conf_name};")
+    p("\t\t};")
 p("/* End XCBuildConfiguration section */")
 p("")
 
@@ -299,6 +404,15 @@ p("\t\t\tisa = XCConfigurationList;")
 p("\t\t\tbuildConfigurations = (")
 p(f"\t\t\t\t{TGT_DEBUG} /* Debug */,")
 p(f"\t\t\t\t{TGT_REL} /* Release */,")
+p("\t\t\t);")
+p("\t\t\tdefaultConfigurationIsVisible = 0;")
+p("\t\t\tdefaultConfigurationName = Release;")
+p("\t\t};")
+p(f"\t\t{TEST_CONF_LIST} /* Build configuration list for PBXNativeTarget \"SpotifyDisplayTests\" */ = {{")
+p("\t\t\tisa = XCConfigurationList;")
+p("\t\t\tbuildConfigurations = (")
+p(f"\t\t\t\t{TEST_DEBUG} /* Debug */,")
+p(f"\t\t\t\t{TEST_REL} /* Release */,")
 p("\t\t\t);")
 p("\t\t\tdefaultConfigurationIsVisible = 0;")
 p("\t\t\tdefaultConfigurationName = Release;")
@@ -352,6 +466,16 @@ scheme_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
       <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "{TEST_TARGET}"
+               BuildableName = "SpotifyDisplayTests.xctest"
+               BlueprintName = "SpotifyDisplayTests"
+               ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

@@ -72,7 +72,6 @@ enum SpotifyDisplayError: Error {
     /// Firmware sent `ERROR:*` on Message and/or Image notify `0x02` while waiting for SUCCESS.
     case bleTransferRejected(String)
     case authFailed
-    case missingClientId
 }
 
 extension SpotifyDisplayError: LocalizedError {
@@ -83,7 +82,6 @@ extension SpotifyDisplayError: LocalizedError {
         case .conversionFailed: return "Could not convert album art."
         case .bleTimeout: return "Timed out waiting for the display."
         case .authFailed: return "Spotify sign-in failed."
-        case .missingClientId: return "Spotify Client ID is missing."
         }
     }
 }
