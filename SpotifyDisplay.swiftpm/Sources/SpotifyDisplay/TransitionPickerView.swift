@@ -14,6 +14,7 @@ struct TransitionPickerView: View {
     @AppStorage(TransitionSpeeds.randomKey) private var randomSpeed = TransitionSpeeds.randomDefault
     /// The row whose speed slider is open (only one at a time).
     @State private var speedEditing: Int?
+    @State private var showSwipe = false
 
     var body: some View {
         let enabled = TransitionPrefs.enabledCount(disabledRaw: disabledRaw)
@@ -22,6 +23,8 @@ struct TransitionPickerView: View {
                 SheetHeader(title: "Transitions") { dismiss() }
                 summary(enabled: enabled)
                     .padding(.top, 8)
+                swipeEntry
+                    .padding(.top, 14)
                 shortcuts
                     .padding(.top, 14)
                 speedModeRow
@@ -86,6 +89,33 @@ struct TransitionPickerView: View {
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Opens the swipe deck: one big card per transition, right = keep on, left = switch off.
+    private var swipeEntry: some View {
+        Button { showSwipe = true } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                Text("Swipe through them")
+                    .themeText(.button)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(theme.onPrimary)
+            .padding(.horizontal, 18)
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .background(PrimaryButtonBackground())
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Shows each transition on its own card. Swipe right to keep it, left to switch it off.")
+        .sheet(isPresented: $showSwipe) {
+            TransitionSwipeView(bleManager: bleManager)
+                .environment(\.theme, theme)
+                .preferredColorScheme(theme.colorScheme)
         }
     }
 

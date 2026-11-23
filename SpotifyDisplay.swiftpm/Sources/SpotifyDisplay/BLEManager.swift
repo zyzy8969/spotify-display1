@@ -42,6 +42,9 @@ final class BLEManager: NSObject, ObservableObject {
     /// Consumer / developer lights and the loading colour (saved on the phone; sent with the level).
     @Published private(set) var lightStyle: LightStyle = .current
     @Published private(set) var loadingColour: LoadingColour = .current
+    /// The loading-colour picker is on screen: the board keeps pulsing the colour (BLE_PROTOCOL 1.21).
+    /// Lives here, not in the extension with `setLightPreview`: extensions can't hold stored properties.
+    private var lightPreviewHold = false
     /// When the current connection came up (the consumer rainbow plays from then) and whether one ever
     /// did this launch (then a lost connection is the amber blink, not the white "looking" breathing).
     @Published private(set) var connectedAt: Date?
@@ -1686,9 +1689,6 @@ extension BLEManager {
         UserDefaults.standard.set(colour.rawValue, forKey: LoadingColour.storageKey)
         writeStatusLight()
     }
-
-    /// The loading-colour picker is on screen: the board keeps pulsing the colour (BLE_PROTOCOL 1.21).
-    private var lightPreviewHold = false
 
     /// Settings' colour picker appeared (true) or went away (false).
     func setLightPreview(_ on: Bool) {
