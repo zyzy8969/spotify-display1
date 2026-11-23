@@ -756,11 +756,13 @@ static uint16_t transitionLastMs[TRANSITION_COUNT] = {0};
 static bool drawingNewSong = false;
 
 static float pickTransitionSpeed(int drawn) {
-  if (drawingNewSong) return TRANSITION_SPEED_RANDOM_MAX;
+  // A speed the person set (per transition, or the app's Slow / Fast for all) wins, new songs included
+  // (owner, 2026-11-23: Slow must slow everything). Otherwise new songs land fast.
   if (drawn >= 0 && drawn < TRANSITION_SPEEDS_COUNT) {
     const uint8_t pct = transitionSpeedPct[drawn];
     if (pct >= 25) return (float)pct / 100.0f;
   }
+  if (drawingNewSong) return TRANSITION_SPEED_RANDOM_MAX;
   if (transitionSpeedRandom) {
     const float u = (float)(esp_random() % 10001u) / 10000.0f;
     return TRANSITION_SPEED_RANDOM_MIN + u * (TRANSITION_SPEED_RANDOM_MAX - TRANSITION_SPEED_RANDOM_MIN);

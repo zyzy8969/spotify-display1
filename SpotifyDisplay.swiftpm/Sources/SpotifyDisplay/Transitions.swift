@@ -251,6 +251,46 @@ enum TransitionSpeeds {
         UserDefaults.standard.object(forKey: randomKey) as? Bool ?? randomDefault
     }
 
+    /// One-tap speed for every transition (Transitions page). Slow / Fast write the same speed into every
+    /// slot of the 1.14 speeds write, so no protocol change; Random / Normal clear the custom speeds.
+    enum Mode: String, CaseIterable, Identifiable {
+        case random, slow, normal, fast
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .random: return "Random"
+            case .slow: return "Slow"
+            case .normal: return "Normal"
+            case .fast: return "Fast"
+            }
+        }
+    }
+    static let slowPercent = 50
+    static let fastPercent = maxPercent
+
+    /// The mode the stored speeds amount to; nil = the person set their own per transition.
+    static func mode(speedsRaw: String, random: Bool) -> Mode? {
+        let speeds = parse(speedsRaw)
+        if speeds.isEmpty { return random ? .random : .normal }
+        let ids = TransitionCatalog.all.map(\.id)
+        if ids.allSatisfy({ speeds[$0] == slowPercent }) { return .slow }
+        if ids.allSatisfy({ speeds[$0] == fastPercent }) { return .fast }
+        return nil
+    }
+
+    /// Stored values for `mode`: (speedsRaw, random).
+    static func settings(for mode: Mode) -> (raw: String, random: Bool) {
+        func all(_ pct: Int) -> String {
+            raw(from: Dictionary(uniqueKeysWithValues: TransitionCatalog.all.map { ($0.id, pct) }))
+        }
+        switch mode {
+        case .random: return ("", true)
+        case .normal: return ("", false)
+        case .slow: return (all(slowPercent), false)
+        case .fast: return (all(fastPercent), false)
+        }
+    }
+
     /// "1.5x", "0.75x", "1x".
     static func label(_ percent: Int) -> String {
         let v = Double(percent) / 100

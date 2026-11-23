@@ -24,7 +24,7 @@ struct TransitionPickerView: View {
                     .padding(.top, 8)
                 shortcuts
                     .padding(.top, 14)
-                randomSpeedRow
+                speedModeRow
                     .padding(.top, 6)
                 if !bleManager.boardSupportsTransitionMask && bleManager.isConnected {
                     Text("This display's firmware is older than BLE protocol 1.12, so it picks from every transition no matter what is switched on here. Flash the new firmware to use this list.")
@@ -101,18 +101,42 @@ struct TransitionPickerView: View {
         }
     }
 
-    /// Random speed: every transition left at normal speed plays somewhere between 0.4x and 1.3x.
-    private var randomSpeedRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle(isOn: $randomSpeed) {
-                Text("Random speed")
-                    .themeText(.row)
-                    .foregroundStyle(theme.ink)
+    /// Speed for every transition at once: Random (0.4x-1.3x each time), Slow (0.5x), Normal (1x) or
+    /// Fast (1.3x). The per-transition speed buttons below still work; then no mode is highlighted.
+    private var speedModeRow: some View {
+        let current = TransitionSpeeds.mode(speedsRaw: speedsRaw, random: randomSpeed)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Speed")
+                .themeText(.row)
+                .foregroundStyle(theme.ink)
+            HStack(spacing: 0) {
+                ForEach(TransitionSpeeds.Mode.allCases) { mode in
+                    Button {
+                        let s = TransitionSpeeds.settings(for: mode)
+                        speedsRaw = s.raw
+                        if randomSpeed != s.random {
+                            randomSpeed = s.random  // its onChange sends the speeds
+                        } else {
+                            bleManager.applyTransitionSpeeds()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            StateMarker(filled: current == mode, fillColor: theme.display, ringColor: theme.ringOff, size: 9)
+                            Text(mode.title)
+                                .themeText(.rowValue)
+                                .foregroundStyle(current == mode ? theme.ink : theme.inkSoft)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(mode.title) speed")
+                    .accessibilityAddTraits(current == mode ? .isSelected : [])
+                }
             }
-            .toggleStyle(ThemedToggleStyle())
-            Text(randomSpeed
-                 ? "Each time, a transition at normal speed plays somewhere between 0.4x and 1.3x. Ones you set yourself keep their speed."
-                 : "Every transition plays at normal speed unless you set its own with the speed button.")
+            Text(speedModeNote(current))
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)
@@ -122,6 +146,16 @@ struct TransitionPickerView: View {
                     .foregroundStyle(theme.inkSoft)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private func speedModeNote(_ mode: TransitionSpeeds.Mode?) -> String {
+        switch mode {
+        case .random?: return "Each time, a transition plays somewhere between 0.4x and 1.3x. New songs always play fast."
+        case .slow?: return "Every transition plays at 0.5x, new songs too."
+        case .normal?: return "Every transition plays at normal speed. New songs always play fast."
+        case .fast?: return "Every transition plays at 1.3x, the fastest."
+        case nil: return "Custom: you set some transitions' own speed with their speed button. Pick a mode to reset them all."
         }
     }
 
