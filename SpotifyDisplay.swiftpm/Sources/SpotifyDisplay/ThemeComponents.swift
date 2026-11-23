@@ -1,4 +1,31 @@
 import SwiftUI
+import UIKit
+
+/// Day <-> night (and theme) changes fade instead of snapping (owner, 2026-11-23: "dark mode should
+/// fade into black"). `preferredColorScheme` can't be animated, so this snapshots the whole window
+/// (open sheets included), applies `change` underneath, and fades the snapshot out. A plain fade is
+/// fine under Reduce Motion.
+enum ThemeFade {
+    @MainActor static func perform(duration: TimeInterval = 0.45, _ change: () -> Void) {
+        guard let window = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .flatMap(\.windows)
+                .first(where: \.isKeyWindow),
+              let snapshot = window.snapshotView(afterScreenUpdates: false) else {
+            change()
+            return
+        }
+        snapshot.frame = window.bounds
+        snapshot.isUserInteractionEnabled = false
+        window.addSubview(snapshot)
+        change()
+        UIView.animate(withDuration: duration, delay: 0.03, options: [.curveEaseInOut]) {
+            snapshot.alpha = 0
+        } completion: { _ in
+            snapshot.removeFromSuperview()
+        }
+    }
+}
 
 /// Which sheet is open over the main screen.
 enum Panel: String, Identifiable {

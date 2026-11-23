@@ -509,11 +509,21 @@ struct ThemePicker: View {
     }
 
     private func darkBinding(_ option: ThemeID) -> Binding<Bool> {
+        let stored: Binding<Bool>
         switch option {
-        case .crayon: return $crayonDark
-        case .quiet: return $quietDark
-        case .keyring: return $keyringDark
+        case .crayon: stored = $crayonDark
+        case .quiet: stored = $quietDark
+        case .keyring: stored = $keyringDark
         }
+        // Only the theme in use changes how the app looks, so only it fades.
+        guard ThemeID.from(selection) == option else { return stored }
+        return Binding(
+            get: { stored.wrappedValue },
+            set: { value in
+                guard value != stored.wrappedValue else { return }
+                ThemeFade.perform { stored.wrappedValue = value }
+            }
+        )
     }
 
     private func optionRow(_ option: ThemeID) -> some View {
@@ -522,7 +532,8 @@ struct ThemePicker: View {
         let look = option.theme(dark: dark.wrappedValue)
         return HStack(spacing: 10) {
             Button {
-                selection = option.rawValue
+                guard !isSelected else { return }
+                ThemeFade.perform { selection = option.rawValue }
             } label: {
                 HStack(spacing: 12) {
                     StateMarker(filled: isSelected, fillColor: theme.ink, ringColor: theme.ringOff, size: 14)

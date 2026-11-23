@@ -278,7 +278,7 @@ struct NowPlayingScreen: View {
     }
 
     private func toggleDark() {
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+        ThemeFade.perform {
             switch theme.id {
             case .crayon: crayonDark.toggle()
             case .quiet: quietDark.toggle()
@@ -323,7 +323,9 @@ struct NowPlayingScreen: View {
         case .idle:
             guard let pending = pendingImage else { return }
             let last = bleManager.transferLog.last
-            let succeeded = last.map { $0.id != pendingSinceLogID && !$0.cacheHit } ?? false
+            // A song's cache-hit entry is not this fresh send; a photo's is (photos always go
+            // through this pending path, from the card or sent).
+            let succeeded = last.map { $0.id != pendingSinceLogID && (!$0.cacheHit || $0.outcome == "photo") } ?? false
             // Nothing to mirror without a display: show the song's cover rather than a stale one.
             if succeeded || !bleManager.isConnected {
                 shownImage = pending

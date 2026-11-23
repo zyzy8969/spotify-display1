@@ -483,6 +483,7 @@ struct TransferRow: View {
     private var detail: String {
         var parts: [String] = []
         if entry.cacheHit {
+            if entry.outcome == "photo" { parts.append("photo") }
             parts.append("cache \(StatsFormat.short(entry.cacheCheckMs))")
         } else {
             if entry.outcome == "photo" { parts.append("photo") }

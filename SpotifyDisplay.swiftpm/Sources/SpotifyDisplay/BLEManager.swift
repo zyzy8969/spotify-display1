@@ -171,6 +171,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// Board said `CAPS:transitions` (BLE_PROTOCOL 1.12): it takes the enabled-transitions mask, the
     /// display-only header byte, and announces fresh draws.
     @Published private(set) var boardSupportsTransitionMask = false
+    /// The mask last written to the board on this connection (nil = none yet). Cleared on disconnect.
+    private var sentTransitionMask: TransitionPrefs.Mask128?
     /// Board said `CAPS:speeds` (BLE_PROTOCOL 1.14): it takes the transition-speeds write and appends
     /// the speed it used to `TRANSITION_START`.
     @Published private(set) var boardSupportsSpeeds = false
@@ -493,6 +495,7 @@ final class BLEManager: NSObject, ObservableObject {
         withUnsafeBytes(of: mask.lo.littleEndian) { packet.append(contentsOf: $0) }
         withUnsafeBytes(of: mask.hi.littleEndian) { packet.append(contentsOf: $0) }
         p.writeValue(packet, for: c, type: .withResponse)
+        sentTransitionMask = mask
         let on = TransitionCatalog.all.filter { mask.contains($0.id) }.count
         log("tx      transition mask: \(on) of \(TransitionCatalog.all.count) on", kind: .tx)
         applyTransitionSpeeds()
@@ -511,9 +514,17 @@ final class BLEManager: NSObject, ObservableObject {
 
     /// Sends the pending swap flip (`flipNextDraw`) right before a draw request, so nothing drawn in
     /// between can use it. Boards without `CAPS:next` just draw their usual random transition.
+    /// Also re-sends the transition mask first if the board's copy is out of date (the picker's
+    /// `onChange` is the usual sender, but a change it missed, e.g. from the swipe deck, must not let a
+    /// switched-off transition play). Same characteristic, `.withResponse`: the board stores the mask
+    /// before it sees the draw request.
     private func sendSwapFlipIfAsked() {
+        if sentTransitionMask != TransitionPrefs.currentMask { applyTransitionPrefs(beforeCaps: sawReady) }
         guard flipNextDraw else { return }
         flipNextDraw = false
+        // Card Flip switched off: the board picks a random switched-on transition instead.
+        guard !TransitionPrefs.disabledSet(from: UserDefaults.standard.string(forKey: TransitionPrefs.storageKey) ?? "")
+            .contains(Int(Self.swapFlipTransition)) else { return }
         guard boardSupportsNextTransition, isConnected, let p = peripheral, let c = cacheChar else { return }
         var packet = Data()
         withUnsafeBytes(of: nextTransitionMagic.littleEndian) { packet.append(contentsOf: $0) }
@@ -606,8 +617,10 @@ final class BLEManager: NSObject, ObservableObject {
                     let totalMs = ms(since: totalStart)
                     lastTransferResult = "Photo from cache  \(secondsLabel(fromMs: totalMs))"
                     boardAckStatus = "Board ACK: photo (cache hit)"
+                    // A cache hit like a song's, so the app says "cached", not "sent fresh" (owner,
+                    // 2026-11-23). NowPlayingView accepts photo entries as a finished send either way.
                     appendLog(TransferLogEntry(
-                        cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: checkMs,
+                        cacheHit: true, transitionName: lastTransitionName, cacheCheckMs: checkMs,
                         downloadMs: nil, convertMs: nil, uploadMs: 0,
                         totalMs: totalMs, outcome: "photo"
                     ))
@@ -1136,6 +1149,7 @@ final class BLEManager: NSObject, ObservableObject {
         sawReady = false
         boardSupportsDeflate = false
         boardSupportsTransitionMask = false
+        sentTransitionMask = nil
         boardSupportsSpeeds = false
         boardSupports128 = false
         boardSupportsNextTransition = false

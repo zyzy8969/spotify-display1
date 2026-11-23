@@ -2,6 +2,7 @@ import SwiftUI
 import PhotosUI
 import UIKit
 import CryptoKit
+import ImageIO
 
 /// Photos the person has shown on the keychain, saved on the phone so they can be shown again from the
 /// Photos page. Each is kept as the exact square JPEG that was sent: the board saves a photo on its card
@@ -38,7 +39,7 @@ final class PhotoLibrary: ObservableObject {
         }
     }
 
-    private func fileURL(for id: String) -> URL? {
+    func fileURL(for id: String) -> URL? {
         directory?.appendingPathComponent(id + ".jpg")
     }
 
@@ -95,7 +96,10 @@ struct PhotoLibraryView: View {
     @ObservedObject private var library = PhotoLibrary.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
-    @State private var pickedItem: PhotosPickerItem?
+    @State private var pickedItems: [PhotosPickerItem] = []
+    /// Photos still being read and saved after a multi-pick (shown under the add button).
+    @State private var adding = 0
+    @State private var addFailed = 0
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
 
@@ -103,24 +107,45 @@ struct PhotoLibraryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SheetHeader(title: "Photos") { dismiss() }
-                PhotosPicker(selection: $pickedItem, matching: .images) {
+                // Several at once go straight into Saved; a single pick is shown on the keychain.
+                // `.current`: the photo as stored (often HEIC), not transcoded to JPEG first, which was
+                // the slow part of loading one; ImageIO reads HEIC directly.
+                PhotosPicker(selection: $pickedItems, maxSelectionCount: 30, selectionBehavior: .ordered,
+                             matching: .images, preferredItemEncoding: .current) {
                     HStack(spacing: 8) {
                         Image(systemName: "plus")
                             .font(.system(size: 16, weight: .semibold))
                         Text("Add from your photos")
                             .themeText(.row)
+                        Text("one or more")
+                            .themeText(.statCaption)
+                            .foregroundStyle(theme.inkFaint)
                     }
                     .foregroundStyle(theme.ink)
                     .frame(maxWidth: .infinity, minHeight: 48)
                     .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.ringOff, lineWidth: 1))
                     .contentShape(Rectangle())
                 }
-                .accessibilityLabel("Add a photo from your photo library")
-                .onChange(of: pickedItem) { item in
-                    guard let item else { return }
-                    pickedItem = nil
-                    onPicked(item)
-                    dismiss()
+                .accessibilityLabel("Add photos from your photo library")
+                .accessibilityHint("Pick one to show it on the display, or several to save them all here")
+                .onChange(of: pickedItems) { items in
+                    guard !items.isEmpty else { return }
+                    pickedItems = []
+                    if items.count == 1 {
+                        onPicked(items[0])
+                        dismiss()
+                    } else {
+                        addAll(items)
+                    }
+                }
+
+                if adding > 0 || addFailed > 0 {
+                    HStack(spacing: 8) {
+                        if adding > 0 { ProgressView().controlSize(.small) }
+                        Text(addingStatus)
+                            .themeText(.footnote)
+                            .foregroundStyle(theme.inkSoft)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -162,6 +187,39 @@ struct PhotoLibraryView: View {
         }
         .background(theme.background.ignoresSafeArea())
     }
+
+    private var addingStatus: String {
+        var parts: [String] = []
+        if adding > 0 { parts.append("Adding \(adding) photo\(adding == 1 ? "" : "s")\u{2026}") }
+        if addFailed > 0 { parts.append("\(addFailed) couldn\u{2019}t be read.") }
+        return parts.joined(separator: " ")
+    }
+
+    /// Reads and squares every picked photo in parallel (off the main thread), then saves them in the
+    /// order picked: the first one picked ends up at the top. Nothing is sent to the keychain.
+    private func addAll(_ items: [PhotosPickerItem]) {
+        adding += items.count
+        addFailed = 0
+        Task {
+            var jpegs = [Data?](repeating: nil, count: items.count)
+            await withTaskGroup(of: (Int, Data?).self) { group in
+                for (i, item) in items.enumerated() {
+                    group.addTask {
+                        guard let data = try? await item.loadTransferable(type: Data.self) else { return (i, nil) }
+                        return (i, PhotoPrep.squareJPEG(fromPhotoData: data))
+                    }
+                }
+                for await (i, jpeg) in group {
+                    jpegs[i] = jpeg
+                }
+            }
+            adding = max(0, adding - items.count)
+            // `add` puts each at the front, so add the last-picked first.
+            for jpeg in jpegs.reversed() {
+                if let jpeg { library.add(jpeg) } else { addFailed += 1 }
+            }
+        }
+    }
 }
 
 /// A saved photo's square thumbnail, decoded off the main thread.
@@ -182,10 +240,37 @@ private struct PhotoThumb: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .task(id: item.id) {
-                guard image == nil, let jpeg = PhotoLibrary.shared.jpeg(for: item) else { return }
-                image = await Task.detached(priority: .userInitiated) {
-                    UIImage(data: jpeg)?.preparingThumbnail(of: CGSize(width: 240, height: 240))
+                guard image == nil else { return }
+                let key = item.id as NSString
+                if let cached = Self.cache.object(forKey: key) {
+                    image = cached
+                    return
+                }
+                // File read and decode both off the main thread (the read used to run on it).
+                guard let url = PhotoLibrary.shared.fileURL(for: item.id) else { return }
+                let thumb = await Task.detached(priority: .userInitiated) {
+                    PhotoThumb.thumbnail(at: url)
                 }.value
+                if let thumb { Self.cache.setObject(thumb, forKey: key) }
+                image = thumb
             }
+    }
+
+    /// Decoded thumbnails, so reopening the Photos page shows them at once.
+    private static let cache: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = PhotoLibrary.cap
+        return c
+    }()
+
+    /// ImageIO straight to a small image, without decoding the full 480x480 JPEG first.
+    nonisolated static func thumbnail(at url: URL) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 240,
+        ] as CFDictionary
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options).map { UIImage(cgImage: $0) }
     }
 }
