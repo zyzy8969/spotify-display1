@@ -16,6 +16,7 @@
 		63FF18A5B60DE72CC139F4FE /* LiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6295608BBDC737D599BDB743 /* LiveView.swift */; };
 		0A0A212D785EBCDA5682FFDD /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F387F3D4E02BF03AB101CAC /* Models.swift */; };
 		B312BA82112355429F95AF8E /* NowPlayingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8D1F53D3476ACB38171D20B /* NowPlayingView.swift */; };
+		E5531700A4BAB8322302C9CC /* PhotoLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A92D8A75BA82C2F40E2B38C /* PhotoLibrary.swift */; };
 		FD6986EF9435279D1A314D4D /* PhotoUploadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65D87F5ADA910F10B34EDC80 /* PhotoUploadView.swift */; };
 		702490A513E8E3F2C029C5F1 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E94314C9ACE3A673926830E2 /* SettingsView.swift */; };
 		D8BCCE683880F71214B59CB2 /* SignedOutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA16F186998CA6C9A456E26E /* SignedOutView.swift */; };
@@ -46,6 +47,7 @@
 		6295608BBDC737D599BDB743 /* LiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
 		7F387F3D4E02BF03AB101CAC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		E8D1F53D3476ACB38171D20B /* NowPlayingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingView.swift; sourceTree = "<group>"; };
+		9A92D8A75BA82C2F40E2B38C /* PhotoLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibrary.swift; sourceTree = "<group>"; };
 		65D87F5ADA910F10B34EDC80 /* PhotoUploadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoUploadView.swift; sourceTree = "<group>"; };
 		E94314C9ACE3A673926830E2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		FA16F186998CA6C9A456E26E /* SignedOutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignedOutView.swift; sourceTree = "<group>"; };
@@ -97,7 +99,7 @@
 /* Begin PBXGroup section */
 		579A0F1BAC4F0FBE91A22B03 /* SpotifyDisplay */ = {
 			isa = PBXGroup;
-			children = (E42225FF03BE1ED2D6D11366 /* ArtStage.swift */, A5ED9D4FCA75576D77CD404F /* BLEManager.swift */, C476CA8CDE95FF3B1567BE75 /* ContentView.swift */, 26389324072053438021830D /* CrayonShapes.swift */, 74D80BE73BF0ABEA32995C59 /* Extensions.swift */, 484883493457735921098CA9 /* ImageProcessor.swift */, FEEEA244B6B081A8E35DE49A /* KeychainHelper.swift */, 6295608BBDC737D599BDB743 /* LiveView.swift */, 7F387F3D4E02BF03AB101CAC /* Models.swift */, E8D1F53D3476ACB38171D20B /* NowPlayingView.swift */, 65D87F5ADA910F10B34EDC80 /* PhotoUploadView.swift */, E94314C9ACE3A673926830E2 /* SettingsView.swift */, FA16F186998CA6C9A456E26E /* SignedOutView.swift */, E1B94490BF9164F4C8CF6D3F /* SpotifyAuthPresenter.swift */, 8EB8961140934C4DA5631969 /* SpotifyDisplayApp.swift */, D0A6B233C86012DAC005B71F /* SpotifyManager.swift */, DABA64CC1F933810EA0FB4BC /* StatsView.swift */, 5263F64F6ED5EAE505990980 /* Theme.swift */, 36F5A6CEB3449CDD401BAB36 /* ThemeComponents.swift */, 19C8069B66A3EAFDA8B0B312 /* ThemeCopy.swift */, 660C250A87FA36E66CE5966E /* ThemeTypography.swift */, BEF56404C9070E12B2B30BDC /* TransitionPickerView.swift */, 8FCADBB8045DFAC64CCE9A36 /* TransitionRenderer.swift */, 7C60C06A49C4DF9F9BE988F9 /* Transitions.swift */);
+			children = (E42225FF03BE1ED2D6D11366 /* ArtStage.swift */, A5ED9D4FCA75576D77CD404F /* BLEManager.swift */, C476CA8CDE95FF3B1567BE75 /* ContentView.swift */, 26389324072053438021830D /* CrayonShapes.swift */, 74D80BE73BF0ABEA32995C59 /* Extensions.swift */, 484883493457735921098CA9 /* ImageProcessor.swift */, FEEEA244B6B081A8E35DE49A /* KeychainHelper.swift */, 6295608BBDC737D599BDB743 /* LiveView.swift */, 7F387F3D4E02BF03AB101CAC /* Models.swift */, E8D1F53D3476ACB38171D20B /* NowPlayingView.swift */, 9A92D8A75BA82C2F40E2B38C /* PhotoLibrary.swift */, 65D87F5ADA910F10B34EDC80 /* PhotoUploadView.swift */, E94314C9ACE3A673926830E2 /* SettingsView.swift */, FA16F186998CA6C9A456E26E /* SignedOutView.swift */, E1B94490BF9164F4C8CF6D3F /* SpotifyAuthPresenter.swift */, 8EB8961140934C4DA5631969 /* SpotifyDisplayApp.swift */, D0A6B233C86012DAC005B71F /* SpotifyManager.swift */, DABA64CC1F933810EA0FB4BC /* StatsView.swift */, 5263F64F6ED5EAE505990980 /* Theme.swift */, 36F5A6CEB3449CDD401BAB36 /* ThemeComponents.swift */, 19C8069B66A3EAFDA8B0B312 /* ThemeCopy.swift */, 660C250A87FA36E66CE5966E /* ThemeTypography.swift */, BEF56404C9070E12B2B30BDC /* TransitionPickerView.swift */, 8FCADBB8045DFAC64CCE9A36 /* TransitionRenderer.swift */, 7C60C06A49C4DF9F9BE988F9 /* Transitions.swift */);
 			name = SpotifyDisplay;
 			path = "../SpotifyDisplay.swiftpm/Sources/SpotifyDisplay";
 			sourceTree = "<group>";
@@ -232,6 +234,7 @@
 				63FF18A5B60DE72CC139F4FE /* LiveView.swift in Sources */,
 				0A0A212D785EBCDA5682FFDD /* Models.swift in Sources */,
 				B312BA82112355429F95AF8E /* NowPlayingView.swift in Sources */,
+				E5531700A4BAB8322302C9CC /* PhotoLibrary.swift in Sources */,
 				FD6986EF9435279D1A314D4D /* PhotoUploadView.swift in Sources */,
 				702490A513E8E3F2C029C5F1 /* SettingsView.swift in Sources */,
 				D8BCCE683880F71214B59CB2 /* SignedOutView.swift in Sources */,

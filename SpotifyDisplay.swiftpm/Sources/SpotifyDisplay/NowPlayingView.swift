@@ -115,6 +115,8 @@ struct NowPlayingScreen: View {
     @State private var modeGen = 0
 
     @State private var photoError: String?
+    /// The Photos page (header icon).
+    @State private var showPhotos = false
     /// What the keychain shows right now, decoded once per change instead of on every render.
     @State private var shownImage: UIImage?
     /// A fresh send's new cover, held back until the board confirms it. The firmware draws a new
@@ -177,6 +179,17 @@ struct NowPlayingScreen: View {
                     area: geo.size
                 )
             }
+        }
+        .sheet(isPresented: $showPhotos) {
+            PhotoLibraryView(
+                onPicked: { item in showPhoto(item) },
+                onChoose: { jpeg in
+                    PhotoLibrary.shared.add(jpeg)  // to the front of the list
+                    sendPhoto(jpeg)
+                }
+            )
+            .environment(\.theme, theme)
+            .preferredColorScheme(theme.colorScheme)
         }
         .alert("Photo", isPresented: Binding(
             get: { photoError != nil },
@@ -350,7 +363,7 @@ struct NowPlayingScreen: View {
         StatusHeader(
             spotifyOn: spotifyManager.isAuthenticated,
             displayOn: bleManager.isConnected,
-            onPhotoPicked: { item in showPhoto(item) },
+            onPhotos: { showPhotos = true },
             extras: HeaderExtras(
                 nerdEnabled: nerdEnabled,
                 nerdMode: nerdMode,
@@ -378,6 +391,8 @@ struct NowPlayingScreen: View {
                 photoError = "Could not read that photo."
                 return
             }
+            // Saved on the phone (Photos page) and, by the send, on the keychain's card.
+            PhotoLibrary.shared.add(jpeg)
             sendPhoto(jpeg)
         }
     }
@@ -918,13 +933,11 @@ struct HeaderExtras {
 struct StatusHeader: View {
     let spotifyOn: Bool
     let displayOn: Bool
-    /// Called with the photo picked from the library; nil hides the icon (signed-out screen).
-    var onPhotoPicked: ((PhotosPickerItem) -> Void)? = nil
+    /// Opens the Photos page (new photo or a saved one); nil hides the icon (signed-out screen).
+    var onPhotos: (() -> Void)? = nil
     /// Nerd-mode icon; nil hides it (signed-out screen).
     var extras: HeaderExtras? = nil
     let onOpen: (Panel) -> Void
-
-    @State private var pickedPhoto: PhotosPickerItem?
 
     @Environment(\.theme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -946,21 +959,18 @@ struct StatusHeader: View {
                     }
                     darkButton(extras)
                 }
-                if let onPhotoPicked {
-                    // Pick a library photo and it goes straight to the display.
-                    PhotosPicker(selection: $pickedPhoto, matching: .images) {
-                        Image(systemName: "photo")
+                if let onPhotos {
+                    // The Photos page: a new photo from the phone, or one shown before.
+                    Button(action: onPhotos) {
+                        Image(systemName: "photo.on.rectangle")
                             .font(Self.iconFont)
                             .foregroundStyle(theme.headerLink)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
-                    .accessibilityLabel("Show a photo on the display")
-                    .onChange(of: pickedPhoto) { item in
-                        guard let item else { return }
-                        pickedPhoto = nil
-                        onPhotoPicked(item)
-                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Photos")
+                    .accessibilityHint("Show a new or saved photo on the display")
                 }
                 Button { onOpen(.settings) } label: {
                     GlyphIcon(glyph: .gear, color: theme.headerLink, size: gearSize)
@@ -1239,7 +1249,7 @@ enum StripTiming {
     // Consumer lights (firmware `ledUpdateConsumer`), seconds.
     static let consumerLoadingPeriod = 1.6
     /// Rainbow loading colour: one hue turn (firmware `LED_LOAD_RAINBOW_MS`).
-    static let consumerRainbowLoading = 0.5
+    static let consumerRainbowLoading = 0.8
     /// Firmware `LED_GREEN_PULSE_MS`: the short green "confirmed" pulse after DRAWN.
     static let consumerGreenPulse = 0.5
     static let consumerBreathPeriod = 2.5

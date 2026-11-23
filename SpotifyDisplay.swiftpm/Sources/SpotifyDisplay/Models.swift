@@ -97,7 +97,7 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
     case blue = 0, purple, white, amber, pink, teal
     // BLE_PROTOCOL 1.20 (a 1.19 board shows these as blue)
     case orange, yellow, cyan, lavender, coral
-    /// The pulse also turns through the hues (0.5 s a turn).
+    /// The pulse also turns through the hues (0.8 s a turn).
     case rainbow
 
     var id: Int { rawValue }

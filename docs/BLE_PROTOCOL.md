@@ -2,11 +2,19 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.20** (more consumer loading colours, and a rainbow one.)
+Version: **1.21** (the app can hold the loading-colour preview while its colour picker is open.)
+
+Changes in 1.21 (2026-11-23; owner-approved). Additive: the status-light write (ffe6) may carry a 4th byte,
+`preview`. `1` = keep pulsing the loading colour now (the app's colour picker is open; a colour change while
+held switches the colour in place); `0` = stop. The hold also ends with the next cache check, a disconnect,
+or after 2 minutes. Consumer lights only; ignored while a cover is loading. 1.19-1.20 firmware already
+ignores the 4th byte, so no new `CAPS:`. Rainbow loading colour: one turn per 0.8 s.
+
+Changes in 1.20 summary: (more consumer loading colours, and a rainbow one.)
 
 Changes in 1.20 (2026-11-23; owner asked for more colours). Same 3-byte ffe6 write as 1.19, more values
 for its `colour` byte: `6` orange, `7` yellow, `8` cyan, `9` lavender, `10` coral, `11` rainbow (the pulse
-also turns through every hue, one turn per 0.5 s). When a write changes the colour, a consumer board that
+also turns through every hue, one turn per 0.5 s; 0.8 s since 1.21). When a write changes the colour, a consumer board that
 shows nothing else pulses the new colour twice (3.2 s) as a preview. A 1.19 board treats 6-11 as out of range and shows blue;
 no new `CAPS:` message. App behaviour (no wire change): the "new" / "cache" pop-up words show only with
 developer lights.

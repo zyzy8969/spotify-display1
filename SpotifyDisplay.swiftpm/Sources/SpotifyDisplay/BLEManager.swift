@@ -1687,12 +1687,22 @@ extension BLEManager {
         writeStatusLight()
     }
 
-    /// ffe6: [level, style, colour] to boards that said `CAPS:lights`; just [level] to older ones (they
-    /// drop any other length, which would lose the level too).
+    /// The loading-colour picker is on screen: the board keeps pulsing the colour (BLE_PROTOCOL 1.21).
+    private var lightPreviewHold = false
+
+    /// Settings' colour picker appeared (true) or went away (false).
+    func setLightPreview(_ on: Bool) {
+        guard on != lightPreviewHold else { return }
+        lightPreviewHold = on
+        writeStatusLight()
+    }
+
+    /// ffe6: [level, style, colour, preview] to boards that said `CAPS:lights` (1.19-1.20 boards ignore
+    /// the 4th byte); just [level] to older ones (they drop any other length, which would lose the level).
     private func writeStatusLight() {
         guard let p = peripheral, let c = statusLedChar else { return }
         let bytes: [UInt8] = boardSupportsLights
-            ? [statusLedLevel, UInt8(lightStyle.rawValue), UInt8(loadingColour.rawValue)]
+            ? [statusLedLevel, UInt8(lightStyle.rawValue), UInt8(loadingColour.rawValue), lightPreviewHold ? 1 : 0]
             : [statusLedLevel]
         p.writeValue(Data(bytes), for: c, type: .withResponse)
     }

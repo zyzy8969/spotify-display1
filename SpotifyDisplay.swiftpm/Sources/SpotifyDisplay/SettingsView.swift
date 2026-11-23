@@ -146,6 +146,13 @@ struct SettingsView: View {
     /// The consumer loading pulse's colour: swatches with their names, so the choice never depends on
     /// telling colours apart.
     private var loadingColourPicker: some View {
+        loadingColourGrid
+            // While the picker is on screen the board keeps pulsing the colour (BLE_PROTOCOL 1.21).
+            .onAppear { bleManager.setLightPreview(true) }
+            .onDisappear { bleManager.setLightPreview(false) }
+    }
+
+    private var loadingColourGrid: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Loading colour")
                 .themeText(.rowValue)
@@ -625,8 +632,8 @@ struct DayNightSwitch: View {
 }
 
 /// One loading-colour swatch. The picked one pulses like the keychain's LED (100% -> 25% -> 100% every
-/// 1.6 s; Rainbow also turns, one turn per 0.5 s), so you see the colour while choosing; the board
-/// pulses it twice too. Reduce Motion: still.
+/// 1.6 s; Rainbow also turns, one turn per 0.8 s), so you see the colour while choosing; the board
+/// pulses it the whole time the picker is on screen (BLE_PROTOCOL 1.21). Reduce Motion: still.
 private struct LoadingSwatch: View {
     let colour: LoadingColour
     let pulsing: Bool
@@ -642,7 +649,7 @@ private struct LoadingSwatch: View {
                     Circle()
                         .fill(AngularGradient(colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
                                               center: .center))
-                        .rotationEffect(.degrees(animate ? t.truncatingRemainder(dividingBy: 0.5) / 0.5 * 360 : 0))
+                        .rotationEffect(.degrees(animate ? t.truncatingRemainder(dividingBy: 0.8) / 0.8 * 360 : 0))
                 } else {
                     Circle().fill(Color(hex: colour.hex))
                 }

@@ -620,12 +620,23 @@ volatile uint8_t ledLoadColour = 0;
 volatile bool ledPrefsDirty = false;
 volatile bool ledStyleChanged = false;   // drop what the other style was showing
 volatile bool ledColourChanged = false;  // consumer: preview the new loading colour (two pulses)
+// BLE_PROTOCOL 1.21: optional 4th byte. 1 = keep pulsing the loading colour (the app's colour picker is
+// open) until 0, the next cache check, a disconnect or 2 minutes.
+volatile bool ledPreviewHold = false;
+volatile bool ledPreviewHoldChanged = false;
 
 class StatusLedCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
         std::string value = pCharacteristic->getValue();
         if (value.length() != 1 && value.length() < 3) return;
         statusLedLevel = (uint8_t)value[0];
+        if (value.length() >= 4) {
+            const bool hold = (uint8_t)value[3] != 0;
+            if (hold != ledPreviewHold) {
+                ledPreviewHold = hold;
+                ledPreviewHoldChanged = true;
+            }
+        }
         if (value.length() >= 3) {
             const uint8_t style = (uint8_t)value[1] == LED_STYLE_DEVELOPER ? LED_STYLE_DEVELOPER : LED_STYLE_CONSUMER;
             const uint8_t colour = (uint8_t)value[2] < LED_LOAD_COLOURS ? (uint8_t)value[2] : 0;
@@ -1767,6 +1778,7 @@ void clearCacheDirectory() {
 enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR,
                          LED_LOADING, LED_RAINBOW, LED_PREVIEW };  // the last three: consumer only
 #define LED_PREVIEW_MS 3200           // consumer: a new loading colour pulses twice so you can see it
+#define LED_PREVIEW_HOLD_MS 120000    // consumer: the colour picker's held preview gives up after this
 #define LED_GREEN_PULSE_MS 500        // consumer: one short green "confirmed" pulse after DRAWN
 #define LED_LOADING_TIMEOUT_MS 12000  // consumer: a load that never finishes (phone gave up) goes dark
 #define LED_ERROR_BLINK_MS 170        // three red blinks, 2.9 a second
@@ -1785,8 +1797,8 @@ static const uint32_t LED_LOAD_RGB[LED_LOAD_COLOURS] = {
   0xFF6450,  // coral
   0xFFFFFF,  // rainbow: placeholder, the hue turns instead (LED_LOAD_RAINBOW)
 };
-#define LED_LOAD_RAINBOW_MS 500   // rainbow loading colour: one full hue turn (fast: cached covers
-                                  // draw in under a second). 2 red passes a second, under ~3/s.
+#define LED_LOAD_RAINBOW_MS 800   // rainbow loading colour: one full hue turn (quick: cached covers
+                                  // draw in about a second). 1.25 red passes a second.
 #define LED_RGB_WHITE  0xFFFFFF
 #define LED_RGB_AMBER  0xFFA000
 static bool ledEverConnected = false;
@@ -1855,7 +1867,9 @@ static bool ledUpdateConsumer(unsigned long t) {
     }
     case LED_PREVIEW:  // the loading pulse, twice, after the colour changed in the app
     case LED_LOADING:
-      if (t >= (ledMode == LED_PREVIEW ? LED_PREVIEW_MS : LED_LOADING_TIMEOUT_MS)) {
+      if (t >= (ledMode == LED_PREVIEW ? (ledPreviewHold ? LED_PREVIEW_HOLD_MS : LED_PREVIEW_MS)
+                                       : LED_LOADING_TIMEOUT_MS)) {
+        ledPreviewHold = false;
         ledMode = LED_OFF;
         ledWriteRaw(0, 0, 0);
         return true;
@@ -1995,6 +2009,17 @@ static void ledPoll() {
     // New loading colour (consumer, nothing else lit): pulse it twice right away so it can be seen.
     if (ledColourChanged && ledConsumer() && deviceConnected && ledMode == LED_OFF) ledSetMode(LED_PREVIEW);
     ledColourChanged = false;
+  }
+  if (ledPreviewHoldChanged) {
+    ledPreviewHoldChanged = false;
+    // 1.21: the app's colour picker opened / closed. A held preview keeps its phase across colour changes
+    // (the colour is read every frame).
+    if (ledPreviewHold && ledConsumer() && deviceConnected && (ledMode == LED_OFF || ledMode == LED_PREVIEW)) {
+      if (ledMode != LED_PREVIEW) ledSetMode(LED_PREVIEW);
+      else ledModeSince = millis();  // restart the 2-minute limit
+    } else if (!ledPreviewHold && ledMode == LED_PREVIEW) {
+      ledSetMode(LED_OFF);
+    }
   }
   bool receiving = deviceConnected && imageState == RECEIVING_DATA &&
                    pendingTransition != TRANSITION_STORE_ONLY;
@@ -2151,6 +2176,7 @@ void loop() {
     // before the board knows (the lookup is the in-memory index, well under 1 ms).
     const bool newSong = cacheCheckNewSong;
     cacheCheckNewSong = false;
+    ledPreviewHold = false;  // a song is changing: the picker's preview gives way
     // Consumer: nothing until the board knows. A hit is green for the whole draw (owner, 2026-11-23:
     // cached covers load fast, no loading pulse); a miss starts the loading pulse with its reply.
     ledWasReceiving = false;
@@ -2343,6 +2369,7 @@ void loop() {
     // Client just connected
     oldDeviceConnected = deviceConnected;
     ledEverConnected = true;
+    ledPreviewHold = false;
     ledSetMode(LED_RAINBOW);  // consumer: one rainbow sweep (developer style ignores it)
     connIntervalFallbackSent = false;
 
