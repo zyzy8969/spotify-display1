@@ -13,9 +13,11 @@ struct TransitionSwipeView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(TransitionPrefs.storageKey) private var disabledRaw = ""
-    /// How fast the card's example plays, for watching an effect slowly or at full pace. Only the
-    /// preview: it doesn't change the speed the board plays at (that's the picker's Speed row).
-    @AppStorage("swipePreviewSpeed") private var previewSpeed = 1.0
+    /// How fast the card's example plays, for watching an effect slowly or at full pace. Several can
+    /// be picked: each loop then plays at the next one in turn. Only the preview: it doesn't change
+    /// the speed the board plays at (that's the picker's Speed row). Stored as "0.5,1.3".
+    @AppStorage(Self.previewSpeedsKey) private var previewSpeedsRaw = "1"
+    static let previewSpeedsKey = "swipePreviewSpeeds"
     private let previewSpeeds: [(label: String, rate: String, value: Double)] = [
         ("Slo-mo", "0.25x", 0.25), ("Slow", "0.5x", 0.5), ("Normal", "1x", 1.0), ("Fast", "1.3x", 1.3),
     ]
@@ -113,12 +115,32 @@ struct TransitionSwipeView: View {
 
     // MARK: - Preview speed
 
+    /// Picked speeds in the menu's order (slowest first); never empty.
+    private var selectedSpeeds: [Double] {
+        let picked = Set(previewSpeedsRaw.split(separator: ",").compactMap { Double($0) })
+        let ordered = previewSpeeds.map(\.value).filter { picked.contains($0) }
+        return ordered.isEmpty ? [1.0] : ordered
+    }
+
+    /// Tap toggles a speed in or out; the last one picked can't be removed.
+    private func toggleSpeed(_ value: Double) {
+        var picked = Set(selectedSpeeds)
+        if picked.contains(value) {
+            guard picked.count > 1 else { return }
+            picked.remove(value)
+        } else {
+            picked.insert(value)
+        }
+        previewSpeedsRaw = previewSpeeds.map(\.value).filter { picked.contains($0) }
+            .map { String($0) }.joined(separator: ",")
+    }
+
     private var speedPicker: some View {
         HStack(spacing: 0) {
             ForEach(previewSpeeds, id: \.value) { option in
-                let selected = abs(previewSpeed - option.value) < 0.01
+                let selected = selectedSpeeds.contains(option.value)
                 Button {
-                    previewSpeed = option.value
+                    toggleSpeed(option.value)
                 } label: {
                     VStack(spacing: 1) {
                         Text(option.label)
@@ -173,7 +195,8 @@ struct TransitionSwipeView: View {
         return VStack(alignment: .leading, spacing: 12) {
             Group {
                 if live {
-                    LoopingTransitionPreview(id: info.id, duration: info.duration, speed: previewSpeed)
+                    LoopingTransitionPreview(id: info.id, duration: info.duration,
+                                         speeds: selectedSpeeds, showsSpeed: true)
                 } else {
                     SampleCover(variant: 0)
                 }

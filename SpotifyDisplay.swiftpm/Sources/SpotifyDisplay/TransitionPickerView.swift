@@ -15,6 +15,8 @@ struct TransitionPickerView: View {
     /// The row whose speed slider is open (only one at a time).
     @State private var speedEditing: Int?
     @State private var showSwipe = false
+    @State private var confirmReset = false
+    @AppStorage(TransitionSwipeView.previewSpeedsKey) private var swipePreviewSpeedsRaw = "1"
 
     var body: some View {
         let enabled = TransitionPrefs.enabledCount(disabledRaw: disabledRaw)
@@ -29,6 +31,8 @@ struct TransitionPickerView: View {
                     .padding(.top, 14)
                 speedModeRow
                     .padding(.top, 6)
+                resetRow
+                    .padding(.top, 4)
                 if !bleManager.boardSupportsTransitionMask && bleManager.isConnected {
                     Text("This display's firmware is older than BLE protocol 1.12, so it picks from every transition no matter what is switched on here. Flash the new firmware to use this list.")
                         .themeText(.footnote)
@@ -117,6 +121,42 @@ struct TransitionPickerView: View {
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
         }
+    }
+
+    /// Puts every transition back to how it came: all switched on, every speed normal (random
+    /// speed back to its default), and the swipe deck's preview speed back to 1x. Asks first.
+    private var resetRow: some View {
+        Button { confirmReset = true } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Reset all transitions")
+                    .themeText(.rowValue)
+                    .underline()
+            }
+            .foregroundStyle(theme.destructive)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .confirmationDialog("Reset all transitions?", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("Reset", role: .destructive) { resetAll() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every transition is switched back on and every speed goes back to normal. Your swipes and custom speeds are cleared.")
+        }
+    }
+
+    private func resetAll() {
+        let listChanges = !disabledRaw.isEmpty
+        speedEditing = nil
+        speedsRaw = ""
+        swipePreviewSpeedsRaw = "1"
+        randomSpeed = TransitionSpeeds.randomDefault
+        disabledRaw = ""
+        // A changed list sends itself (onChange, which also sends the speeds); otherwise send the
+        // speeds here, once.
+        if !listChanges { bleManager.applyTransitionSpeeds() }
     }
 
     private var shortcuts: some View {

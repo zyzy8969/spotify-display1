@@ -804,6 +804,11 @@ struct LoopingTransitionPreview: View {
     /// Playback speed (1 = normal). The 1x render is played faster or slower, so moving a speed
     /// slider changes the example at once without rendering it again.
     var speed: Double = 1
+    /// Several speeds (the swipe deck's multi-select): each loop plays at the next one in turn.
+    /// Empty = just `speed`.
+    var speeds: [Double] = []
+    /// Show a small badge with the speed the current loop plays at (only when cycling speeds).
+    var showsSpeed = false
     @ObservedObject private var store = TransitionPreviewStore.shared
     private let hold = 0.55
 
@@ -811,17 +816,27 @@ struct LoopingTransitionPreview: View {
         Group {
             if let rendered = store.previews[id], !rendered.isEmpty {
                 TimelineView(.animation) { timeline in
-                    let rate = max(0.25, speed)
-                    let length = max(0.1, rendered.duration / rate)
-                    let period = length + hold * 2
-                    let t = timeline.date.timeIntervalSinceReferenceDate
-                    let local = (t.truncatingRemainder(dividingBy: period) - hold) * rate
-                    if let frame = rendered.frame(at: local) {
-                        Image(decorative: frame, scale: 1)
-                            .resizable()
-                            .interpolation(.medium)
-                    } else {
-                        SampleCover(variant: 0)
+                    let rates = (speeds.isEmpty ? [speed] : speeds).map { max(0.25, $0) }
+                    let p = Self.phase(at: timeline.date.timeIntervalSinceReferenceDate,
+                                       rates: rates, duration: rendered.duration, hold: hold)
+                    ZStack(alignment: .topTrailing) {
+                        if let frame = rendered.frame(at: p.local) {
+                            Image(decorative: frame, scale: 1)
+                                .resizable()
+                                .interpolation(.medium)
+                        } else {
+                            SampleCover(variant: 0)
+                        }
+                        if showsSpeed && rates.count > 1 {
+                            Text(String(format: "%gx", rates[p.loop]))
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(.black.opacity(0.55)))
+                                .padding(8)
+                        }
                     }
                 }
             } else {
@@ -830,5 +845,18 @@ struct LoopingTransitionPreview: View {
         }
         .onAppear { store.request(id) }
         .onChange(of: id) { newID in store.request(newID) }
+    }
+
+    /// Where time `t` falls in the cycle of loops (one per rate: hold A, effect, hold B):
+    /// which loop, and the position inside the effect at that loop's rate.
+    static func phase(at t: Double, rates: [Double], duration: Double, hold: Double) -> (loop: Int, local: Double) {
+        let lengths = rates.map { max(0.1, duration / $0) + hold * 2 }
+        var rest = t.truncatingRemainder(dividingBy: lengths.reduce(0, +))
+        var loop = 0
+        while loop < lengths.count - 1 && rest >= lengths[loop] {
+            rest -= lengths[loop]
+            loop += 1
+        }
+        return (loop, (rest - hold) * rates[loop])
     }
 }
