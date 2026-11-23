@@ -82,7 +82,9 @@ enum NerdMode {
 // MARK: - Now playing
 
 /// Main screen while signed in to Spotify. Covers the Crayon "playing" and "sending" artboards
-/// (and their Quiet / Serif counterparts) — sending is a state of this screen, not a new screen.
+/// (and their Quiet / Keyring counterparts) — sending is a state of this screen, not a new screen.
+/// Each theme dresses it its own way: Crayon tilts the cover, Quiet lights the room with its glow
+/// (`AmbientArt`), Keyring draws the keychain around it (`KeychainHousing`).
 ///
 /// Normal mode: the big cover centred with the strip, track info, controls, footer and (on taller
 /// screens) a quiet stats line under it. Nerd mode (`NerdMode`: on in Settings, then the header's
@@ -106,6 +108,7 @@ struct NowPlayingScreen: View {
     /// Night switch per theme (same keys as Settings > Theme and ContentView).
     @AppStorage("uiDark.crayon") private var crayonDark = false
     @AppStorage("uiDark.quiet") private var quietDark = true
+    @AppStorage("uiDark.keyring") private var keyringDark = false
     /// Nerd mode as laid out right now. Follows `nerdOn`, sequenced by `applyMode`.
     @State private var layoutNerd = NerdMode.isOn
     /// False while the log fades out, before the cover grows back (nerd -> normal).
@@ -168,6 +171,14 @@ struct NowPlayingScreen: View {
                 .opacity(playerOpacity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background {
+                // Quiet's signature: the cover's glow behind the big cover (normal layout only; nerd
+                // mode's small corner cover would light the wrong place).
+                if theme.ambientArt && !layoutNerd {
+                    AmbientArt(image: frontOverride ?? shownImage)
+                        .transition(.opacity)
+                }
+            }
             .overlay {
                 ResultPopups(
                     // The "new" / "cache" words are a developer-lights thing (owner, 2026-11-23).
@@ -245,11 +256,21 @@ struct NowPlayingScreen: View {
 
     // MARK: Mode switch
 
-    private var isDarkTheme: Bool { theme.id == .crayon ? crayonDark : quietDark }
+    private var isDarkTheme: Bool {
+        switch theme.id {
+        case .crayon: return crayonDark
+        case .quiet: return quietDark
+        case .keyring: return keyringDark
+        }
+    }
 
     private func toggleDark() {
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-            if theme.id == .crayon { crayonDark.toggle() } else { quietDark.toggle() }
+            switch theme.id {
+            case .crayon: crayonDark.toggle()
+            case .quiet: quietDark.toggle()
+            case .keyring: keyringDark.toggle()
+            }
         }
     }
 
@@ -514,13 +535,17 @@ struct NowPlayingScreen: View {
     /// Normal: the big cover centred with the line, title, controls, footer (and stats) under it.
     private func normalPlayer(size: CGSize, scrolls: Bool) -> some View {
         let bigSide = ArtMetrics.side(for: size, margin: theme.margin, accessibilityText: scrolls)
+        // Keyring's keychain (ring + case) is taller than wide: a slightly smaller slot keeps the
+        // column the same height as the bare cover's.
+        let artSlot = theme.housing == nil ? bigSide : (bigSide * KeychainMetrics.slotShare).rounded(.down)
         return VStack(spacing: 0) {
             Spacer(minLength: ArtMetrics.topGap(for: size))
                 .frame(maxHeight: .infinity)
-            art(side: bigSide)
+            art(side: artSlot)
                 .frame(maxWidth: .infinity, alignment: .center)
             strip(nerd: false)
-                .frame(width: bigSide)
+                // As wide as what it sits under: the cover, or Keyring's case.
+                .frame(width: theme.housing == nil ? bigSide : KeychainMetrics.caseWidth(for: artSlot))
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.top, 10)
             normalTrackBlock(side: bigSide)
@@ -606,23 +631,41 @@ struct NowPlayingScreen: View {
         let photoUp = bleManager.photoHold
         let canReshow = !photoUp && bleManager.lastPhotoJPEG != nil
         let back = backImage
-        return ZStack {
-            if let back {
-                PeekCard(image: back, side: side)
-                    .rotationEffect(.degrees(4))
-                    .offset(x: PeekCard.peek(for: side))
-                    .transition(.opacity)
-                    .accessibilityHidden(true)
+        // Keyring (normal layout): the cover sits in the drawn keychain, the other picture tucked
+        // behind the case. Nerd mode's small cover stays bare, a keychain that size reads as noise.
+        let housing = layoutNerd ? nil : theme.housing
+        return Group {
+            if let housing {
+                let caseWidth = KeychainMetrics.caseWidth(for: side)
+                KeychainHousing(
+                    housing: housing,
+                    side: side,
+                    linked: bleManager.isConnected,
+                    behindCase: back.map { image in
+                        AnyView(
+                            PeekCard(image: image, side: caseWidth * 0.92)
+                                .rotationEffect(.degrees(5))
+                                .offset(x: PeekCard.peek(for: caseWidth), y: caseWidth * 0.04)
+                                .transition(.opacity)
+                        )
+                    }
+                ) {
+                    stage(side: KeychainMetrics.screenSide(for: side))
+                }
+            } else {
+                ZStack {
+                    if let back {
+                        PeekCard(image: back, side: side)
+                            .rotationEffect(.degrees(4))
+                            .offset(x: PeekCard.peek(for: side))
+                            .transition(.opacity)
+                            .accessibilityHidden(true)
+                    }
+                    stage(side: side)
+                }
+                // Crayon: the cover is stuck on a little crooked, like a photo on a page.
+                .rotationEffect(.degrees(layoutNerd ? 0 : theme.artTilt))
             }
-            ArtStage(
-                image: frontOverride ?? shownImage,
-                side: side,
-                label: artLabel,
-                value: artValue,
-                event: bleManager.transitionEvent,
-                quiet: quietSwap
-            )
-            .rotation3DEffect(.degrees(frontFlipAngle), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
         }
         // Nerd mode: keep the peeking card clear of the track text beside the cover.
         .padding(.trailing, layoutNerd && back != nil ? PeekCard.peek(for: side) + 8 : 0)
@@ -634,6 +677,19 @@ struct NowPlayingScreen: View {
                 : (canReshow ? "Double-tap to show your last photo on the display" : "")
         )
         .accessibilityAction { coverTapped() }
+    }
+
+    /// The front card: the cover as the keychain shows it, flipping on a photo <-> cover swap.
+    private func stage(side: CGFloat) -> some View {
+        ArtStage(
+            image: frontOverride ?? shownImage,
+            side: side,
+            label: artLabel,
+            value: artValue,
+            event: bleManager.transitionEvent,
+            quiet: quietSwap
+        )
+        .rotation3DEffect(.degrees(frontFlipAngle), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
     }
 
     /// The progress line: under the big cover in normal mode; full width and thinner under the cover
@@ -967,7 +1023,7 @@ struct StatusHeader: View {
                         .frame(width: max(44, gearSize + 12), height: max(44, gearSize + 12))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ThemedPressStyle())
                 .accessibilityLabel(theme.id.text(.settings))
             }
             .padding(.trailing, -11)
@@ -989,7 +1045,7 @@ struct StatusHeader: View {
                 .contentShape(Rectangle())
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: dark)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ThemedPressStyle())
         .accessibilityLabel("Night mode")
         .accessibilityValue(dark ? "On" : "Off")
     }
@@ -1026,7 +1082,7 @@ struct StatusHeader: View {
                 value: on
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ThemedPressStyle())
         .accessibilityLabel("Nerd mode, live stats")
         .accessibilityValue(on ? "On" : "Off")
         .accessibilityAddTraits(on ? .isSelected : [])
@@ -1575,9 +1631,17 @@ struct TrackInfo: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
+        // A new song's words arrive in the theme's own motion (pop / blur / roll).
+        ThemedChange(key: title + "\u{1F}" + (subtitle ?? "")) {
+            words
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var words: some View {
         let textAlign: TextAlignment = leading ? .leading : .center
         let frameAlign: Alignment = leading ? .leading : .center
-        VStack(alignment: leading ? .leading : .center, spacing: compact ? 2 : 5) {
+        return VStack(alignment: leading ? .leading : .center, spacing: compact ? 2 : 5) {
             Text(title)
                 .themeText(.trackTitle)
                 .foregroundStyle(theme.ink)
@@ -1594,7 +1658,6 @@ struct TrackInfo: View {
                     .frame(maxWidth: .infinity, alignment: frameAlign)
             }
         }
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1646,11 +1709,14 @@ struct PlaybackControls: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            GlyphIcon(glyph: glyph, color: color, size: size)
-                .frame(width: max(minFrame, size + 16), height: max(minFrame, size + 16))
-                .contentShape(Rectangle())
+            // Play <-> pause swaps in the theme's motion too.
+            ThemedChange(key: "\(glyph.rawValue)") {
+                GlyphIcon(glyph: glyph, color: color, size: size)
+            }
+            .frame(width: max(minFrame, size + 16), height: max(minFrame, size + 16))
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ThemedPressStyle())
         .accessibilityLabel(label)
     }
 }

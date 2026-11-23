@@ -31,7 +31,7 @@ enum FontFace {
 }
 
 enum FontFamily {
-    case chalkboard, system, times
+    case chalkboard, system
 }
 
 struct TextSpec {
@@ -41,13 +41,15 @@ struct TextSpec {
     var face: FontFace = .regular
     var tracking: CGFloat = 0
     var uppercase: Bool = false
+    /// System family only: SF Mono instead of SF Pro (Keyring's tag-style status and number labels).
+    var monospaced: Bool = false
 }
 
 extension ThemeID {
     var fontFamily: FontFamily {
         switch self {
         case .crayon: return .chalkboard
-        case .quiet: return .system
+        case .quiet, .keyring: return .system
         }
     }
 
@@ -55,6 +57,7 @@ extension ThemeID {
         switch self {
         case .crayon: return Self.crayonSpec(role)
         case .quiet: return Self.quietSpec(role)
+        case .keyring: return Self.keyringSpec(role)
         }
     }
 
@@ -109,27 +112,29 @@ extension ThemeID {
         }
     }
 
-    private static func serifSpec(_ role: TextRole) -> TextSpec {
+    /// SF Pro for words people read; SF Mono, uppercase, only for short status and number labels that
+    /// read like the keychain's printed tag ("KEYCHAIN LINKED", "47 ON YOUR KEYS", "0.3S").
+    private static func keyringSpec(_ role: TextRole) -> TextSpec {
         switch role {
-        case .trackTitle: return TextSpec(size: 27, style: .title)
-        case .trackArtist: return TextSpec(size: 17, style: .body, face: .italic)
-        case .statusLabel: return TextSpec(size: 12, style: .caption, tracking: 1.7, uppercase: true)
-        case .headerLink: return TextSpec(size: 12, style: .caption, tracking: 1.7, uppercase: true)
-        case .footer: return TextSpec(size: 12, style: .caption, tracking: 1.7, uppercase: true)
-        case .footnote: return TextSpec(size: 15, style: .subheadline)
+        case .trackTitle: return TextSpec(size: 22, style: .title2, face: .semibold)
+        case .trackArtist: return TextSpec(size: 15, style: .subheadline)
+        case .statusLabel: return TextSpec(size: 11, style: .caption2, tracking: 0.8, uppercase: true, monospaced: true)
+        case .headerLink: return TextSpec(size: 15, style: .subheadline)
+        case .footer: return TextSpec(size: 12, style: .caption, tracking: 0.8, uppercase: true, monospaced: true)
+        case .footnote: return TextSpec(size: 13, style: .footnote)
         case .row: return TextSpec(size: 17, style: .body)
-        case .rowValue: return TextSpec(size: 17, style: .body, face: .italic)
-        case .button: return TextSpec(size: 18, style: .headline)
-        case .heading: return TextSpec(size: 32, style: .largeTitle)
-        case .lead: return TextSpec(size: 17, style: .body, face: .italic)
-        case .sheetTitle: return TextSpec(size: 24, style: .title2)
-        case .statBig: return TextSpec(size: 68, style: .largeTitle)
-        case .statUnit: return TextSpec(size: 22, style: .title2, face: .italic)
-        case .eyebrow: return TextSpec(size: 12, style: .caption, tracking: 1.7, uppercase: true)
-        case .phaseName: return TextSpec(size: 16, style: .callout)
-        case .phaseValue: return TextSpec(size: 16, style: .callout)
-        case .statNumber: return TextSpec(size: 30, style: .title)
-        case .statCaption: return TextSpec(size: 11, style: .caption2, tracking: 1.3, uppercase: true)
+        case .rowValue: return TextSpec(size: 15, style: .subheadline)
+        case .button: return TextSpec(size: 17, style: .headline, face: .semibold)
+        case .heading: return TextSpec(size: 30, style: .title, face: .bold)
+        case .lead: return TextSpec(size: 15, style: .subheadline)
+        case .sheetTitle: return TextSpec(size: 20, style: .title3, face: .semibold)
+        case .statBig: return TextSpec(size: 60, style: .largeTitle, face: .semibold, monospaced: true)
+        case .statUnit: return TextSpec(size: 12, style: .caption, tracking: 0.8, uppercase: true, monospaced: true)
+        case .eyebrow: return TextSpec(size: 11, style: .caption2, tracking: 0.8, uppercase: true, monospaced: true)
+        case .phaseName: return TextSpec(size: 13, style: .footnote)
+        case .phaseValue: return TextSpec(size: 13, style: .footnote, monospaced: true)
+        case .statNumber: return TextSpec(size: 26, style: .title, face: .semibold, monospaced: true)
+        case .statCaption: return TextSpec(size: 11, style: .caption2, tracking: 0.8, uppercase: true, monospaced: true)
         case .mono: return TextSpec(size: 11, style: .caption2)
         }
     }
@@ -158,18 +163,6 @@ enum ThemeFonts {
             }
             return .custom(name, size: spec.size, relativeTo: spec.style)
 
-        case .times:
-            let name: String
-            switch spec.face {
-            case .italic:
-                name = boldText ? "TimesNewRomanPS-BoldItalicMT" : "TimesNewRomanPS-ItalicMT"
-            case .bold, .semibold:
-                name = "TimesNewRomanPS-BoldMT"
-            case .light, .regular:
-                name = boldText ? "TimesNewRomanPS-BoldMT" : "TimesNewRomanPSMT"
-            }
-            return .custom(name, size: spec.size, relativeTo: spec.style)
-
         case .system:
             // `Font.system(size:)` does not scale on its own, so scale the artboard size
             // through UIFontMetrics for the current Dynamic Type setting.
@@ -181,7 +174,7 @@ enum ThemeFonts {
             case .semibold: weight = boldText ? .bold : .semibold
             case .bold: weight = boldText ? .heavy : .bold
             }
-            let base = Font.system(size: size, weight: weight)
+            let base = Font.system(size: size, weight: weight, design: spec.monospaced ? .monospaced : .default)
             return spec.face == .italic ? base.italic() : base
         }
     }
