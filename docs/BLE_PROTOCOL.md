@@ -19,7 +19,7 @@ style.
 - **`CAPS:lights`** — sent on every stats request after `CAPS:newsong`.
 - Consumer lights (firmware behaviour, no further wire change): white breathing (2.5 s) until a phone
   connects; one rainbow sweep (1 s) on connect; a slow pulse (1.6 s) in the loading colour from the cache
-  check until `DRAWN`; one green pulse (0.7 s) with `DRAWN`; slow amber blink (2 s) after a connection is
+  check until the cover's `TRANSITION_START`; steady green from `TRANSITION_START` until `DRAWN`, then off; slow amber blink (2 s) after a connection is
   lost; three red blinks on an error. Low battery / charging are stubbed (no charge-status pin; the battery
   sense is not read). Nothing flashes faster than ~3 a second: the developer saved-ahead flash and the red
   blinks now use 170 ms halves (were 150 ms).

@@ -77,7 +77,7 @@ enum PlayedTracks {
 /// phone and, since 1.19, on the board too, so its power-on light follows the choice.
 enum LightStyle: Int, CaseIterable, Identifiable {
     /// Calm lights: white breathing while looking for the phone, a rainbow on connect, a slow pulse in
-    /// the loading colour while a cover loads, one green pulse when it is drawn, amber when disconnected.
+    /// the loading colour while a cover loads, green while its transition draws, amber when disconnected.
     case consumer = 0
     /// The per-song lights: blue = cache hit, orange = new song / transfer, blue / orange flashes = saved
     /// ahead, green = done.

@@ -193,6 +193,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardLight: BoardLight = .off
     /// When the board last said `DRAWN` (its LED turns green at that moment).
     @Published private(set) var drawnAt: Date?
+    /// When the board last said `TRANSITION_START`: consumer lights are green from then until `DRAWN`.
+    @Published private(set) var drawStartedAt: Date?
     /// The cache check in flight was sent with the new-song magic because its cover was saved ahead.
     private var checkIsSavedAhead = false
     /// What a song cover shows when it lands.
@@ -1338,6 +1340,7 @@ final class BLEManager: NSObject, ObservableObject {
             if awaitingCacheRenderConfirm {
                 boardLight = checkIsSavedAhead && !photoHold ? .ahead(since: Date()) : .cache
             }
+            drawStartedAt = Date()
             handleTransitionStart(text)
         }
     }

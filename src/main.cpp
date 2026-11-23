@@ -1728,8 +1728,9 @@ void clearCacheDirectory() {
 //   powered on, no phone yet           -> slow white breathing (2.5 s)
 //   phone connected                    -> one rainbow sweep (1 s), then off
 //   loading a cover (cache check until -> slow pulse (1.6 s) in the loading colour (default blue)
-//     it is fully drawn)
-//   drawn                              -> one green pulse (0.7 s), then off
+//     its transition starts)
+//   transition drawing                 -> steady green from TRANSITION_START until the cover is fully
+//                                         drawn (DRAWN), then off (owner, 2026-11-23)
 //   disconnected after a connection    -> slow amber blink (2 s) until the phone is back (then rainbow)
 //   error                              -> three red blinks
 //   low battery / charging             -> stubbed: the board has no charge-status pin, and the battery
@@ -1760,7 +1761,8 @@ void clearCacheDirectory() {
 #define LED_RGB_RED    0xFF0000
 
 enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR,
-                         LED_LOADING, LED_RAINBOW };  // the last two: consumer style only
+                         LED_LOADING, LED_RAINBOW, LED_DRAWING };  // the last three: consumer style only
+#define LED_DRAWING_TIMEOUT_MS 8000   // consumer: a draw that never says DRAWN (not a song) goes dark
 #define LED_LOADING_TIMEOUT_MS 12000  // consumer: a load that never finishes (phone gave up) goes dark
 #define LED_ERROR_BLINK_MS 170        // three red blinks, 2.9 a second
 // Consumer loading colours, index = the 1.19 colour byte. The app shows the same six.
@@ -1847,10 +1849,15 @@ static bool ledUpdateConsumer(unsigned long t) {
       if (t >= 1000) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
       ledShow(ledHue(t * 1536 / 1000), 255);
       return true;
+    case LED_DRAWING:
+      // Green for exactly the transition: starts with TRANSITION_START, ends with DRAWN (LED_DONE).
+      if (t >= LED_DRAWING_TIMEOUT_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
+      ledShow(LED_RGB_GREEN, 255);
+      return true;
     case LED_DONE:
-      // One green pulse: fade in, fade out, 0.7 s.
-      if (t >= 700) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
-      ledShow(LED_RGB_GREEN, (uint16_t)(sinf((float)t / 700.0f * (float)M_PI) * 255.0f));
+      // The cover is fully drawn: green stops now.
+      ledMode = LED_OFF;
+      ledWriteRaw(0, 0, 0);
       return true;
     default:
       return false;
@@ -1864,6 +1871,7 @@ static void ledUpdate() {
     case LED_OFF:
     case LED_LOADING:
     case LED_RAINBOW:
+    case LED_DRAWING:
       ledWriteRaw(0, 0, 0);
       break;
     case LED_CACHE:
@@ -1924,7 +1932,7 @@ static void ledSetMode(LedMode m) {
     // change between them keeps the pulse going (no restart).
     if (m == LED_CACHE || m == LED_NEW || m == LED_BOTH || m == LED_WAITING || m == LED_TRANSFER) m = LED_LOADING;
     if (m == LED_LOADING && ledMode == LED_LOADING) { ledUpdate(); return; }
-  } else if (m == LED_LOADING || m == LED_RAINBOW) {
+  } else if (m == LED_LOADING || m == LED_RAINBOW || m == LED_DRAWING) {
     return;  // consumer-only effects
   }
   ledMode = m;
@@ -1937,6 +1945,12 @@ static void ledSetMode(LedMode m) {
 // TRANSITION_START (not before the SD load), a miss goes orange with its reply, green goes with DRAWN.
 static LedMode ledAtDrawStart = LED_OFF;
 static void ledApplyDrawStart() {
+  if (ledConsumer()) {
+    // Consumer: every transition (cache hit, new cover, photo) is green while it draws.
+    ledAtDrawStart = LED_OFF;
+    ledSetMode(LED_DRAWING);
+    return;
+  }
   if (ledAtDrawStart == LED_OFF) return;
   ledSetMode(ledAtDrawStart);
   ledAtDrawStart = LED_OFF;

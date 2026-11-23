@@ -650,6 +650,7 @@ struct NowPlayingScreen: View {
             connected: bleManager.isConnected,
             everConnected: bleManager.everConnected,
             connectedAt: bleManager.connectedAt,
+            drawStartedAt: bleManager.drawStartedAt,
             thickness: nerd ? ArtMetrics.nerdStripThickness : nil
         )
     }
@@ -1236,7 +1237,6 @@ enum StripTiming {
     static let aheadFlash = 0.17
     // Consumer lights (firmware `ledUpdateConsumer`), seconds.
     static let consumerLoadingPeriod = 1.6
-    static let consumerDonePulse = 0.7
     static let consumerBreathPeriod = 2.5
     static let consumerRainbow = 1.0
     static let consumerAmberPeriod = 2.0
@@ -1313,6 +1313,8 @@ struct LiveStrip: View {
     var connected = true
     var everConnected = false
     var connectedAt: Date? = nil
+    /// The board's latest `TRANSITION_START`: consumer green runs from then until DRAWN.
+    var drawStartedAt: Date? = nil
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
 
@@ -1461,14 +1463,16 @@ struct LiveStrip: View {
         }
         switch run {
         case .running(let start):
-            // Slow pulse in the loading colour, from the cache check until DRAWN; 25% -> 100% -> 25%.
+            // The board started this cover's transition: steady green until DRAWN (owner, 2026-11-23).
+            if let drawStart = drawStartedAt, drawStart >= start {
+                return lit(StripColors.done(theme), 1)
+            }
+            // Slow pulse in the loading colour, from the cache check until the transition starts.
             let level = reduceMotion ? 0.8 : 0.25 + 0.75 * wave(now.timeIntervalSince(start), period: StripTiming.consumerLoadingPeriod)
             return lit(StripColors.loading(loadingColour, theme), level, dashed: stage == .checking)
-        case .finished(let at, _):
-            let dt = now.timeIntervalSince(at)
-            guard dt < StripTiming.consumerDonePulse else { return dark }
-            let level = reduceMotion ? 1 : sin(dt / StripTiming.consumerDonePulse * .pi)
-            return lit(StripColors.done(theme), level)
+        case .finished:
+            // Fully drawn (DRAWN): the green stops, like the LED.
+            return dark
         case .ended(let at, _):
             if failed {
                 return Look(fill: 1, color: StripColors.error(theme), opacity: 1, dashedTrack: false, marker: .failed)

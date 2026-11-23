@@ -135,7 +135,7 @@ struct SettingsView: View {
                 }
             }
             Text(bleManager.lightStyle == .consumer
-                 ? "Calm: white breathing while it looks for your phone, a rainbow when it connects, a slow pulse while a cover loads, one green pulse when it's drawn, amber blinking if the phone is lost."
+                 ? "Calm: white breathing while it looks for your phone, a rainbow when it connects, a slow pulse while a cover loads, green while it draws, amber blinking if the phone is lost."
                  : "Per song: blue = from the card, orange = new cover being sent, blue / orange flashes = saved ahead from your queue, green = drawn, red = error.")
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)
