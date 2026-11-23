@@ -1729,8 +1729,8 @@ void clearCacheDirectory() {
 //   phone connected                    -> one rainbow sweep (1 s), then off
 //   loading a NEW cover (miss reply    -> slow pulse (1.6 s) in the loading colour (default blue)
 //     until its transition starts)       (a cached cover skips this: straight to green)
-//   transition drawing                 -> steady green from TRANSITION_START until the cover is fully
-//                                         drawn (DRAWN), then off (owner, 2026-11-23)
+//   transition drawing                 -> green pulse (1.2 s) from TRANSITION_START until the cover is
+//                                         fully drawn (DRAWN), then a 0.8 s fade out (owner, 2026-11-23)
 //   disconnected after a connection    -> slow amber blink (2 s) until the phone is back (then rainbow)
 //   error                              -> three red blinks
 //   low battery / charging             -> stubbed: the board has no charge-status pin, and the battery
@@ -1763,6 +1763,9 @@ void clearCacheDirectory() {
 enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED_TRANSFER, LED_DONE, LED_ERROR,
                          LED_LOADING, LED_RAINBOW, LED_DRAWING };  // the last three: consumer style only
 #define LED_DRAWING_TIMEOUT_MS 8000   // consumer: a draw that never says DRAWN (not a song) goes dark
+#define LED_GREEN_PULSE_MS 1200       // consumer green pulse period while the transition draws
+#define LED_GREEN_TAIL_MS 800         // consumer: green fades out over this after DRAWN
+static uint16_t ledGreenLevel = 255;  // consumer: where the green pulse was when DRAWN came
 #define LED_LOADING_TIMEOUT_MS 12000  // consumer: a load that never finishes (phone gave up) goes dark
 #define LED_ERROR_BLINK_MS 170        // three red blinks, 2.9 a second
 // Consumer loading colours, index = the 1.19 colour byte. The app shows the same six.
@@ -1850,14 +1853,16 @@ static bool ledUpdateConsumer(unsigned long t) {
       ledShow(ledHue(t * 1536 / 1000), 255);
       return true;
     case LED_DRAWING:
-      // Green for exactly the transition: starts with TRANSITION_START, ends with DRAWN (LED_DONE).
+      // Green pulse for the transition: starts bright with TRANSITION_START, 100% -> 40% -> 100% every
+      // 1.2 s, until DRAWN (LED_DONE).
       if (t >= LED_DRAWING_TIMEOUT_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
-      ledShow(LED_RGB_GREEN, 255);
+      ledGreenLevel = 255 - ledWave(t, LED_GREEN_PULSE_MS) * 153 / 255;
+      ledShow(LED_RGB_GREEN, ledGreenLevel);
       return true;
     case LED_DONE:
-      // The cover is fully drawn: green stops now.
-      ledMode = LED_OFF;
-      ledWriteRaw(0, 0, 0);
+      // Fully drawn: the green lingers a little, fading out from where the pulse was (owner, 2026-11-23).
+      if (t >= LED_GREEN_TAIL_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
+      ledShow(LED_RGB_GREEN, (uint16_t)(ledGreenLevel * (LED_GREEN_TAIL_MS - t) / LED_GREEN_TAIL_MS));
       return true;
     default:
       return false;
