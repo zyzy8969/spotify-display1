@@ -17,6 +17,9 @@ struct TransitionPickerView: View {
     @State private var showSwipe = false
     @State private var confirmReset = false
     @AppStorage(TransitionSwipeView.previewSpeedsKey) private var swipePreviewSpeedsRaw = "1"
+    /// Filters the list by name or description ("wipe", "pixel", "spin"...). Empty = everything.
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         let enabled = TransitionPrefs.enabledCount(disabledRaw: disabledRaw)
@@ -42,12 +45,29 @@ struct TransitionPickerView: View {
                 }
                 ThemedDivider()
                     .padding(.vertical, 18)
-                ForEach(TransitionCatalog.groups) { group in
-                    groupHeader(group)
-                    ForEach(group.ids, id: \.self) { tid in
-                        if let info = TransitionCatalog.info(id: tid) {
-                            row(info)
-                                .padding(.bottom, 16)
+                searchField
+                    .padding(.bottom, 14)
+                if searching {
+                    // Matches as one flat list: the group headers' "Only these" / "All on" act on
+                    // the whole group, which would be confusing next to a filtered few.
+                    let matches = TransitionCatalog.all.filter(matchesQuery)
+                    Text(matches.isEmpty ? "No transitions match \u{201C}\(trimmedQuery)\u{201D}."
+                                         : "\(matches.count) match\(matches.count == 1 ? "" : "es")")
+                        .themeText(.statCaption)
+                        .foregroundStyle(theme.inkFaint)
+                        .padding(.bottom, 12)
+                    ForEach(matches) { info in
+                        row(info)
+                            .padding(.bottom, 16)
+                    }
+                } else {
+                    ForEach(TransitionCatalog.groups) { group in
+                        groupHeader(group)
+                        ForEach(group.ids, id: \.self) { tid in
+                            if let info = TransitionCatalog.info(id: tid) {
+                                row(info)
+                                    .padding(.bottom, 16)
+                            }
                         }
                     }
                 }
@@ -60,6 +80,7 @@ struct TransitionPickerView: View {
             .padding(.horizontal, theme.margin + 4)
             .padding(.bottom, 32)
         }
+        .scrollDismissesKeyboard(.interactively)
         .background(theme.background.ignoresSafeArea())
         .onChange(of: disabledRaw) { _ in
             bleManager.applyTransitionPrefs()
@@ -121,6 +142,60 @@ struct TransitionPickerView: View {
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
         }
+    }
+
+    private var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var searching: Bool { !trimmedQuery.isEmpty }
+
+    /// Every word typed must appear in the name, the description, its group's name, or be "quick".
+    private func matchesQuery(_ info: TransitionInfo) -> Bool {
+        let group = TransitionCatalog.groups.first { $0.ids.contains(info.id) }?.name ?? ""
+        let haystack = [info.name, info.blurb, group, info.quick ? "quick" : ""].joined(separator: " ")
+        return trimmedQuery.split(separator: " ").allSatisfy {
+            haystack.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(theme.inkFaint)
+                .accessibilityHidden(true)
+            TextField("Search transitions", text: $query)
+                .themeText(.row)
+                .foregroundStyle(theme.ink)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .focused($searchFocused)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 17))
+                        .foregroundStyle(theme.inkFaint)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+                .padding(.trailing, -10)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 44)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.ringOff.opacity(0.15))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(searchFocused ? theme.ink.opacity(0.6) : theme.ringOff.opacity(0.4), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { searchFocused = true }
     }
 
     /// Puts every transition back to how it came: all switched on, every speed normal (random
