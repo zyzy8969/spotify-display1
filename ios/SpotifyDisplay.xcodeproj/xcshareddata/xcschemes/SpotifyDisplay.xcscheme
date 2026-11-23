@@ -29,6 +29,16 @@
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
       <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "F4E0C3AE1452A8B2D5B888CA"
+               BuildableName = "SpotifyDisplayTests.xctest"
+               BlueprintName = "SpotifyDisplayTests"
+               ReferencedContainer = "container:SpotifyDisplay.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

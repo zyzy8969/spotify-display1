@@ -13,7 +13,7 @@ Last updated: 2026-11-22
 - **2026-11-22, `feat/transition-picker-stats-upload` (BLE 1.12, awaiting device test, uncommitted):** transition on/off picker with live examples (mask sent to the board), fresh draws now announce `TRANSITION:`, the app cover replays the board's announced effect, stats moved from a sheet to General/Live pages on the main screen (Live has a terminal log), photo upload (display-only `0xFD`, not saved to SD, pauses Spotify). Firmware compiles with PlatformIO; the Swift side has NOT been compiled (no Mac) — run the CI `ios` job first. Test script: `docs/VALIDATION_CHECKLIST.md`.
 - **2026-11-22, `feat/faster-transfer` (BLE 1.11, awaiting device test):** deflate-compressed frames, 7.5–15 ms interval + 251-byte DLE request, 5-song prefetch. Old behaviour and rollback steps: `docs/ROLLBACK_FASTER_TRANSFER.md`; pre-change code is tagged `backup/pre-faster-transfer`.
 - **Info.plist:** `UIBackgroundModes` → `bluetooth-central`.
-- **BLEManager:** Core Bluetooth state restoration (`CBCentralManagerOptionRestoreIdentifierKey`, `willRestoreState`, reconnect / rediscover services), `UIApplication.beginBackgroundTask` for the full `processTrack` scope, cancellable 32s post-chunk `SUCCESS` timeout.
+- **BLEManager:** Core Bluetooth state restoration (`CBCentralManagerOptionRestoreIdentifierKey`, `willRestoreState`, reconnect / rediscover services), `UIApplication.beginBackgroundTask` for the full `processTrack` scope, cancellable 8 s post-chunk `SUCCESS` timeout.
 - **ContentView:** `scenePhase`-aware copy about limited background Spotify updates + always-visible expectation line.
 - **SpotifyManager:** Display failure cooldown (same track), short global backoff after any display error, and `lastSentToDisplayTrackId` when a transfer completes after the UI track has already changed (avoids 1 Hz resend loops).
 - **Firmware cache (`src/main.cpp`):** startup in-memory cache index, versioned cache filenames (`v1_*.bin` with legacy fallback), atomic temp-write + rename, CRC corruption counters/recovery deletes, deterministic clear flow with immediate count publish and timing telemetry.
@@ -41,5 +41,5 @@ Last updated: 2026-11-22
 
 ## Optional follow-ups if tests fail
 
-- If timeouts persist: measure ESP32 serial from last chunk to post-process `SUCCESS`; tune the 32s ceiling in `BLEManager.sendRGB565`.
+- If timeouts persist: measure ESP32 serial from last chunk to post-process `SUCCESS`; tune the 8 s ceiling in `BLEManager.sendRGB565`.
 - If restore misbehaves on a specific OS version: narrow `applyRestoredPeripheral` for `.disconnecting` / edge states.

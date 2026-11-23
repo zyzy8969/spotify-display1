@@ -37,6 +37,10 @@ final class BLEManager: NSObject, ObservableObject {
     }()
     /// The connected board has the status-LED characteristic (firmware with BLE_PROTOCOL 1.13+).
     @Published private(set) var boardSupportsStatusLed = false
+    /// Slider settings whose writes are throttled (see `throttledWrite`).
+    private enum ThrottledSetting { case brightness, statusLed }
+    private var lastSettingWriteAt: [ThrottledSetting: Date] = [:]
+    private var settingWriteScheduled: Set<ThrottledSetting> = []
     @Published private(set) var transferLog: [TransferLogEntry] = []
     @Published private(set) var currentLivePhase: String? = "idle"
     /// Typed pipeline stage for the UI, so views never parse `currentLivePhase` / `boardAckStatus`
@@ -207,15 +211,12 @@ final class BLEManager: NSObject, ObservableObject {
     /// Lets an in-flight album transfer finish after the app moves to background (best-effort, seconds).
     private var transferBackgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
-    /// Cancels the 32s `SUCCESS` wait when the firmware ACKs early (saves idle sleep + CPU).
+    /// Cancels the 8 s `SUCCESS` wait when the firmware ACKs early (saves idle sleep + CPU).
     private var imageSuccessTimeoutTask: Task<Void, Never>?
 
     /// Incremented on `cancelOngoingTransfer()` and `failPending` so in-flight `processTrack` / `sendRGB565` abort cooperatively.
     private var transferEpoch: UInt64 = 0
     private var activeDownloadTask: Task<Data, Error>?
-
-    /// Cache keys successfully sent via BLE this session. Only trust firmware cache hits for keys in this set.
-    private var confirmedCacheKeys = Set<Data>()
 
     private let serviceUUID = CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB")
     private let statusUUID = CBUUID(string: "0000FFE1-0000-1000-8000-00805F9B34FB")
@@ -411,14 +412,6 @@ final class BLEManager: NSObject, ObservableObject {
             isTransferring = false
             transferProgress = 0
         }
-        // #region agent log
-        AgentDebugLog.ingest(
-            hypothesisId: "H2",
-            location: "BLEManager.cancelOngoingTransfer",
-            message: "cancel_incremented_epoch",
-            data: ["transferEpoch": Int(transferEpoch)]
-        )
-        // #endregion agent log
     }
 
     private func ensureTransferEpoch(_ epochAtStart: UInt64) throws {
@@ -954,14 +947,6 @@ final class BLEManager: NSObject, ObservableObject {
         // Every byte is queued: the board will draw, save and ACK this frame even if we skip now.
         imageAckOwed = true
 
-        // #region agent log
-        AgentDebugLog.ingest(
-            hypothesisId: "H1",
-            location: "BLEManager.sendRGB565",
-            message: "installing_success_wait",
-            data: ["epochAtStart": Int(epochAtStart), "transferEpoch": Int(transferEpoch)]
-        )
-        // #endregion agent log
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.transferContinuation = cont
@@ -975,35 +960,19 @@ final class BLEManager: NSObject, ObservableObject {
                     if self.transferTimeoutGen == myGen { self.imageSuccessTimeoutTask = nil }
                 }
                 do {
-                    // Firmware ACK after progressive draw + SD save; typically <2s.
+                    // Firmware ACKs after the whole frame is drawn (with its transition) and saved; typically <2 s.
                     try await Task.sleep(nanoseconds: 8_000_000_000)
                 } catch {
                     return
                 }
                 guard !Task.isCancelled, self.transferTimeoutGen == myGen else { return }
                 if let c = self.transferContinuation {
-                    // #region agent log
-                    AgentDebugLog.ingest(
-                        hypothesisId: "H1",
-                        location: "BLEManager.sendRGB565.timeoutTask",
-                        message: "bleTimeout_firing",
-                        data: ["transferEpoch": Int(self.transferEpoch)]
-                    )
-                    // #endregion agent log
                     self.transferContinuation = nil
                     c.resume(throwing: SpotifyDisplayError.bleTimeout)
                 }
             }
         }
 
-        // #region agent log
-        AgentDebugLog.ingest(
-            hypothesisId: "H1",
-            location: "BLEManager.sendRGB565",
-            message: "success_wait_completed_normally",
-            data: ["transferEpoch": Int(transferEpoch)]
-        )
-        // #endregion agent log
 
         cancelImageSuccessTimeoutTask()
 
@@ -1269,14 +1238,6 @@ final class BLEManager: NSObject, ObservableObject {
 
         if text == "SUCCESS", awaitingImageComplete {
             if let c = transferContinuation {
-                // #region agent log
-                AgentDebugLog.ingest(
-                    hypothesisId: "H5",
-                    location: "BLEManager.handleMessage",
-                    message: "notify_SUCCESS_msg_char",
-                    data: ["hadContinuation": true]
-                )
-                // #endregion agent log
                 transferContinuation = nil
                 cancelImageSuccessTimeoutTask()
                 c.resume()
@@ -1292,14 +1253,6 @@ final class BLEManager: NSObject, ObservableObject {
         }
 
         if text.hasPrefix("ERROR:"), awaitingImageComplete, let c = transferContinuation {
-            // #region agent log
-            AgentDebugLog.ingest(
-                hypothesisId: "H5",
-                location: "BLEManager.handleMessage",
-                message: "notify_ERROR_msg_char",
-                data: ["prefix": String(text.prefix(48))]
-            )
-            // #endregion agent log
             transferContinuation = nil
             cancelImageSuccessTimeoutTask()
             c.resume(throwing: SpotifyDisplayError.bleTransferRejected(String(text)))
@@ -1582,26 +1535,10 @@ extension BLEManager: CBPeripheralDelegate {
                 if data.count == 1, self.awaitingImageComplete, let c = self.transferContinuation {
                     switch data[0] {
                     case 0x01:
-                        // #region agent log
-                        AgentDebugLog.ingest(
-                            hypothesisId: "H5",
-                            location: "BLEManager.didUpdateValue.image",
-                            message: "notify_image_0x01_ok",
-                            data: [:]
-                        )
-                        // #endregion agent log
                         self.transferContinuation = nil
                         self.cancelImageSuccessTimeoutTask()
                         c.resume()
                     case 0x02:
-                        // #region agent log
-                        AgentDebugLog.ingest(
-                            hypothesisId: "H5",
-                            location: "BLEManager.didUpdateValue.image",
-                            message: "notify_image_0x02_err",
-                            data: [:]
-                        )
-                        // #endregion agent log
                         self.transferContinuation = nil
                         self.cancelImageSuccessTimeoutTask()
                         c.resume(throwing: SpotifyDisplayError.bleTransferRejected("Display reported transfer error (0x02)"))
@@ -1630,24 +1567,50 @@ extension BLEManager: CBPeripheralDelegate {
 }
 
 extension BLEManager {
+    /// Sliders call the setters below on every step, and each BLE write waits for a response. While a
+    /// slider moves, writes go out at most every 100 ms per setting; the latest value always goes last.
+    private func throttledWrite(_ setting: ThrottledSetting, _ write: @escaping () -> Void) {
+        let wait = 0.1 - Date().timeIntervalSince(lastSettingWriteAt[setting] ?? .distantPast)
+        guard wait > 0 else {
+            lastSettingWriteAt[setting] = Date()
+            write()
+            return
+        }
+        guard settingWriteScheduled.insert(setting).inserted else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard let self else { return }
+            self.settingWriteScheduled.remove(setting)
+            self.lastSettingWriteAt[setting] = Date()
+            write()
+        }
+    }
+
+    /// Writes one byte to `characteristic` if the board has it.
+    private func writeByte(_ value: UInt8, to characteristic: CBCharacteristic?) {
+        guard let p = peripheral, let c = characteristic else { return }
+        var b = value
+        p.writeValue(Data(bytes: &b, count: 1), for: c, type: .withResponse)
+    }
+
     func setBrightness(_ value: UInt8) {
         brightness = value
-        UserDefaults.standard.set(Int(value), forKey: "ble_brightness")
-        guard let p = peripheral, let c = brightnessChar else { return }
-        var b = value
-        let payload = Data(bytes: &b, count: 1)
-        p.writeValue(payload, for: c, type: .withResponse)
+        throttledWrite(.brightness) { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(Int(self.brightness), forKey: "ble_brightness")
+            self.writeByte(self.brightness, to: self.brightnessChar)
+        }
     }
 
     /// Status LED brightness, 0...255 of the board's safe cap (BLE_PROTOCOL 1.13). Saved, then sent
     /// if the board has the characteristic; otherwise it is sent on the next connect to newer firmware.
     func setStatusLedLevel(_ value: UInt8) {
         statusLedLevel = value
-        UserDefaults.standard.set(Int(value), forKey: "ble_status_led")
-        guard let p = peripheral, let c = statusLedChar else { return }
-        var b = value
-        let payload = Data(bytes: &b, count: 1)
-        p.writeValue(payload, for: c, type: .withResponse)
+        throttledWrite(.statusLed) { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(Int(self.statusLedLevel), forKey: "ble_status_led")
+            self.writeByte(self.statusLedLevel, to: self.statusLedChar)
+        }
     }
 
     func clearDisplayCache() async throws {
