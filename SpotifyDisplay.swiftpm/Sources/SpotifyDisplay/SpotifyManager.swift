@@ -1162,7 +1162,17 @@ final class SpotifyManager: ObservableObject {
         req.httpBody = Self.formEncode(body).data(using: .utf8)
 
         let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, (200 ... 299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else { throw SpotifyDisplayError.authFailed }
+        guard (200 ... 299).contains(http.statusCode) else {
+            // `accessExpiry` stays in the past, so without this every 0.45 s poll would refresh again.
+            if http.statusCode == 400 || http.statusCode == 401 {
+                // invalid_grant / invalid_client: the refresh token is revoked or dead. Retrying never
+                // works, so go back to the sign-in screen instead of looking signed in forever.
+                signOut()
+            } else {
+                // Spotify-side trouble (5xx, 429): back off instead of hammering the token endpoint.
+                rateLimitedUntil = Date().addingTimeInterval(10)
+            }
             throw SpotifyDisplayError.authFailed
         }
 
