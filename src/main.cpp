@@ -1727,8 +1727,8 @@ void clearCacheDirectory() {
 // CONSUMER (default, 2026-11-23):
 //   powered on, no phone yet           -> slow white breathing (2.5 s)
 //   phone connected                    -> one rainbow sweep (1 s), then off
-//   loading a cover (cache check until -> slow pulse (1.6 s) in the loading colour (default blue)
-//     its transition starts)
+//   loading a NEW cover (miss reply    -> slow pulse (1.6 s) in the loading colour (default blue)
+//     until its transition starts)       (a cached cover skips this: straight to green)
 //   transition drawing                 -> steady green from TRANSITION_START until the cover is fully
 //                                         drawn (DRAWN), then off (owner, 2026-11-23)
 //   disconnected after a connection    -> slow amber blink (2 s) until the phone is back (then rainbow)
@@ -2128,9 +2128,9 @@ void loop() {
     // before the board knows (the lookup is the in-memory index, well under 1 ms).
     const bool newSong = cacheCheckNewSong;
     cacheCheckNewSong = false;
-    // Consumer: the loading pulse starts with the check and runs until DRAWN.
+    // Consumer: nothing until the board knows. A hit is green for the whole draw (owner, 2026-11-23:
+    // cached covers load fast, no loading pulse); a miss starts the loading pulse with its reply.
     ledWasReceiving = false;
-    if (ledConsumer()) ledSetMode(LED_LOADING);
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
@@ -2142,8 +2142,9 @@ void loop() {
       unsigned long totalStartTime = millis();
       Serial.println("BLE: Cache HIT");
 
-      // Dark during the SD load; blue / the flashes start with TRANSITION_START (ledApplyDrawStart).
-      if (!ledConsumer()) ledSetMode(LED_OFF);
+      // Dark during the SD load (~0.1 s); blue / the flashes / consumer green start with
+      // TRANSITION_START (ledApplyDrawStart), the moment the app's line changes too.
+      ledSetMode(LED_OFF);
       ledAtDrawStart = newSong ? LED_BOTH : LED_CACHE;
       // Load and display cached image
       if (loadFromCache(currentCacheKey)) {

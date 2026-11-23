@@ -1467,7 +1467,9 @@ struct LiveStrip: View {
             if let drawStart = drawStartedAt, drawStart >= start {
                 return lit(StripColors.done(theme), 1)
             }
-            // Slow pulse in the loading colour, from the cache check until the transition starts.
+            // The board has not said yet: dark on both (a cached cover goes straight to green).
+            guard light == .new else { return dark }
+            // A new cover (miss reply): slow pulse in the loading colour until its transition starts.
             let level = reduceMotion ? 0.8 : 0.25 + 0.75 * wave(now.timeIntervalSince(start), period: StripTiming.consumerLoadingPeriod)
             return lit(StripColors.loading(loadingColour, theme), level, dashed: stage == .checking)
         case .finished:
