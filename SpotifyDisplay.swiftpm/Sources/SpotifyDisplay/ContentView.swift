@@ -15,10 +15,11 @@ struct ContentView: View {
     /// Night switch per theme (Settings > Theme). Keys and defaults match `ThemeID.darkKey/defaultDark`.
     @AppStorage("uiDark.crayon") private var crayonDark = false
     @AppStorage("uiDark.quiet") private var quietDark = true
+    @AppStorage("uiDark.keyring") private var keyringDark = false
 
     var body: some View {
         let id = ThemeID.from(themeRaw)
-        let theme = id.theme(dark: id == .crayon ? crayonDark : quietDark)
+        let theme = id.theme(dark: isDark(id))
         ZStack {
             theme.background
                 .ignoresSafeArea()
@@ -45,6 +46,14 @@ struct ContentView: View {
             spotifyManager.stopMonitoring()
         }
         .preferredColorScheme(theme.colorScheme)
+    }
+
+    private func isDark(_ id: ThemeID) -> Bool {
+        switch id {
+        case .crayon: return crayonDark
+        case .quiet: return quietDark
+        case .keyring: return keyringDark
+        }
     }
 
     @ViewBuilder

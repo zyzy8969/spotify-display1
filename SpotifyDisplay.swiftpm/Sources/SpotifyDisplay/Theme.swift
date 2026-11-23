@@ -2,13 +2,18 @@ import SwiftUI
 
 // MARK: - Theme identity
 
-/// The looks from the Design canvas mockup, each with a day and a night version. Persisted by raw
-/// value under `storageKey`. (Serif was removed 2026-11-22; a stored "serif" falls back to Crayon.)
+/// The three looks, each with a day and a night version. Persisted by raw value under `storageKey`.
+/// Each one is its own world, not a recolour: its own type, shapes, signature around the cover and
+/// motion (`ThemeMotion`). (Serif was removed 2026-11-22; Keyring took its place, so a stored
+/// "serif" lands on Keyring.)
 enum ThemeID: String, CaseIterable, Identifiable {
     /// Theme A: hand-drawn crayon marks, Chalkboard SE. Day: white page; night: chalkboard.
     case crayon
     /// Theme B: system font, small colour accents. Night (its original): near-black; day: light grey.
     case quiet
+    /// Theme C: the keychain itself drawn around the cover, tag-style mono labels, one signal orange.
+    /// Day: warm paper; night: a dark desk.
+    case keyring
 
     static let storageKey = "uiTheme"
     static let fallback: ThemeID = .crayon
@@ -17,12 +22,13 @@ enum ThemeID: String, CaseIterable, Identifiable {
 
     /// Reads the stored raw value, falling back to Crayon for anything unknown.
     static func from(_ raw: String) -> ThemeID {
-        ThemeID(rawValue: raw) ?? fallback
+        if raw == "serif" { return .keyring }
+        return ThemeID(rawValue: raw) ?? fallback
     }
 
     /// Where this theme's night switch is stored (one per theme, so each keeps its own choice).
     var darkKey: String { "uiDark.\(rawValue)" }
-    /// Crayon starts in day mode, Quiet in night mode, as designed.
+    /// Crayon and Keyring start in day mode, Quiet in night mode, as designed.
     var defaultDark: Bool { self == .quiet }
 
     /// The theme in its default mode.
@@ -32,6 +38,7 @@ enum ThemeID: String, CaseIterable, Identifiable {
         switch self {
         case .crayon: return dark ? .crayonNight : .crayon
         case .quiet: return dark ? .quiet : .quietDay
+        case .keyring: return dark ? .keyringNight : .keyring
         }
     }
 
@@ -41,8 +48,31 @@ enum ThemeID: String, CaseIterable, Identifiable {
         switch self {
         case .crayon: return Array(t.artPalette.prefix(5))
         case .quiet: return [t.ink, t.spotify, t.display, t.inkSoft]
+        case .keyring: return [t.housing?.body ?? t.ink, t.display, t.housing?.ring ?? t.inkSoft]
         }
     }
+}
+
+/// How a theme moves. The cover itself always plays the board's own transition (`ArtStage`); this is
+/// everything around it: the title and artist when the song changes, and buttons when pressed.
+/// Reduce Motion: every style becomes a plain crossfade and presses only dim.
+enum ThemeMotion {
+    /// Crayon: things pop in with a little overshoot and tilt, like a sticker slapped on a page.
+    case bouncy
+    /// Quiet: nothing moves; words blur into focus and buttons only dim.
+    case soft
+    /// Keyring: mechanical, like a flip display: new words roll up from below, buttons click down.
+    case ticker
+}
+
+/// Colours of the drawn keychain around the cover (Keyring).
+struct Housing {
+    /// The keychain's case.
+    var body: Color
+    /// Thin edge highlight, so the case reads on a page of nearly the same darkness.
+    var edge: Color
+    /// The metal key ring and its link. Decorative.
+    var ring: Color
 }
 
 /// How the Stats screen draws the per-phase timing breakdown.
@@ -129,6 +159,15 @@ struct Theme {
     /// Stats hero: Serif puts its small-caps "Last transfer" label above the big number.
     var heroLabelAbove: Bool = false
 
+    // Signature (what makes each theme its own, beyond colour)
+    var motion: ThemeMotion = .soft
+    /// Crayon: the big cover sits a little crooked, like a photo stuck on by hand (degrees).
+    var artTilt: Double = 0
+    /// Quiet: a soft, blurred glow of the current cover behind the top of the screen.
+    var ambientArt: Bool = false
+    /// Keyring: the cover sits in a drawing of the keychain. nil draws the bare cover.
+    var housing: Housing? = nil
+
     var isWobbly: Bool { wobble > 0 }
 
     /// Safe palette lookup for decorative colour lists.
@@ -195,6 +234,8 @@ extension Theme {
         t.margin = 22
         t.statsStyle = .crayonBars
         t.placeholder = .scribbles
+        t.motion = .bouncy
+        t.artTilt = -1.6
         return t
     }()
 
@@ -245,6 +286,8 @@ extension Theme {
         t.margin = 22
         t.statsStyle = .thinBars
         t.placeholder = .filledRings
+        t.motion = .soft
+        t.ambientArt = true
         return t
     }()
 
@@ -325,6 +368,93 @@ extension Theme {
         t.artShadowColor = Color(hex: 0x000000, opacity: 0.14)
         t.artShadowRadius = 18
         t.artShadowY = 12
+        return t
+    }()
+
+    /// Theme C — Keyring. Warm paper, the keychain drawn around the live cover, SF Pro with tag-style
+    /// SF Mono labels, one signal orange that means "the keychain". Contrast vs #F4F1EA.
+    static let keyring: Theme = {
+        var t = Theme(id: .keyring, colorScheme: .light)
+        t.background = Color(hex: 0xF4F1EA)
+        t.artSurface = Color(hex: 0x2A2925)     // the keychain's screen while it is dark
+        t.ink = Color(hex: 0x1C1B19)            // 15.3:1
+        t.inkSoft = Color(hex: 0x57554F)        // 6.6:1
+        t.inkFaint = Color(hex: 0x67645D)       // 5.2:1
+        t.headerLink = Color(hex: 0x1C1B19)
+        t.backTint = Color(hex: 0x1C1B19)
+        t.control = Color(hex: 0x1C1B19)
+        t.controlStrong = Color(hex: 0x1C1B19)
+        t.spotify = Color(hex: 0x2E7D32)        // 4.55:1
+        t.display = Color(hex: 0xC2410C)        // 4.6:1, the one signal orange
+        t.fresh = Color(hex: 0x1C1B19)
+        t.accent = Color(hex: 0xC2410C)
+        t.destructive = Color(hex: 0xB3261E)    // 5.8:1
+        t.ringOff = Color(hex: 0x7D7A72)        // 3.8:1
+        t.toggleOff = Color(hex: 0x7D7A72)
+        t.toggleOnFill = Color(hex: 0x1C1B19)
+        t.toggleOnKnob = Color(hex: 0xF4F1EA)
+        t.sliderTint = Color(hex: 0xC2410C)
+        t.primaryFill = Color(hex: 0x1C1B19)
+        t.onPrimary = Color(hex: 0xF4F1EA)      // 15.3:1
+        t.phaseColors = [Color(hex: 0x1C1B19)]
+        t.rule = Color(hex: 0xDDD8CC)
+        t.artPalette = [
+            Color(hex: 0x3A3833), Color(hex: 0x4E4B45), Color(hex: 0x66625A),
+            Color(hex: 0x86827A), Color(hex: 0xC2410C)
+        ]
+        t.doodle = [
+            Color(hex: 0x9A968C), Color(hex: 0x1C1B19), Color(hex: 0x57554F),
+            Color(hex: 0xC2410C), Color(hex: 0x9A968C), Color(hex: 0x1C1B19)
+        ]
+        t.housing = Housing(body: Color(hex: 0x1C1B19), edge: Color(hex: 0x3A3833), ring: Color(hex: 0x9A968C))
+        t.wobble = 0
+        t.iconStroke = 1.6
+        t.stripThickness = 3
+        t.artCornerRadius = 4
+        t.artShadowColor = .clear
+        t.artShadowRadius = 0
+        t.artShadowY = 0
+        t.buttonCornerRadius = 12
+        t.doodleWidthScale = 0.6
+        t.margin = 22
+        t.statsStyle = .thinBars
+        t.placeholder = .filledRings
+        t.motion = .ticker
+        return t
+    }()
+
+    /// Keyring at night: the keychain on a dark desk. Contrast vs #141311.
+    static let keyringNight: Theme = {
+        var t = Theme.keyring
+        t.colorScheme = .dark
+        t.background = Color(hex: 0x141311)
+        t.artSurface = Color(hex: 0x22201C)
+        t.ink = Color(hex: 0xF1EDE4)            // 15.9:1
+        t.inkSoft = Color(hex: 0xB3AEA3)        // 8.4:1
+        t.inkFaint = Color(hex: 0x9A958B)       // 6.2:1
+        t.headerLink = Color(hex: 0xF1EDE4)
+        t.backTint = Color(hex: 0xF1EDE4)
+        t.control = Color(hex: 0xF1EDE4)
+        t.controlStrong = Color(hex: 0xF1EDE4)
+        t.spotify = Color(hex: 0x4CC26A)        // 8.2:1
+        t.display = Color(hex: 0xFF7A33)        // 7.2:1
+        t.fresh = Color(hex: 0xF1EDE4)
+        t.accent = Color(hex: 0xFF7A33)
+        t.destructive = Color(hex: 0xFF6B5E)    // 6.7:1
+        t.ringOff = Color(hex: 0x858075)        // 4.7:1
+        t.toggleOff = Color(hex: 0x858075)
+        t.toggleOnFill = Color(hex: 0xF1EDE4)
+        t.toggleOnKnob = Color(hex: 0x141311)
+        t.sliderTint = Color(hex: 0xFF7A33)
+        t.primaryFill = Color(hex: 0xF1EDE4)
+        t.onPrimary = Color(hex: 0x141311)      // 15.9:1
+        t.phaseColors = [Color(hex: 0xF1EDE4)]
+        t.rule = Color(hex: 0x2A2824)
+        t.artPalette = [
+            Color(hex: 0x2E2B26), Color(hex: 0x3E3A34), Color(hex: 0x57534B),
+            Color(hex: 0x7A756B), Color(hex: 0xFF7A33)
+        ]
+        t.housing = Housing(body: Color(hex: 0x2E2B26), edge: Color(hex: 0x4A463F), ring: Color(hex: 0x8C877D))
         return t
     }()
 }

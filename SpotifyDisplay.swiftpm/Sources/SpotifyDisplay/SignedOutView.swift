@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Signed-out screen (Crayon "signed out" artboard; Quiet and Serif reuse it with their tokens).
+/// Signed-out screen (Crayon "signed out" artboard; Quiet reuses it with its tokens, Keyring swaps the
+/// doodle for its drawn keychain).
 struct SignedOutScreen: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
@@ -38,8 +39,23 @@ struct SignedOutScreen: View {
 
     private func pitch(doodleWidth: CGFloat) -> some View {
         VStack(spacing: 0) {
-            KeychainDoodle()
-                .frame(width: doodleWidth, height: doodleWidth * 178 / 188)
+            if let housing = theme.housing {
+                // Keyring: its own keychain, screen still dark, link light already live.
+                KeychainHousing(housing: housing, side: doodleWidth, linked: bleManager.isConnected) {
+                    RoundedRectangle(cornerRadius: theme.artCornerRadius, style: .continuous)
+                        .fill(theme.artSurface)
+                        .frame(
+                            width: KeychainMetrics.screenSide(for: doodleWidth),
+                            height: KeychainMetrics.screenSide(for: doodleWidth)
+                        )
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Drawing of the display keychain")
+                .accessibilityAddTraits(.isImage)
+            } else {
+                KeychainDoodle()
+                    .frame(width: doodleWidth, height: doodleWidth * 178 / 188)
+            }
             Text(theme.id.text(.idleHeading))
                 .themeText(.heading)
                 .foregroundStyle(theme.ink)
@@ -90,7 +106,7 @@ struct SignedOutScreen: View {
             .background(PrimaryButtonBackground())
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ThemedPressStyle())
         .disabled(isSigningIn)
         .accessibilityLabel(theme.id.text(.connectSpotify))
     }

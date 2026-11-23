@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage(ThemeID.storageKey) private var themeRaw = ThemeID.fallback.rawValue
     @AppStorage("uiDark.crayon") private var crayonDark = false
     @AppStorage("uiDark.quiet") private var quietDark = true
+    @AppStorage("uiDark.keyring") private var keyringDark = false
     /// Switched-off transitions, for the "49/49" count on the Transitions row.
     @AppStorage(TransitionPrefs.storageKey) private var disabledTransitionsRaw = ""
     /// Nerd mode is available: the main screen shows its terminal icon.
@@ -43,7 +44,7 @@ struct SettingsView: View {
                 statusLightRow
                 transitionsRow
                 ThemedDivider()
-                ThemePicker(selection: $themeRaw, crayonDark: $crayonDark, quietDark: $quietDark)
+                ThemePicker(selection: $themeRaw, crayonDark: $crayonDark, quietDark: $quietDark, keyringDark: $keyringDark)
                 ThemedDivider()
                 // Numbers: nerd mode (live, on the main screen) and the all-time totals.
                 nerdModeRow
@@ -492,6 +493,7 @@ struct ThemePicker: View {
     @Binding var selection: String
     @Binding var crayonDark: Bool
     @Binding var quietDark: Bool
+    @Binding var keyringDark: Bool
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -507,7 +509,11 @@ struct ThemePicker: View {
     }
 
     private func darkBinding(_ option: ThemeID) -> Binding<Bool> {
-        option == .crayon ? $crayonDark : $quietDark
+        switch option {
+        case .crayon: return $crayonDark
+        case .quiet: return $quietDark
+        case .keyring: return $keyringDark
+        }
     }
 
     private func optionRow(_ option: ThemeID) -> some View {
@@ -585,6 +591,21 @@ struct ThemePicker: View {
                 Circle().fill(look.spotify).frame(width: 7, height: 7)
                 Circle().fill(look.display).frame(width: 7, height: 7)
             }
+        case .keyring:
+            // A tiny keychain tag: the name in mono caps on the case colour, with its link light.
+            HStack(spacing: 6) {
+                Text(option.displayName.uppercased())
+                    .font(Self.previewFont(.keyring))
+                    .tracking(1)
+                    .foregroundStyle(look.background)
+                Circle().fill(look.display).frame(width: 6, height: 6)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(look.housing?.body ?? look.ink)
+            )
         }
     }
 
@@ -593,6 +614,7 @@ struct ThemePicker: View {
         switch option {
         case .crayon: return .custom("ChalkboardSE-Bold", size: 19, relativeTo: .body)
         case .quiet: return .system(.body).weight(.semibold)
+        case .keyring: return .system(.subheadline, design: .monospaced).weight(.semibold)
         }
     }
 }

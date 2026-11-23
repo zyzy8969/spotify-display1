@@ -1,7 +1,7 @@
 import Foundation
 
 /// User-facing words. Crayon speaks in lowercase, playful words ("empty it");
-/// Quiet and Serif use plain sentence case ("Clear the display"), as on their artboards.
+/// Quiet and Keyring use plain sentence case ("Clear display cache").
 enum CopyKey {
     case stats, settings, close
     case nothingPlaying, playSomething
@@ -24,6 +24,7 @@ extension ThemeID {
     private var playful: Bool { self == .crayon }
 
     func text(_ key: CopyKey) -> String {
+        if self == .keyring, let words = keyringText(key) { return words }
         let p = playful
         switch key {
         case .stats: return p ? "stats" : "Stats"
@@ -83,13 +84,28 @@ extension ThemeID {
         }
     }
 
-    /// "47 saved" / "47 cached".
+    /// Keyring's own words where they differ from Quiet's sentence case (it calls the device "your
+    /// keychain", since that is what its main screen draws); nil falls through.
+    private func keyringText(_ key: CopyKey) -> String? {
+        switch key {
+        case .lookingForDisplay: return "Looking for your keychain"
+        case .displayReady: return "Keychain linked"
+        case .onTheDisplay: return "On your keychain"
+        case .emptyCache: return "Clear keychain cache"
+        case .emptyCacheConfirm: return "Clear the keychain cache?"
+        default: return nil
+        }
+    }
+
+    /// "47 saved" / "47 cached" / "47 on your keys".
     func countText(_ n: Int) -> String {
         switch self {
         case .crayon:
             return "\(n) saved"
         case .quiet:
             return "\(n) cached"
+        case .keyring:
+            return "\(n) on your keys"
         }
     }
 
@@ -108,6 +124,7 @@ extension ThemeID {
         switch self {
         case .crayon: return "Crayon"
         case .quiet: return "Quiet"
+        case .keyring: return "Keyring"
         }
     }
 
@@ -115,6 +132,7 @@ extension ThemeID {
         switch self {
         case .crayon: return "hand-drawn, bright colours"
         case .quiet: return "calm, a little colour"
+        case .keyring: return "your keychain, live"
         }
     }
 }
