@@ -13,6 +13,12 @@ struct TransitionSwipeView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(TransitionPrefs.storageKey) private var disabledRaw = ""
+    /// How fast the card's example plays, for watching an effect slowly or at full pace. Only the
+    /// preview: it doesn't change the speed the board plays at (that's the picker's Speed row).
+    @AppStorage("swipePreviewSpeed") private var previewSpeed = 1.0
+    private let previewSpeeds: [(label: String, rate: String, value: Double)] = [
+        ("Slo-mo", "0.25x", 0.25), ("Slow", "0.5x", 0.5), ("Normal", "1x", 1.0), ("Fast", "1.3x", 1.3),
+    ]
 
     private struct Decision {
         let id: Int
@@ -40,6 +46,10 @@ struct TransitionSwipeView: View {
                 .padding(.top, 6)
             Spacer(minLength: 12)
             if index < deck.count {
+                speedPicker
+                    .padding(.horizontal, theme.margin + 4)
+                    .padding(.top, 10)
+                Spacer(minLength: 8)
                 cardStack
                     .padding(.horizontal, theme.margin + 4)
                 Spacer(minLength: 16)
@@ -101,6 +111,39 @@ struct TransitionSwipeView: View {
         }
     }
 
+    // MARK: - Preview speed
+
+    private var speedPicker: some View {
+        HStack(spacing: 0) {
+            ForEach(previewSpeeds, id: \.value) { option in
+                let selected = abs(previewSpeed - option.value) < 0.01
+                Button {
+                    previewSpeed = option.value
+                } label: {
+                    VStack(spacing: 1) {
+                        Text(option.label)
+                            .themeText(.rowValue)
+                            .foregroundStyle(selected ? theme.ink : theme.inkSoft)
+                        Text(option.rate)
+                            .themeText(.statCaption)
+                            .monospacedDigit()
+                            .foregroundStyle(theme.inkFaint)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(
+                        Capsule().fill(selected ? theme.ringOff.opacity(0.3) : .clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(option.label) preview, \(option.rate)")
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(3)
+        .overlay(Capsule().stroke(theme.ringOff.opacity(0.5), lineWidth: 1))
+    }
+
     // MARK: - Cards
 
     private var cardStack: some View {
@@ -130,7 +173,7 @@ struct TransitionSwipeView: View {
         return VStack(alignment: .leading, spacing: 12) {
             Group {
                 if live {
-                    LoopingTransitionPreview(id: info.id, duration: info.duration)
+                    LoopingTransitionPreview(id: info.id, duration: info.duration, speed: previewSpeed)
                 } else {
                     SampleCover(variant: 0)
                 }
