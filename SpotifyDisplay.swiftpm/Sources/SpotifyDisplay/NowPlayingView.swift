@@ -170,7 +170,8 @@ struct NowPlayingScreen: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .overlay {
                 ResultPopups(
-                    drawn: bleManager.drawnPopup,
+                    // The "new" / "cache" words are a developer-lights thing (owner, 2026-11-23).
+                    drawn: bleManager.lightStyle == .developer ? bleManager.drawnPopup : nil,
                     photoUp: bleManager.photoHold,
                     nerd: layoutNerd,
                     area: geo.size
@@ -1237,6 +1238,8 @@ enum StripTiming {
     static let aheadFlash = 0.17
     // Consumer lights (firmware `ledUpdateConsumer`), seconds.
     static let consumerLoadingPeriod = 1.6
+    /// Rainbow loading colour: one hue turn (firmware `LED_LOAD_RAINBOW_MS`).
+    static let consumerRainbowLoading = 2.0
     /// Firmware `LED_GREEN_PULSE_MS`: the short green "confirmed" pulse after DRAWN.
     static let consumerGreenPulse = 0.5
     static let consumerBreathPeriod = 2.5
@@ -1447,10 +1450,19 @@ struct LiveStrip: View {
         return (1 - cos(x * 2 * .pi)) / 2
     }
 
-    /// The consumer LED, full width, brightness as opacity (firmware `ledUpdateConsumer`).
+    /// The loading colour at `elapsed` seconds into the pulse: Rainbow turns through the hues like the LED
+    /// (firmware `LED_LOAD_RAINBOW_MS`); Reduce Motion keeps Rainbow on one hue.
+    private func loadingColor(_ elapsed: TimeInterval) -> Color {
+        guard loadingColour == .rainbow else { return StripColors.loading(loadingColour, theme) }
+        let turn = reduceMotion ? 0.6 : (max(0, elapsed) / StripTiming.consumerRainbowLoading).truncatingRemainder(dividingBy: 1)
+        return Color(hue: turn, saturation: 1, brightness: 1)
+    }
+
+    /// The consumer LED, brightness as opacity (firmware `ledUpdateConsumer`); while a cover loads the
+    /// line also fills with its progress.
     private func consumerAppearance(at now: Date) -> Look {
-        func lit(_ color: Color, _ level: Double, dashed: Bool = false) -> Look {
-            Look(fill: 1, color: color, opacity: max(0, min(1, level)), dashedTrack: dashed, marker: .none)
+        func lit(_ color: Color, _ level: Double, fill: Double = 1, dashed: Bool = false) -> Look {
+            Look(fill: fill, color: color, opacity: max(0, min(1, level)), dashedTrack: dashed, marker: .none)
         }
         let dark = Look(fill: 0, color: .clear, opacity: 0, dashedTrack: false, marker: .none)
         let epoch = now.timeIntervalSince1970
@@ -1468,19 +1480,24 @@ struct LiveStrip: View {
             // "A cover is coming": loading-colour pulse from the miss reply (or a hit's TRANSITION_START,
             // `loadingSince`) until DRAWN; dark before the board has said (owner, 2026-11-23).
             guard let since = loadingSince, since >= start else { return dark }
-            let level = reduceMotion ? 0.8 : 1 - 0.75 * wave(now.timeIntervalSince(since), period: StripTiming.consumerLoadingPeriod)
-            return lit(StripColors.loading(loadingColour, theme), level, dashed: stage == .checking)
+            let elapsed = now.timeIntervalSince(since)
+            let level = reduceMotion ? 0.8 : 1 - 0.75 * wave(elapsed, period: StripTiming.consumerLoadingPeriod)
+            // The line loads while it pulses (owner, 2026-11-23): the same creep + real BLE progress as
+            // developer lights; the green pulse then shows it full.
+            let creep = reduceMotion ? StripTiming.creepCeiling : StripTiming.creep(now.timeIntervalSince(start))
+            return lit(loadingColor(elapsed), level, fill: min(1, max(creep, bleFloor)), dashed: stage == .checking)
         case .finished(let at, _):
             // Fully drawn (DRAWN): one short green "confirmed" pulse, like the LED.
             let dt = now.timeIntervalSince(at)
             guard dt < StripTiming.consumerGreenPulse else { return dark }
             return lit(StripColors.done(theme), reduceMotion ? 1 : sin(dt / StripTiming.consumerGreenPulse * .pi))
-        case .ended(let at, _):
+        case .ended(let at, let from):
             if failed {
                 return Look(fill: 1, color: StripColors.error(theme), opacity: 1, dashedTrack: false, marker: .failed)
             }
             let dt = now.timeIntervalSince(at)
-            return lit(StripColors.loading(loadingColour, theme), reduceMotion ? 0 : max(0, 0.5 - dt / StripTiming.endFade))
+            return lit(StripColors.loading(loadingColour, theme), reduceMotion ? 0 : max(0, 0.5 - dt / StripTiming.endFade),
+                       fill: from)
         case .idle:
             if let at = connectedAt {
                 let dt = now.timeIntervalSince(at)

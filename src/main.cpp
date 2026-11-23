@@ -610,10 +610,11 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 volatile uint8_t statusLedLevel = 255;
 // BLE_PROTOCOL 1.19: the same write may carry 3 bytes [level, style, loading colour]. Style 0 = consumer
 // lights (default), 1 = developer lights (the per-song blue / orange / green). Colour 0-5 = blue, purple,
-// white, amber, pink, teal (consumer loading pulse). loop() saves style + colour in NVS when they change.
+// white, amber, pink, teal; 1.20 adds 6-10 orange, yellow, cyan, lavender, coral and 11 rainbow. loop() saves style + colour in NVS when they change.
 #define LED_STYLE_CONSUMER 0
 #define LED_STYLE_DEVELOPER 1
-#define LED_LOAD_COLOURS 6
+#define LED_LOAD_COLOURS 12  // 0-10 solid colours, 11 = rainbow (BLE_PROTOCOL 1.20)
+#define LED_LOAD_RAINBOW 11
 volatile uint8_t ledStyle = LED_STYLE_CONSUMER;
 volatile uint8_t ledLoadColour = 0;
 volatile bool ledPrefsDirty = false;
@@ -1772,7 +1773,14 @@ static const uint32_t LED_LOAD_RGB[LED_LOAD_COLOURS] = {
   0xFFA000,  // amber
   0xFF3C8C,  // pink
   0x00D2B4,  // teal
+  0xFF5A00,  // orange (1.20)
+  0xFFD200,  // yellow
+  0x00C8FF,  // cyan
+  0xB48CFF,  // lavender
+  0xFF6450,  // coral
+  0xFFFFFF,  // rainbow: placeholder, the hue turns instead (LED_LOAD_RAINBOW)
 };
+#define LED_LOAD_RAINBOW_MS 2000  // rainbow loading colour: one full hue turn
 #define LED_RGB_WHITE  0xFFFFFF
 #define LED_RGB_AMBER  0xFFA000
 static bool ledEverConnected = false;
@@ -1842,7 +1850,12 @@ static bool ledUpdateConsumer(unsigned long t) {
     case LED_LOADING:
       if (t >= LED_LOADING_TIMEOUT_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
       // "A cover is coming": pulse in the loading colour, starting bright, 100% -> 25% -> 100% every 1.6 s.
-      ledShow(LED_LOAD_RGB[ledLoadColour % LED_LOAD_COLOURS], 255 - ledWave(t, 1600) * 191 / 255);
+      {
+        const uint8_t c = ledLoadColour % LED_LOAD_COLOURS;
+        const uint32_t rgb = c == LED_LOAD_RAINBOW ? ledHue((t % LED_LOAD_RAINBOW_MS) * 1536 / LED_LOAD_RAINBOW_MS)
+                                                   : LED_LOAD_RGB[c];
+        ledShow(rgb, 255 - ledWave(t, 1600) * 191 / 255);
+      }
       return true;
     case LED_RAINBOW:
       if (t >= 1000) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }

@@ -156,10 +156,17 @@ struct SettingsView: View {
                     Button { bleManager.setLoadingColour(colour) } label: {
                         VStack(spacing: 4) {
                             ZStack {
-                                Circle()
-                                    .fill(Color(hex: colour.hex))
-                                    .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
-                                    .frame(width: 26, height: 26)
+                                Group {
+                                    if colour == .rainbow {
+                                        Circle().fill(AngularGradient(
+                                            colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
+                                            center: .center))
+                                    } else {
+                                        Circle().fill(Color(hex: colour.hex))
+                                    }
+                                }
+                                .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
+                                .frame(width: 26, height: 26)
                                 if selected {
                                     Circle()
                                         .stroke(theme.ink, lineWidth: 2)

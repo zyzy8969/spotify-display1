@@ -2,7 +2,15 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.19** (consumer / developer status lights and the loading colour, on the ffe6 write.)
+Version: **1.20** (more consumer loading colours, and a rainbow one.)
+
+Changes in 1.20 (2026-11-23; owner asked for more colours). Same 3-byte ffe6 write as 1.19, more values
+for its `colour` byte: `6` orange, `7` yellow, `8` cyan, `9` lavender, `10` coral, `11` rainbow (the pulse
+also turns through every hue, one turn per 2 s). A 1.19 board treats 6-11 as out of range and shows blue;
+no new `CAPS:` message. App behaviour (no wire change): the "new" / "cache" pop-up words show only with
+developer lights.
+
+Changes in 1.19 summary: (consumer / developer status lights and the loading colour, on the ffe6 write.)
 
 Changes in 1.19 (2026-11-23; owner-approved format). Additive: old firmware never announces `CAPS:lights`,
 so the app keeps sending it the 1-byte write; old apps never send 3 bytes, so new firmware keeps its saved

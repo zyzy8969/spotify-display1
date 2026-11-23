@@ -95,6 +95,10 @@ enum LightStyle: Int, CaseIterable, Identifiable {
 /// The consumer loading pulse's colour (3rd byte of the ffe6 write). Same RGB as firmware `LED_LOAD_RGB`.
 enum LoadingColour: Int, CaseIterable, Identifiable {
     case blue = 0, purple, white, amber, pink, teal
+    // BLE_PROTOCOL 1.20 (a 1.19 board shows these as blue)
+    case orange, yellow, cyan, lavender, coral
+    /// The pulse also turns through the hues (2 s a turn).
+    case rainbow
 
     var id: Int { rawValue }
     var title: String {
@@ -105,6 +109,12 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
         case .amber: return "Amber"
         case .pink: return "Pink"
         case .teal: return "Teal"
+        case .orange: return "Orange"
+        case .yellow: return "Yellow"
+        case .cyan: return "Cyan"
+        case .lavender: return "Lavender"
+        case .coral: return "Coral"
+        case .rainbow: return "Rainbow"
         }
     }
     var hex: UInt32 {
@@ -115,6 +125,12 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
         case .amber: return 0xFFA000
         case .pink: return 0xFF3C8C
         case .teal: return 0x00D2B4
+        case .orange: return 0xFF5A00
+        case .yellow: return 0xFFD200
+        case .cyan: return 0x00C8FF
+        case .lavender: return 0xB48CFF
+        case .coral: return 0xFF6450
+        case .rainbow: return 0xFFFFFF  // not used: the hue turns
         }
     }
     static let storageKey = "statusLightColour"
