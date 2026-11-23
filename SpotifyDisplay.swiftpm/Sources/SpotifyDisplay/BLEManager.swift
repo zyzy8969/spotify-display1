@@ -134,7 +134,9 @@ final class BLEManager: NSObject, ObservableObject {
     private var drawRequestGen: UInt64 = 0
     /// Cache-key sources of covers stored ahead of time this session (prefetch). A later cache hit on
     /// one of them is a song the person has not seen yet: the pop-up says "new", not "cache".
-    private var prefetchedKeySources: Set<String> = []
+    private var prefetchedKeySources: Set<String> = SavedAhead.load() {
+        didSet { SavedAhead.save(prefetchedKeySources) }
+    }
     /// Songs the keychain has shown (`PlayedTracks`), oldest first, plus a set for lookups.
     private var playedTrackOrder: [String] = PlayedTracks.load()
     private lazy var playedTrackSet: Set<String> = Set(playedTrackOrder)
@@ -167,13 +169,23 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupportsNextTransition = false
     /// Board said `CAPS:newsong` (BLE_PROTOCOL 1.17): it takes the new-song cache check.
     @Published private(set) var boardSupportsNewSong = false
-    /// The song in flight has never been played (`PlayedTracks`): the app's line is orange from the
-    /// start, like the keychain's light. A song played before is blue while the board checks its card.
-    @Published private(set) var sendIsNewSong = false
-    /// A never-played song turned out to be on the card (saved ahead): when the board started drawing
-    /// it (its `TRANSITION_START`). From then the line flashes blue / orange until the draw is done, like
-    /// the keychain's light (`StripTiming.aheadFlash`).
-    @Published private(set) var aheadHitAt: Date?
+    /// What the keychain's status LED shows right now, for the app's line under the cover. Every change
+    /// is tied to a BLE message the board sends at the same moment it changes the LED (firmware
+    /// `ledSetMode` next to the notify), so the two stay in step (owner, 2026-11-23):
+    /// - `.off` until the board answers (nothing lit on either side);
+    /// - cache miss reply -> `.new` (orange) until DRAWN;
+    /// - `TRANSITION_START` of a cache hit -> `.cache` (blue), or `.ahead` (blue / orange flashes) for a
+    ///   cover the queue prefetch saved ahead (`SavedAhead`);
+    /// - `DRAWN` -> green (`drawnAt`), then off.
+    enum BoardLight: Equatable {
+        case off, cache, new
+        case ahead(since: Date)
+    }
+    @Published private(set) var boardLight: BoardLight = .off
+    /// When the board last said `DRAWN` (its LED turns green at that moment).
+    @Published private(set) var drawnAt: Date?
+    /// The cache check in flight was sent with the new-song magic because its cover was saved ahead.
+    private var checkIsSavedAhead = false
     /// What a song cover shows when it lands.
     enum DrawnKind: Equatable {
         /// Played before, from the card: "cache".
@@ -326,8 +338,8 @@ final class BLEManager: NSObject, ObservableObject {
     }
 
     /// Cache-only check (same 20-byte packet as Python). On a hit the board draws the cover.
-    /// `newSong`: the keychain has never shown this cover, so its status LED lights the new-song orange
-    /// even when the cover is already on SD (queue prefetch). Older boards get the plain check.
+    /// `newSong`: the cover was saved ahead by the queue prefetch and never drawn, so on a hit the board's
+    /// LED flashes blue / orange instead of blue (since 2026-11-23). Older boards get the plain check.
     func checkCacheHit(cacheKey: Data, newSong: Bool = false) async throws -> Bool {
         let magic = newSong && boardSupportsNewSong ? cacheNewSongMagic : cacheMagic
         return try await sendCacheQuery(magic: magic, cacheKey: cacheKey)
@@ -524,7 +536,8 @@ final class BLEManager: NSObject, ObservableObject {
         sendSwapFlipIfAsked()
         popupForNextDraw = nil
         trackForNextDraw = nil
-        sendIsNewSong = false
+        checkIsSavedAhead = false
+        boardLight = .off
 
         sendStageGen &+= 1
         let myStageGen = sendStageGen
@@ -588,6 +601,7 @@ final class BLEManager: NSObject, ObservableObject {
             }
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
+            boardLight = .new  // the board went orange with its miss reply
 
             // 2) First show (or the card lost it): send it, and the board saves it under the key.
             setLivePhase("photo: dithering…")
@@ -658,12 +672,18 @@ final class BLEManager: NSObject, ObservableObject {
         activeDownloadTask = download
         // The cover as the board will show it: the frame to send on a miss, and on a hit the
         // same bytes as the SD copy (for the transition mirror and `boardFrame`). Converting as soon
-        // as the download lands overlaps it with the cache check.
+        // as the download lands overlaps it with the cache check. A cover this phone converted before
+        // comes straight off disk (`FrameCache`), so on a hit the mirror has it when the board starts.
+        let cacheKeySource = String.cacheKeySource(albumId: albumId, imageURL: primaryURL)
+        let storedFrame = FrameCache.load(cacheKeySource)
         let frameTask = Task<Data?, Never> {
+            if let storedFrame { return storedFrame }
             guard let data = try? await download.value else { return nil }
-            return try? await Task.detached(priority: .userInitiated) {
+            let frame = try? await Task.detached(priority: .userInitiated) {
                 try ImageProcessor.convertToRGB565(imageData: data)
             }.value
+            if let frame { FrameCache.save(frame, for: cacheKeySource) }
+            return frame
         }
 
         // After a skip the board may still owe the previous song's cache reply or image ACK.
@@ -682,15 +702,15 @@ final class BLEManager: NSObject, ObservableObject {
         let cacheCheckStart = CFAbsoluteTimeGetCurrent()
         setLivePhase("cache check + downloading…")
         let cacheHit: Bool
-        let cacheKeySource = String.cacheKeySource(albumId: albumId, imageURL: primaryURL)
         let cacheKey = cacheKeySource.md5Digest
-        // "Played before" is per album: the first song from an album is new (orange on the keychain)
-        // even when its cover is already on the card (prefetched); later songs from it are blue.
-        // Never played: a hit is "cache" + "new" (blue / orange); played before: "cache" (blue). A miss
-        // (fresh send) is "new" (orange); that is set further down.
+        // Pop-up words: never played = "cache" + "new" on a hit, played before = "cache"; a miss (fresh
+        // send) is "new" (set further down).
         let newToPerson = !playedTrackSet.contains(trackId)
-        sendIsNewSong = newToPerson
-        aheadHitAt = nil
+        // Light: only a cover the queue prefetch saved ahead flashes blue / orange; the board learns it
+        // from the new-song magic (BLE_PROTOCOL 1.17, now meaning "saved ahead").
+        let savedAhead = prefetchedKeySources.contains(cacheKeySource)
+        checkIsSavedAhead = savedAhead
+        boardLight = .off
         popupForNextDraw = newToPerson ? .both : .cache
         trackForNextDraw = trackId
         sendSwapFlipIfAsked()
@@ -699,7 +719,7 @@ final class BLEManager: NSObject, ObservableObject {
         noteDrawRequest(.cacheCheck(frameTask))
         let hitDrawGen = drawRequestGen
         do {
-            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: newToPerson)
+            cacheHit = try await checkCacheHit(cacheKey: cacheKey, newSong: savedAhead)
         } catch {
             awaitingCacheRenderConfirm = false
             cacheRenderConfirmed = false
@@ -754,8 +774,8 @@ final class BLEManager: NSObject, ObservableObject {
         }
         awaitingCacheRenderConfirm = false
         cacheRenderConfirmed = false
-        // Fresh send: orange on the keychain, "new" when it turns green.
-        sendIsNewSong = true
+        // Fresh send: the board went orange with its miss reply; "new" when it turns green.
+        boardLight = .new
         popupForNextDraw = .new
 
         let data: Data
@@ -1043,6 +1063,7 @@ final class BLEManager: NSObject, ObservableObject {
         if photoHold { throw CancellationError() }
         guard rgb565.count == imagePayloadBytes else { throw SpotifyDisplayError.conversionFailed }
 
+        FrameCache.save(rgb565, for: keySource)  // the mirror has it when this song comes up
         _ = try await sendRGB565(rgb565, epochAtStart: epochAtStart, storeOnly: true)
         prefetchedKeySources.insert(keySource)
         return .stored
@@ -1096,6 +1117,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardSupports128 = false
         boardSupportsNextTransition = false
         boardSupportsNewSong = false
+        boardLight = .off  // the board turns its LED off on disconnect
         flipNextDraw = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
         // Waiting screen: nothing of ours is on the panel any more.
@@ -1210,6 +1232,9 @@ final class BLEManager: NSObject, ObservableObject {
         if text == "CAPS:next" { boardSupportsNextTransition = true }
         if text == "CAPS:newsong" { boardSupportsNewSong = true }
         if text == "DRAWN" {
+            // The board's LED turned green as it sent this: the line does the same now.
+            drawnAt = Date()
+            boardLight = .off
             // Song covers only: photos and anything not started by processTrack pop nothing.
             if let kind = popupForNextDraw, !photoHold {
                 drawnPopup = DrawnPopup(kind: kind)
@@ -1290,7 +1315,10 @@ final class BLEManager: NSObject, ObservableObject {
         if text.hasPrefix(TransitionStartEvent.prefix) {
             // A never-played song's cache check got a draw: it was on the card (saved ahead). The board's
             // light flashes blue right now; so does the line.
-            if awaitingCacheRenderConfirm, sendIsNewSong, !photoHold { aheadHitAt = Date() }
+            // A cache check got a draw: the board lit blue (or the saved-ahead flashes) right as it sent this.
+            if awaitingCacheRenderConfirm {
+                boardLight = checkIsSavedAhead && !photoHold ? .ahead(since: Date()) : .cache
+            }
             handleTransitionStart(text)
         }
     }
@@ -1319,8 +1347,12 @@ final class BLEManager: NSObject, ObservableObject {
         case .cacheCheck(let frameTask)?:
             // Hit: the cover is still downloading / converting; hand it over when ready.
             let id = event.id
+            let received = event.received
             Task { @MainActor in
                 guard let frame = await frameTask.value else { return }
+                // Usually 0 now (FrameCache); anything larger is how late the mirror starts.
+                let lateMs = Int(Date().timeIntervalSince(received) * 1000)
+                if lateMs > 30 { self.log("mirror  cover frame ready \(lateMs) ms after the board started", kind: .info) }
                 if self.drawRequestGen == gen { self.boardFrame = frame }
                 if self.transitionStart?.id == id {
                     self.transitionStart?.newFrame = frame

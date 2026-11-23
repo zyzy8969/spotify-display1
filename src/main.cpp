@@ -730,6 +730,7 @@ static float fwSpeed = 1.0f;
 static bool fwStretchDrawing = false;
 static uint32_t fwStepStartUs = 0;
 static void ledUpdate();  // status LED, defined below; also stepped during transitions
+static void ledApplyDrawStart();  // cache hit: light the LED together with TRANSITION_START (below)
 static void fwWaitUs(void*, uint32_t us) {
   ledUpdate();  // loop() is blocked while a transition draws: animate the LED between its frames
   if (fwStretchDrawing && fwSpeed < 1.0f) {
@@ -801,6 +802,7 @@ static void runTransition(TransitionType t, uint16_t* buffer, int width, int hei
     drawn = TRANSITION_WIPE_BOTTOM;
   const float speed = pickTransitionSpeed(drawn);
   announceTransitionStart(drawn, seed, oldBlack, speed);
+  ledApplyDrawStart();
   Serial.printf("Transition speed: %.2fx\n", speed);
   // The shared core (SpotifyDisplay.swiftpm/Sources/TransitionsCore) draws it, exactly as the app does.
   tx_set_speed(speed);
@@ -949,6 +951,7 @@ static String drawWithoutTransition(uint16_t* buffer, int width, int height) {
     pMsgChar->setValue(msg);
     pMsgChar->notify();
   }
+  ledApplyDrawStart();
   gfx->draw16bitRGBBitmap(0, 0, buffer, width, height);
   if (canCompose) memcpy(prevBuffer, buffer, IMAGE_SIZE);
   panelShowsImage = true;
@@ -1691,8 +1694,8 @@ void clearCacheDirectory() {
 // Owner's rules (2026-11-23):
 //   song played before, cover on SD    -> blue while it draws, then green
 //   new song, cover sent over BLE      -> orange (pulsing, brighter as the frame fills), then green
-//   new song, cover already on SD      -> quick blue / orange flashes while it draws, then green
-//     (saved ahead from the queue)
+//   cover saved ahead by the queue     -> quick blue / orange flashes while it draws, then green
+//     prefetch, never drawn yet
 //   transfer rejected                  -> two dim red blinks
 //   idle / just showing a cover        -> off
 // Prefetch (store-only) transfers and prefetch probes stay dark: the song on screen isn't changing.
@@ -1702,7 +1705,7 @@ void clearCacheDirectory() {
 // A cache miss means a cover is coming, but the phone first downloads and dithers it (~0.5-1.5 s).
 // The LED goes orange right away (LED_WAITING) instead of sitting dark; if nothing arrives in this
 // long (skip, phone gave up), it goes off.
-#define LED_WAITING_TIMEOUT_MS 4000
+#define LED_WAITING_TIMEOUT_MS 10000  // the app's line stays orange this long too (download + dither)
 // LED_BOTH: each blue / orange half of the flash. The app's line uses the same (StripTiming.aheadFlash).
 #define LED_BOTH_FLASH_MS 150
 
@@ -1793,6 +1796,16 @@ static void ledSetMode(LedMode m) {
   ledMode = m;
   ledModeSince = millis();
   ledUpdate();  // show it now: the caller may be about to block on SD or a transition
+}
+
+// The app mirrors this LED from BLE messages, so every change happens right next to the notify the app
+// reacts to (owner, 2026-11-23: "exact mirror"): a cache hit lights blue / the saved-ahead flashes with
+// TRANSITION_START (not before the SD load), a miss goes orange with its reply, green goes with DRAWN.
+static LedMode ledAtDrawStart = LED_OFF;
+static void ledApplyDrawStart() {
+  if (ledAtDrawStart == LED_OFF) return;
+  ledSetMode(ledAtDrawStart);
+  ledAtDrawStart = LED_OFF;
 }
 
 // Once per loop(): pick up callback-side state, then animate.
@@ -1940,11 +1953,11 @@ void loop() {
       pCacheChar->notify();
     } else {
 
-    // 1.17 new-song check = a song played for the first time: orange from the start; on a hit (saved
-    // ahead) a blue flash, then orange (below). A song played before: blue.
+    // 1.17 new-song check = (since 2026-11-23) a cover the app's queue prefetch saved ahead and never
+    // drew: on a hit the LED flashes blue / orange while it draws; any other hit is blue. Nothing lights
+    // before the board knows (the lookup is the in-memory index, well under 1 ms).
     const bool newSong = cacheCheckNewSong;
     cacheCheckNewSong = false;
-    ledSetMode(newSong ? LED_NEW : LED_CACHE);
 
     // Check if image is cached
     unsigned long cacheCheckStart = millis();
@@ -1956,7 +1969,9 @@ void loop() {
       unsigned long totalStartTime = millis();
       Serial.println("BLE: Cache HIT");
 
-      if (newSong) ledSetMode(LED_BOTH);
+      // Dark during the SD load; blue / the flashes start with TRANSITION_START (ledApplyDrawStart).
+      ledSetMode(LED_OFF);
+      ledAtDrawStart = newSong ? LED_BOTH : LED_CACHE;
       // Load and display cached image
       if (loadFromCache(currentCacheKey)) {
         // Hide startup screen when displaying image
@@ -1971,6 +1986,9 @@ void loop() {
         String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, pendingTransition);
         drawingNewSong = false;
         unsigned long displayTime = millis() - displayStart;
+        // Green and DRAWN the moment the cover is on screen (the app turns its line green on DRAWN).
+        ledSetMode(LED_DONE);
+        notifyDrawn();
 
         unsigned long totalTime = millis() - totalStartTime;
         Serial.printf("⚡ Cache hit total: %lums (display: %lums)\n", totalTime, displayTime);
@@ -1999,20 +2017,18 @@ void loop() {
         // Send SUCCESS message
         pMsgChar->setValue("SUCCESS");
         pMsgChar->notify();
-        ledSetMode(LED_DONE);
-        notifyDrawn();
       } else {
-        ledSetMode(LED_WAITING);  // a fresh transfer follows
+        ledAtDrawStart = LED_OFF;
         Serial.println("ERROR: Cache load failed — reporting miss so the client sends fresh");
         // The client is waiting on the Cache characteristic, not the Image one; without this
         // reply it times out instead of falling back to a normal transfer.
         uint8_t response = 0x00;
         pCacheChar->setValue(&response, 1);
         pCacheChar->notify();
+        ledSetMode(LED_WAITING);  // orange with the miss reply; a fresh transfer follows
       }
     } else {
       Serial.println("BLE: Cache MISS");
-      ledSetMode(LED_WAITING);  // orange now, while the phone downloads + converts the cover
       String missTiming = "CACHE_MISS_MS:" + String((unsigned long)cacheCheckMs);
       pMsgChar->setValue(missTiming.c_str());
       pMsgChar->notify();
@@ -2021,6 +2037,7 @@ void loop() {
       uint8_t response = 0x00;
       pCacheChar->setValue(&response, 1);
       pCacheChar->notify();
+      ledSetMode(LED_WAITING);  // orange with the reply, while the phone downloads + converts the cover
     }
     }  // not a probe
   }

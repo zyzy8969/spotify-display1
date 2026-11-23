@@ -56,11 +56,9 @@ struct TransferLogEntry: Identifiable, Codable, Equatable {
     var firstShow: Bool? = nil
 }
 
-/// Spotify track ids the keychain has shown, saved on the phone (owner's three-way rule, 2026-11-22):
-/// - played before, cover on the card: "cache", blue;
-/// - never played, cover already on the card (prefetched, or the same album): "cache" AND "new", the
-///   keychain's light and the app's line alternate blue / orange;
-/// - never played, not on the card (fresh send): "new", orange.
+/// Spotify track ids the keychain has shown, saved on the phone. They drive the "cache" / "new" pop-up
+/// words only. The light (and the app's line) follows `SavedAhead` instead (owner, 2026-11-23): blue /
+/// orange flashes only for a cover the queue prefetch put on the card, never for one shown before.
 /// Oldest first, capped (~110 KB at most).
 enum PlayedTracks {
     static let storageKey = "playedTrackIds.v2"
@@ -72,6 +70,69 @@ enum PlayedTracks {
 
     static func save(_ ids: [String]) {
         UserDefaults.standard.set(Array(ids.suffix(cap)), forKey: storageKey)
+    }
+}
+
+/// Cache-key sources of covers the queue prefetch stored on the card and that have not been drawn yet
+/// ("saved ahead"). Saved on the phone so an app relaunch between the prefetch and the song keeps it.
+enum SavedAhead {
+    static let storageKey = "savedAheadKeySources.v1"
+    static let cap = 200
+
+    static func load() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: storageKey) ?? [])
+    }
+
+    static func save(_ keys: Set<String>) {
+        UserDefaults.standard.set(Array(keys.prefix(cap)), forKey: storageKey)
+    }
+}
+
+/// The board-ready RGB565 frame of every cover this app converted, on disk (Caches, ~113 KB each), so a
+/// cache hit has the frame the instant the board starts drawing it: the app's transition mirror then
+/// starts with the board instead of after a download + dither. Oldest files are trimmed past `cap`.
+enum FrameCache {
+    static let cap = 300
+    private static let frameBytes = 115_200
+
+    private static let directory: URL? = {
+        guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        let dir = base.appendingPathComponent("frames.v1", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private static func url(for keySource: String) -> URL? {
+        let name = keySource.md5Digest.map { String(format: "%02x", $0) }.joined()
+        return directory?.appendingPathComponent(name + ".rgb")
+    }
+
+    static func load(_ keySource: String) -> Data? {
+        guard let url = url(for: keySource), let data = try? Data(contentsOf: url),
+              data.count == frameBytes else { return nil }
+        return data
+    }
+
+    /// Writes off the caller's thread; the trim runs now and then, not on every save.
+    static func save(_ frame: Data, for keySource: String) {
+        guard frame.count == frameBytes, let url = url(for: keySource) else { return }
+        DispatchQueue.global(qos: .utility).async {
+            try? frame.write(to: url, options: .atomic)
+            if Int.random(in: 0..<20) == 0 { trim() }
+        }
+    }
+
+    private static func trim() {
+        guard let dir = directory,
+              let files = try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey]),
+              files.count > cap else { return }
+        let dated = files.map { f in
+            (f, (try? f.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+        }
+        for (f, _) in dated.sorted(by: { $0.1 < $1.1 }).prefix(files.count - cap) {
+            try? FileManager.default.removeItem(at: f)
+        }
     }
 }
 

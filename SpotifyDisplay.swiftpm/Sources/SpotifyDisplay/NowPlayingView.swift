@@ -227,6 +227,9 @@ struct NowPlayingScreen: View {
             stageDidChange(stage)
             stripStageDidChange(stage)
         }
+        .onChange(of: bleManager.drawnAt) { at in
+            if let at { stripDrawn(at: at) }
+        }
         .onChange(of: bleManager.transferProgress) { progress in
             guard bleManager.isTransferring, case .running = stripRun else { return }
             stripBleFloor = max(stripBleFloor, StripTiming.bleFill(progress))
@@ -312,11 +315,20 @@ struct NowPlayingScreen: View {
             stripToken &+= 1
             return
         }
+        let succeeded = bleManager.transferLog.last.map { $0.id != stripSinceLogID } ?? false
+        endStripRun(at: Date(), succeeded: succeeded)
+    }
+
+    /// The board said DRAWN: its LED is green right now, so the line turns green at the same moment
+    /// (the send itself only returns after the board's SD save, ~0.4 s later).
+    private func stripDrawn(at date: Date) {
+        endStripRun(at: date, succeeded: true)
+    }
+
+    private func endStripRun(at now: Date, succeeded: Bool) {
         guard case .running(let start) = stripRun else { return }
-        let now = Date()
         let creep = reduceMotion ? StripTiming.creepCeiling : StripTiming.creep(now.timeIntervalSince(start))
         let reached = min(1, max(creep, stripBleFloor))
-        let succeeded = bleManager.transferLog.last.map { $0.id != stripSinceLogID } ?? false
         stripRun = succeeded ? .finished(at: now, from: reached) : .ended(at: now, from: reached)
         stripToken &+= 1
         let token = stripToken
@@ -632,8 +644,7 @@ struct NowPlayingScreen: View {
             stage: bleManager.sendStage,
             bleFloor: stripBleFloor,
             failed: stripFailed,
-            newSong: bleManager.sendIsNewSong,
-            aheadHitAt: bleManager.aheadHitAt,
+            light: bleManager.boardLight,
             thickness: nerd ? ArtMetrics.nerdStripThickness : nil
         )
     }
@@ -1219,13 +1230,13 @@ enum StripTiming {
     static let aheadFlash = 0.15
     static let creepCeiling = 0.6
     static let creepTau = 0.6
-    /// Time to run from the current fill to 100% on success.
-    static let finishFill = 0.25
-    /// Full green is held this long before it fades, like the LED's flash.
-    static let hold = 0.9
-    static let fade = 0.8
-    /// A skipped / cancelled send fades out this fast.
-    static let endFade = 0.4
+    /// Time to run from the current fill to 100% on success (short: the LED snaps to green).
+    static let finishFill = 0.06
+    /// Green timing matches firmware LED_DONE: full until 220 ms, then a 500 ms fade to off.
+    static let hold = 0.22 - finishFill
+    static let fade = 0.5
+    /// A skipped / cancelled send fades out this fast (the LED just goes off).
+    static let endFade = 0.1
     /// When `NowPlayingScreen` drops a finished run back to idle (stops the timeline).
     static var settleAfter: Double { finishFill + hold + fade + 0.15 }
 
@@ -1267,11 +1278,8 @@ struct LiveStrip: View {
     var bleFloor: Double = 0
     /// The send that just ended failed: the line turns red and stays.
     var failed = false
-    /// The song being sent has never been played: the line is orange (like the keychain's light).
-    var newSong = false
-    /// It was on the card after all (saved ahead): the board started drawing it at this time. From then
-    /// the line flashes blue / orange until the draw is done, like the keychain's light.
-    var aheadHitAt: Date? = nil
+    /// What the keychain's LED shows right now (`BLEManager.boardLight`); the line uses the same colour.
+    var light: BLEManager.BoardLight = .off
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
 
@@ -1350,13 +1358,13 @@ struct LiveStrip: View {
                 creep = StripTiming.creep(now.timeIntervalSince(start))
             }
             let checking = stage == .checking
+            // Same colour as the keychain's LED at this moment; while the board has not answered yet
+            // (LED dark) only the dashed track shows.
+            let color = lineColor(now: now)
             return Look(
                 fill: min(1, max(creep, bleFloor)),
-                // Same as the keychain's light: a song played before is blue while the board checks its
-                // card; a never-played song is orange, with a short blue flash when it turns out to be on
-                // the card (saved ahead); a fresh send is orange.
-                color: lineColor(checking: checking, now: now),
-                opacity: 1,
+                color: color ?? .clear,
+                opacity: color == nil ? 0 : 1,
                 dashedTrack: checking,
                 marker: .none
             )
@@ -1391,16 +1399,18 @@ struct LiveStrip: View {
         }
     }
 
-    private func lineColor(checking: Bool, now: Date) -> Color {
-        guard checking else { return StripColors.fresh(theme) }
-        guard newSong else { return StripColors.check(theme) }
-        if let at = aheadHitAt {
-            // Reduce Motion: steady blue instead of flashing.
+    /// nil = the keychain's LED is dark right now.
+    private func lineColor(now: Date) -> Color? {
+        switch light {
+        case .off: return nil
+        case .cache: return StripColors.check(theme)
+        case .new: return StripColors.fresh(theme)
+        case .ahead(let since):
+            // Same 150 ms halves as firmware LED_BOTH, starting blue. Reduce Motion: steady blue.
             if reduceMotion { return StripColors.check(theme) }
-            let half = Int(max(0, now.timeIntervalSince(at)) / StripTiming.aheadFlash)
+            let half = Int(max(0, now.timeIntervalSince(since)) / StripTiming.aheadFlash)
             return half % 2 == 0 ? StripColors.check(theme) : StripColors.fresh(theme)
         }
-        return StripColors.fresh(theme)
     }
 
     @ViewBuilder
