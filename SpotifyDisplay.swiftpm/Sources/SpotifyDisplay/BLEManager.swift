@@ -171,8 +171,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// start, like the keychain's light. A song played before is blue while the board checks its card.
     @Published private(set) var sendIsNewSong = false
     /// A never-played song turned out to be on the card (saved ahead): when the board started drawing
-    /// it (its `TRANSITION_START`). The line flashes blue from then for as long as the keychain does
-    /// (`StripTiming.aheadFlash`), then orange again.
+    /// it (its `TRANSITION_START`). From then the line flashes blue / orange until the draw is done, like
+    /// the keychain's light (`StripTiming.aheadFlash`).
     @Published private(set) var aheadHitAt: Date?
     /// What a song cover shows when it lands.
     enum DrawnKind: Equatable {

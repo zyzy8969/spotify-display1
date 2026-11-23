@@ -1688,11 +1688,13 @@ void clearCacheDirectory() {
 // Status LED — the board's WS2812B on GPIO15 (Waveshare ESP32-S3; was unused).
 // Driven ONLY from loop(): neopixelWrite() uses the RMT peripheral and must not run on the tiny
 // BTC_TASK stack. Callbacks only set flags / counters that loop() already reads.
-//   cache check / cache hit drawing  -> blue
-//   new cover arriving over BLE      -> orange, pulsing, brighter as the frame fills
-//   frame drawn + saved + ACKed      -> green flash, then fade to off
-//   transfer rejected                -> two dim red blinks
-//   idle / just showing a cover      -> off
+// Owner's rules (2026-11-23):
+//   song played before, cover on SD    -> blue while it draws, then green
+//   new song, cover sent over BLE      -> orange (pulsing, brighter as the frame fills), then green
+//   new song, cover already on SD      -> quick blue / orange flashes while it draws, then green
+//     (saved ahead from the queue)
+//   transfer rejected                  -> two dim red blinks
+//   idle / just showing a cover        -> off
 // Prefetch (store-only) transfers and prefetch probes stay dark: the song on screen isn't changing.
 // ============================================================================
 #define STATUS_LED_MAX 120  // ceiling out of 255 (~47%). Owner: as bright as reasonable, under 50%
@@ -1701,6 +1703,8 @@ void clearCacheDirectory() {
 // The LED goes orange right away (LED_WAITING) instead of sitting dark; if nothing arrives in this
 // long (skip, phone gave up), it goes off.
 #define LED_WAITING_TIMEOUT_MS 4000
+// LED_BOTH: each blue / orange half of the flash. The app's line uses the same (StripTiming.aheadFlash).
+#define LED_BOTH_FLASH_MS 150
 
 #define LED_RGB_BLUE   0x0050FF
 #define LED_RGB_ORANGE 0xFF5A00
@@ -1737,9 +1741,9 @@ static void ledUpdate() {
       ledShow(LED_RGB_BLUE, 255);  // solid while the SD lookup / cache-hit draw blocks loop()
       break;
     case LED_BOTH:
-      // A song played for the first time whose cover is already on SD (saved ahead from the queue): a
-      // short blue flash ("it's on the card"), then orange while it draws. Stepped from fwWaitUs.
-      ledShow(t < 250 ? LED_RGB_BLUE : LED_RGB_ORANGE, 255);
+      // A song played for the first time whose cover is already on SD (saved ahead from the queue):
+      // quick blue / orange flashes for the whole draw ("on the card" + "new"). Stepped from fwWaitUs.
+      ledShow(((t / LED_BOTH_FLASH_MS) % 2) ? LED_RGB_ORANGE : LED_RGB_BLUE, 255);
       break;
     case LED_NEW:
       // 1.17: a song new to the person drawn from SD (prefetched): the transfer orange, solid,

@@ -8,13 +8,13 @@ keychain (COM6). BLE protocol **1.18** (`docs/BLE_PROTOCOL.md`).
 
 ## In progress — owner will continue (NOT done, do not treat as settled)
 
-1. **Status light / app line colours ("lighting situation").** Current rule (build 62), keychain LED and the
-   app's progress line together:
-   - cache hit on a song played before: blue only;
+1. **Status light / app line colours ("lighting situation").** Owner's rules (2026-11-23, branch
+   `feat/light-rules`), keychain LED and the app's progress line together:
+   - cache hit on a song played before: blue, then green once drawn;
    - never-played song whose cover is already on the card ("saved ahead" by the queue prefetch, or the same
-     album): orange from the start, a 250 ms blue flash when the board starts drawing it, then orange;
-   - never-played song not on the card: orange only (transfer); all end with the green "done" flash.
-   The owner said they still need to work on this. Code: firmware `LED_NEW` / `LED_BOTH` / `ledUpdate()`
+     album): quick blue / orange flashes (150 ms each) while it draws, then green;
+   - never-played song not on the card: orange (transfer), then green once fully drawn.
+   Needs on-device check. Code: firmware `LED_NEW` / `LED_BOTH` / `LED_BOTH_FLASH_MS` / `ledUpdate()`
    (stepped from `fwWaitUs` during transitions) in `src/main.cpp`; app `LiveStrip.lineColor`,
    `BLEManager.sendIsNewSong` / `aheadHitAt` (set on `TRANSITION_START`).
 2. **"cache" / "new" / hit classification.** Changed many times this session; current rule (build 61+) is per

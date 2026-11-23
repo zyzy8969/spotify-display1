@@ -351,12 +351,17 @@ struct NowPlayingScreen: View {
 
     // MARK: Photos
 
-    /// Loads the picked photo, crops it square and sends it as a display-only frame.
+    /// Loads the picked photo, squares it (off the main thread, so the screen never stalls) and sends it.
     private func showPhoto(_ item: PhotosPickerItem) {
         Task {
-            guard let data = try? await item.loadTransferable(type: Data.self),
-                  let image = UIImage(data: data),
-                  let jpeg = PhotoPrep.squareJPEG(from: PhotoPrep.downscaled(image, maxSide: 1400)) else {
+            guard let data = try? await item.loadTransferable(type: Data.self) else {
+                photoError = "Could not read that photo."
+                return
+            }
+            let jpeg = await Task.detached(priority: .userInitiated) {
+                PhotoPrep.squareJPEG(fromPhotoData: data)
+            }.value
+            guard let jpeg else {
                 photoError = "Could not read that photo."
                 return
             }
@@ -891,7 +896,7 @@ struct HeaderExtras {
     let onToggleDark: () -> Void
 }
 
-/// Dots on the left; icons on the right: [day/night] [nerd mode, if on in Settings] [photo] [settings].
+/// Dots on the left; icons on the right: [nerd mode, if on in Settings] [day/night] [photo] [settings].
 struct StatusHeader: View {
     let spotifyOn: Bool
     let displayOn: Bool
@@ -917,10 +922,11 @@ struct StatusHeader: View {
             Spacer(minLength: 4)
             HStack(spacing: 0) {
                 if let extras {
-                    darkButton(extras)
+                    // Dev (nerd) mode sits left of day / night (owner, 2026-11-23).
                     if extras.nerdEnabled {
                         nerdButton(extras)
                     }
+                    darkButton(extras)
                 }
                 if let onPhotoPicked {
                     // Pick a library photo and it goes straight to the display.
@@ -1208,9 +1214,9 @@ enum StripRun: Equatable {
 /// Fill timing. While the phone works the fill creeps up on its own with an ease-out curve that
 /// approaches `creepCeiling` but never reaches it; real BLE progress fills the rest.
 enum StripTiming {
-    /// Blue flash for a never-played song found on the card (saved ahead); the keychain's light flashes
-    /// for the same 250 ms (firmware `LED_BOTH`).
-    static let aheadFlash = 0.25
+    /// A never-played song found on the card (saved ahead): the line flashes blue / orange, each half this
+    /// long, until the board is done, like the keychain's light (firmware `LED_BOTH_FLASH_MS`).
+    static let aheadFlash = 0.15
     static let creepCeiling = 0.6
     static let creepTau = 0.6
     /// Time to run from the current fill to 100% on success.
@@ -1263,8 +1269,8 @@ struct LiveStrip: View {
     var failed = false
     /// The song being sent has never been played: the line is orange (like the keychain's light).
     var newSong = false
-    /// It was on the card after all (saved ahead): the board started drawing it at this time. The line
-    /// flashes blue for `StripTiming.aheadFlash`, then orange, like the keychain's light.
+    /// It was on the card after all (saved ahead): the board started drawing it at this time. From then
+    /// the line flashes blue / orange until the draw is done, like the keychain's light.
     var aheadHitAt: Date? = nil
     /// Line width; nil = the theme's (nerd mode passes a thinner one).
     var thickness: CGFloat? = nil
@@ -1388,8 +1394,11 @@ struct LiveStrip: View {
     private func lineColor(checking: Bool, now: Date) -> Color {
         guard checking else { return StripColors.fresh(theme) }
         guard newSong else { return StripColors.check(theme) }
-        if let at = aheadHitAt, now.timeIntervalSince(at) < StripTiming.aheadFlash {
-            return StripColors.check(theme)
+        if let at = aheadHitAt {
+            // Reduce Motion: steady blue instead of flashing.
+            if reduceMotion { return StripColors.check(theme) }
+            let half = Int(max(0, now.timeIntervalSince(at)) / StripTiming.aheadFlash)
+            return half % 2 == 0 ? StripColors.check(theme) : StripColors.fresh(theme)
         }
         return StripColors.fresh(theme)
     }
