@@ -24,11 +24,21 @@ final class CacheKeyAndPackingTests: XCTestCase {
         XCTAssertEqual(String.cacheKeySource(albumId: nil, imageURL: url), "url:\(url)|c=native")
         XCTAssertEqual(String.cacheKeySource(albumId: "", imageURL: url), "url:\(url)|c=native")
 
+        // The dither picker is gone (2026-11-22): a choice stored by an older build is ignored, so the
+        // keys stay Atkinson's and covers already on the card keep hitting.
         UserDefaults.standard.set(DitherMode.bayer.rawValue, forKey: DitherMode.storageKey)
-        XCTAssertEqual(String.cacheKeySource(albumId: "abc", imageURL: url), "album:abc|c=native|d=bayer")
+        XCTAssertEqual(String.cacheKeySource(albumId: "abc", imageURL: url), "album:abc|c=native")
 
-        UserDefaults.standard.set(DitherMode.off.rawValue, forKey: DitherMode.storageKey)
-        XCTAssertEqual(String.cacheKeySource(albumId: "abc", imageURL: url), "album:abc|c=native|d=none")
+        // Per-mode suffixes, should a mode ever be selectable again.
+        XCTAssertEqual(DitherMode.atkinson.cacheKeySuffix, "|c=native")
+        XCTAssertEqual(DitherMode.bayer.cacheKeySuffix, "|c=native|d=bayer")
+        XCTAssertEqual(DitherMode.off.cacheKeySuffix, "|c=native|d=none")
+    }
+
+    /// A photo's key is the MD5 of its bytes, so showing the same photo again is a cache hit.
+    func testPhotoCacheKeySource() {
+        let jpeg = Data("abc".utf8)  // md5("abc") = 900150983cd24fb0d6963f7d28e17f72
+        XCTAssertEqual(String.photoCacheKeySource(jpeg: jpeg), "photo:900150983cd24fb0d6963f7d28e17f72|c=native")
     }
 
     func testMD5DigestMatchesPython() {
