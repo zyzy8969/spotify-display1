@@ -20,6 +20,8 @@ struct TransitionPickerView: View {
     /// Filters the list by name or description ("wipe", "pixel", "spin"...). Empty = everything.
     @State private var query = ""
     @FocusState private var searchFocused: Bool
+    /// Groups opened by tapping their name (all closed when the list opens).
+    @State private var expandedGroups: Set<String> = []
 
     var body: some View {
         let enabled = TransitionPrefs.enabledCount(disabledRaw: disabledRaw)
@@ -61,13 +63,18 @@ struct TransitionPickerView: View {
                             .padding(.bottom, 16)
                     }
                 } else {
+                    expandAllRow
                     ForEach(TransitionCatalog.groups) { group in
                         groupHeader(group)
-                        ForEach(group.ids, id: \.self) { tid in
-                            if let info = TransitionCatalog.info(id: tid) {
-                                row(info)
-                                    .padding(.bottom, 16)
+                        if expandedGroups.contains(group.name) {
+                            ForEach(group.ids, id: \.self) { tid in
+                                if let info = TransitionCatalog.info(id: tid) {
+                                    row(info)
+                                        .padding(.bottom, 16)
+                                        .transition(.opacity)
+                                }
                             }
+                            .padding(.top, 6)
                         }
                     }
                 }
@@ -141,6 +148,21 @@ struct TransitionPickerView: View {
             TransitionSwipeView(bleManager: bleManager)
                 .environment(\.theme, theme)
                 .preferredColorScheme(theme.colorScheme)
+        }
+    }
+
+    /// "Open all" / "Close all" above the groups.
+    private var expandAllRow: some View {
+        let allNames = Set(TransitionCatalog.groups.map(\.name))
+        let allOpen = expandedGroups == allNames
+        return HStack {
+            Text("\(TransitionCatalog.groups.count) groups \u{00B7} tap one to see its transitions")
+                .themeText(.statCaption)
+                .foregroundStyle(theme.inkFaint)
+            Spacer()
+            shortcut(allOpen ? "Close all" : "Open all") {
+                withAnimation(.easeOut(duration: 0.2)) { expandedGroups = allOpen ? [] : allNames }
+            }
         }
     }
 
@@ -408,14 +430,35 @@ struct TransitionPickerView: View {
         let off = TransitionPrefs.disabledSet(from: disabledRaw)
         let onCount = group.ids.filter { !off.contains($0) }.count
         let allOn = onCount == group.ids.count
-        return HStack(alignment: .firstTextBaseline) {
-            Text(group.name)
-                .themeText(.eyebrow)
-                .foregroundStyle(theme.inkFaint)
-            Text("\(onCount)/\(group.ids.count)")
-                .themeText(.statCaption)
-                .foregroundStyle(theme.inkFaint)
-            Spacer()
+        let open = expandedGroups.contains(group.name)
+        return HStack(alignment: .center) {
+            // Tap the name to open or close the group.
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    if open { expandedGroups.remove(group.name) } else { expandedGroups.insert(group.name) }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .foregroundStyle(theme.inkSoft)
+                    Text(group.name)
+                        .themeText(.eyebrow)
+                        .foregroundStyle(open ? theme.ink : theme.inkSoft)
+                    Text("\(onCount)/\(group.ids.count)")
+                        .themeText(.statCaption)
+                        .monospacedDigit()
+                        .foregroundStyle(theme.inkFaint)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(group.name), \(onCount) of \(group.ids.count) on")
+            .accessibilityHint(open ? "Hides its transitions" : "Shows its transitions")
+            .accessibilityAddTraits(.isHeader)
             Button {
                 // "Only these": everything outside this group off, this group on.
                 let outside = Set(TransitionCatalog.all.map(\.id)).subtracting(group.ids)
@@ -443,8 +486,8 @@ struct TransitionPickerView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.top, 10)
-        .accessibilityElement(children: .combine)
+        .padding(.top, 6)
+        .accessibilityElement(children: .contain)
     }
 
     private func isOn(_ info: TransitionInfo) -> Binding<Bool> {
