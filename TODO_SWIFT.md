@@ -130,11 +130,11 @@ yet verified on a device** — see `docs/VALIDATION_CHECKLIST.md` › "iOS UI (t
 ### Hygiene / process
 - [ ] **Pin `platform = espressif32`** — unpinned, and core 3.x inverts the meaning of the
   brightness fix. Highest-value hygiene item.
-- [ ] Remove `AgentDebugLog` — dead Cursor instrumentation shipping in the app `[app]`.
+- [x] Remove `AgentDebugLog` — dead Cursor instrumentation shipping in the app `[app]`.
 - [ ] CI: fail on Swift warnings; regenerate the Xcode project to catch a forgotten
   `gen_xcodeproj.py`. Both free, repo is public so Actions minutes are free.
 - [ ] `sdkconfig.defaults` is inert under `framework = arduino` — delete or mark as such `[fw]`.
-- [ ] Docs say a 32 s transfer timeout; code says 8 s.
+- [x] Docs say a 32 s transfer timeout; code says 8 s. (docs fixed 2026-11-22)
 - [ ] `src/main.cpp:45` claims GPIO1 as LCD bus MISO; the LCD has no MISO and GPIO1 is a free
   header pin. Pass `GFX_NOT_DEFINED` `[fw]`.
 - [ ] Perf, no visual change `[app]`: `CIContext.render(toBitmap:)` removes a whole redundant
