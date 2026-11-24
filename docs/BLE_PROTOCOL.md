@@ -77,7 +77,7 @@ old firmware never announces `CAPS:next`, so the app never sends it the write; o
 - **One-shot transition** — Cache characteristic write, 20 bytes: magic `0xCAC4E1ED` (u32 LE) + index (u8) +
   15 bytes padding. The next drawn frame that would otherwise pick at random (cache hit, `0xFF` or `0xFD`
   header) draws this index instead, once; retired or out-of-range indices are ignored. It expires after 15 s
-  and on disconnect. No reply. Since 2026-11-23 the app no longer sends it (a photo <-> cover swap plays a random switched-on transition, mirrored in the app); it used to send Card Flip (23) right before the draw request of a photo <-> cover
+  and on disconnect. No reply. Since 2026-11-23 (later) the app picks every draw's transition itself from the switched-on ones and sends it here right before each draw request (fresh song frames also carry it in the header byte), so the board never picks one the person switched off; the mask stays as the fallback. Before that it only sent Card Flip (23) right before the draw request of a photo <-> cover
   swap (the photo header, or the cache check for the cover coming back).
 - **`CAPS:next`** — sent on every stats request after `CAPS:t128`.
 
@@ -134,7 +134,7 @@ Changes in 1.13 (live transition mirror). Additive: old apps ignore the unknown 
 sends it; the Python sender is unaffected.
 - **All transitions off** — an enabled-transitions mask with no live bit set now means "no transition": random picks (`0xFF` headers, `0xFD` photos and every cache hit) draw the new frame at once and announce `TRANSITION_START:255:0:0:<oldBlack>`; index 255 = none (clients cut). In 1.12 an empty mask meant "all enabled".
 - **Status LED brightness** — new optional characteristic `ffe6` (write, 1 byte). 0..255 scales the
-  on-board WS2812B within its fixed safety cap (`STATUS_LED_MAX`, ~47% of full power): 255 = the cap
+  on-board WS2812B within its fixed safety cap (`STATUS_LED_MAX`, ~59% of full power since 2026-11-23, was ~47%): 255 = the cap
   (default after boot), 0 = LED always off. Not persisted on the board: the app re-sends its saved value
   on every connect, like screen brightness. Clients must treat `ffe6` as optional (older firmware lacks
   it). The service now reserves 30 attribute handles so it fits.

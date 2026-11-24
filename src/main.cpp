@@ -605,7 +605,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 };
 
 // Status LED brightness from the app (BLE_PROTOCOL 1.13, ffe6): 0..255 of the STATUS_LED_MAX cap,
-// so the app can never push the LED past ~47%. 255 = the full cap (default), 0 = LED always off.
+// so the app can never push the LED past ~59%. 255 = the full cap (default), 0 = LED always off.
 // Callback only stores the byte; loop() picks it up on the next LED update.
 volatile uint8_t statusLedLevel = 255;
 // BLE_PROTOCOL 1.19: the same write may carry 3 bytes [level, style, loading colour]. Style 0 = consumer
@@ -1760,8 +1760,9 @@ void clearCacheDirectory() {
 //   idle / just showing a cover        -> off
 // Prefetch (store-only) transfers and prefetch probes stay dark: the song on screen isn't changing.
 // ============================================================================
-#define STATUS_LED_MAX 120  // ceiling out of 255 (~47%). Owner: as bright as reasonable, under 50%
-                            // (2026-11-22). Only lit ~1-2 s per song, ~10 mA: no real heat.
+#define STATUS_LED_MAX 150  // ceiling out of 255 (~59%). Was 120 (~47%, "under 50%", 2026-11-22); owner
+                            // asked for a little more (2026-11-23).
+                            // Only lit ~1-2 s per song, ~12 mA average: no real heat.
 // A cache miss means a cover is coming, but the phone first downloads and dithers it (~0.5-1.5 s).
 // The LED goes orange right away (LED_WAITING) instead of sitting dark; if nothing arrives in this
 // long (skip, phone gave up), it goes off.

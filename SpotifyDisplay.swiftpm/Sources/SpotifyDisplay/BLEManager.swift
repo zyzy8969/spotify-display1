@@ -173,6 +173,11 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupportsTransitionMask = false
     /// The mask last written to the board on this connection (nil = none yet). Cleared on disconnect.
     private var sentTransitionMask: TransitionPrefs.Mask128?
+    /// The transition the app chose for the draw it is asking for (`prepareDrawTransition`).
+    private var chosenTransition: UInt8?
+    /// This round of the app's shuffle bag, and the last pick (never repeated back to back).
+    private var transitionBagUsed = Set<Int>()
+    private var lastPickedTransition: Int?
     /// Board said `CAPS:speeds` (BLE_PROTOCOL 1.14): it takes the transition-speeds write and appends
     /// the speed it used to `TRANSITION_START`.
     @Published private(set) var boardSupportsSpeeds = false
@@ -512,29 +517,59 @@ final class BLEManager: NSObject, ObservableObject {
         log("tx      transition speeds: \(speeds.count) custom, random \(random ? "on 0.4-1.3x" : "off"), \(slots) slots", kind: .tx)
     }
 
-    /// Sends the pending swap flip (`flipNextDraw`) right before a draw request, so nothing drawn in
-    /// between can use it. Boards without `CAPS:next` just draw their usual random transition.
-    /// Also re-sends the transition mask first if the board's copy is out of date (the picker's
-    /// `onChange` is the usual sender, but a change it missed, e.g. from the swipe deck, must not let a
-    /// switched-off transition play). Same characteristic, `.withResponse`: the board stores the mask
-    /// before it sees the draw request.
-    private func sendSwapFlipIfAsked() {
+    /// Chooses the transition for the draw the app is about to ask for, and tells the board (owner,
+    /// 2026-11-23: "make sure it only does the selected transitions"). The board's own random pick
+    /// only follows the mask it last received, and switched-off transitions kept slipping through
+    /// (VHS Glitch, Random Bars), so the app is now the one that picks:
+    /// - cache hits and photos: the one-shot next-draw write (BLE_PROTOCOL 1.16, `CAPS:next`);
+    /// - fresh song sends: the image header's transition byte as well (`chosenTransition`).
+    /// The pick is a shuffle bag over the switched-on transitions (each once per round, never the
+    /// same twice in a row). Everything switched off: nothing is sent and the board cuts. The mask is
+    /// still kept current as the fallback for firmware without `CAPS:next`. Same characteristic,
+    /// `.withResponse`: the board stores both before it sees the draw request.
+    private func prepareDrawTransition() {
         // Sent even before `CAPS:` (or `READY`) arrived: until the board has our mask it picks from
-        // every transition, so the first cover after a connect could play a switched-off one. Old
-        // firmware just ignores the unknown magic.
+        // every transition. Old firmware just ignores the unknown magic.
         if sentTransitionMask != TransitionPrefs.currentMask { applyTransitionPrefs(beforeCaps: true) }
-        guard flipNextDraw else { return }
         flipNextDraw = false
-        // Card Flip switched off: the board picks a random switched-on transition instead.
-        guard !TransitionPrefs.disabledSet(from: UserDefaults.standard.string(forKey: TransitionPrefs.storageKey) ?? "")
-            .contains(Int(Self.swapFlipTransition)) else { return }
-        guard boardSupportsNextTransition, isConnected, let p = peripheral, let c = cacheChar else { return }
+        chosenTransition = pickTransition().map { UInt8($0) }
+        sendChosenTransition()
+    }
+
+    /// Writes `chosenTransition` as the board's one-shot for its next draw (no-op without one). Sent
+    /// even before the board's `CAPS:` reply arrives, so the first cover after a connect is covered
+    /// too; firmware without `CAPS:next` logs "Bad magic" and ignores it (then the mask decides).
+    /// Also called again right before a photo's image header, so the one-shot can't expire (15 s).
+    private func sendChosenTransition() {
+        guard let chosen = chosenTransition, isConnected, let p = peripheral, let c = cacheChar else { return }
         var packet = Data()
         withUnsafeBytes(of: nextTransitionMagic.littleEndian) { packet.append(contentsOf: $0) }
-        packet.append(Self.swapFlipTransition)
+        packet.append(chosen)
         packet.append(Data(count: 15))
         p.writeValue(packet, for: c, type: .withResponse)
-        log("tx      next draw: Card Flip (photo/cover swap)", kind: .tx)
+        let name = TransitionCatalog.info(id: Int(chosen))?.name ?? "#\(chosen)"
+        log("tx      next draw: \(name)", kind: .tx)
+    }
+
+    /// Shuffle bag over the switched-on transitions; nil when none is on.
+    private func pickTransition() -> Int? {
+        let mask = TransitionPrefs.currentMask
+        // Every transition switched on in the app, and nothing else (the catalog lists every live
+        // transition; retired slots are never in it). A board that said `CAPS:` without `t128`
+        // only has indices 0-51.
+        let boardHasAll = boardSupports128 || !boardSupportsTransitionMask
+        let on = TransitionCatalog.all.map(\.id).filter { mask.contains($0) && (boardHasAll || $0 < 52) }
+        guard !on.isEmpty else { return nil }
+        var candidates = on.filter { !transitionBagUsed.contains($0) && $0 != lastPickedTransition }
+        if candidates.isEmpty {
+            transitionBagUsed.removeAll()  // round used up: start a new one
+            candidates = on.filter { $0 != lastPickedTransition }
+        }
+        if candidates.isEmpty { candidates = on }  // only one is on
+        guard let pick = candidates.randomElement() else { return nil }
+        transitionBagUsed.insert(pick)
+        lastPickedTransition = pick
+        return pick
     }
 
     /// Photo upload is over (or failed before the board drew it): let Spotify drive the display again.
@@ -570,7 +605,7 @@ final class BLEManager: NSObject, ObservableObject {
         photoHold = true
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
-        sendSwapFlipIfAsked()
+        prepareDrawTransition()
         popupForNextDraw = nil
         trackForNextDraw = nil
         checkIsSavedAhead = false
@@ -755,7 +790,7 @@ final class BLEManager: NSObject, ObservableObject {
         loadingSince = nil
         popupForNextDraw = newToPerson ? .both : .cache
         trackForNextDraw = trackId
-        sendSwapFlipIfAsked()
+        prepareDrawTransition()
         awaitingCacheRenderConfirm = true
         cacheRenderConfirmed = false
         noteDrawRequest(.cacheCheck(frameTask))
@@ -965,8 +1000,12 @@ final class BLEManager: NSObject, ObservableObject {
         }
 
         var header = Data()
-        // 0xFF = random (enabled) transition on firmware; 0xFE store-only; 0xFD display-only (photo)
-        header.append(storeOnly ? storeOnlyTransition : (displayOnly ? displayOnlyTransition : 0xFF))
+        // 0xFE store-only; 0xFD display-only (photo: its transition is the one-shot, refreshed here);
+        // a song frame carries the app's chosen transition (`prepareDrawTransition`), or 0xFF (the
+        // board's own pick, which then cuts when everything is off).
+        if displayOnly { sendChosenTransition() }
+        let songTransition: UInt8 = chosenTransition ?? 0xFF
+        header.append(storeOnly ? storeOnlyTransition : (displayOnly ? displayOnlyTransition : songTransition))
         if packed != nil {
             header.append(deflateFormat)
             withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
@@ -976,7 +1015,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         p.writeValue(header, for: img, type: .withResponse)
         if !storeOnly {
-            log("tx      image header (\(displayOnly ? "photo, no SD save" : "random transition")), \(payload.count / 1024) KB\(packed != nil ? " deflated" : " raw")", kind: .tx)
+            log("tx      image header (\(displayOnly ? "photo, no SD save" : (chosenTransition == nil ? "board's pick" : "chosen transition"))), \(payload.count / 1024) KB\(packed != nil ? " deflated" : " raw")", kind: .tx)
         }
 
         try ensureTransferEpoch(epochAtStart)

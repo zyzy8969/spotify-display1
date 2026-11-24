@@ -212,9 +212,14 @@ struct NowPlayingScreen: View {
             applyMode(on)
         }
         .onChange(of: bleManager.currentAlbumArt) { newData in
-            // During a fresh send the stage handler below picks the art up; anything else
-            // (a confirmed cache hit, the paused preview) is already what the display shows.
-            guard bleManager.sendStage != .preparingFresh else { return }
+            // During a fresh send this is the picture being sent: hold it until the board confirms.
+            // A send that replaced another one mid-way keeps the stage at .preparingFresh (no stage
+            // change for the handler below to see), so the pending picture is updated here; before,
+            // the old one stayed pending and the front / back cards landed on the wrong pictures.
+            guard bleManager.sendStage != .preparingFresh else {
+                pendingImage = Self.decode(newData)
+                return
+            }
             shownImage = Self.decode(newData)
             pendingImage = nil
             // Photos always arrive through a fresh send, so anything here is a song cover.
@@ -318,7 +323,10 @@ struct NowPlayingScreen: View {
             pendingImage = nil
             pendingSinceLogID = nil
         case .checking:
-            break
+            // A song send starts: a photo (or cover) still pending from a send it cut off never
+            // reached the display, so it must not land when this one ends.
+            pendingImage = nil
+            pendingSinceLogID = nil
         }
     }
 
@@ -556,9 +564,11 @@ struct NowPlayingScreen: View {
         let photoUp = bleManager.photoHold
         let canReshow = !photoUp && bleManager.lastPhotoJPEG != nil
         let back = backImage
-        // Keyring (normal layout): the cover sits in the drawn keychain, the other picture tucked
-        // behind the case. Nerd mode's small cover stays bare, a keychain that size reads as noise.
-        let housing = layoutNerd ? nil : theme.housing
+        // Keyring: the cover sits in the drawn keychain, the other picture tucked behind the case.
+        // Nerd mode's small cover is bare (a keychain that size reads as noise), but it is the same
+        // housing view with its chrome shrunk away, so the cover moves and resizes with the rest
+        // of the layout instead of being replaced.
+        let housing = theme.housing
         return Group {
             if let housing {
                 let caseWidth = KeychainMetrics.caseWidth(for: side)
@@ -566,6 +576,7 @@ struct NowPlayingScreen: View {
                     housing: housing,
                     side: side,
                     linked: bleManager.isConnected,
+                    chrome: !layoutNerd,
                     behindCase: back.map { image in
                         AnyView(
                             PeekCard(image: image, side: caseWidth * 0.92)
@@ -575,7 +586,7 @@ struct NowPlayingScreen: View {
                         )
                     }
                 ) {
-                    stage(side: KeychainMetrics.screenSide(for: side))
+                    stage(side: layoutNerd ? side : KeychainMetrics.screenSide(for: side))
                 }
             } else {
                 ZStack {

@@ -286,6 +286,10 @@ struct KeychainHousing<Screen: View>: View {
     /// Width of the art slot; the case fills most of it.
     let side: CGFloat
     let linked: Bool
+    /// The case, ring and link light are drawn. Off (nerd mode's small corner cover): they shrink to
+    /// nothing and fade, leaving just the screen, `side` wide. The view tree is the same either way,
+    /// so switching modes animates the cover's move and resize instead of swapping two views.
+    var chrome = true
     /// Drawn behind the case (the peeking photo card).
     var behindCase: AnyView? = nil
     @ViewBuilder let screen: () -> Screen
@@ -294,23 +298,26 @@ struct KeychainHousing<Screen: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let caseWidth = KeychainMetrics.caseWidth(for: side)
-        let bezel = caseWidth * KeychainMetrics.bezelShare
-        let screenSide = KeychainMetrics.screenSide(for: side)
+        let caseWidth = chrome ? KeychainMetrics.caseWidth(for: side) : side
+        let bezel = chrome ? caseWidth * KeychainMetrics.bezelShare : 0
+        let screenSide = chrome ? KeychainMetrics.screenSide(for: side) : side
         let chin = bezel * 1.9
         let caseHeight = screenSide + bezel + chin
-        let ringSize = side * 0.13
-        let ringWidth = max(3, side * 0.017)
-        let led = max(6, bezel * 0.42)
+        let ringSize = chrome ? side * 0.13 : 0
+        let ringWidth = chrome ? max(3, side * 0.017) : 0
+        let led = chrome ? max(6, bezel * 0.42) : 0
+        let chromeOpacity: Double = chrome ? 1 : 0
         let caseShape = RoundedRectangle(cornerRadius: caseWidth * 0.1, style: .continuous)
 
         VStack(spacing: 0) {
             Circle()
                 .stroke(housing.ring, lineWidth: ringWidth)
                 .frame(width: ringSize, height: ringSize)
+                .opacity(chromeOpacity)
             Capsule()
                 .fill(housing.ring)
                 .frame(width: ringSize * 0.3, height: ringSize * 0.5)
+                .opacity(chromeOpacity)
                 .padding(.top, -ringWidth)
                 .padding(.bottom, -ringSize * 0.12)
                 .zIndex(-1)
@@ -324,14 +331,16 @@ struct KeychainHousing<Screen: View>: View {
                     HStack {
                         Spacer(minLength: 0)
                         linkLight(size: led)
+                            .opacity(chromeOpacity)
                     }
                     .frame(height: chin)
                     .padding(.horizontal, bezel * 1.4)
                 }
                 .frame(width: caseWidth, height: caseHeight, alignment: .top)
-                .background(caseShape.fill(housing.body))
-                .overlay(caseShape.strokeBorder(housing.edge, lineWidth: 1.5))
-                .shadow(color: .black.opacity(theme.colorScheme == .dark ? 0.5 : 0.2), radius: 14, x: 0, y: 10)
+                .background(caseShape.fill(housing.body).opacity(chromeOpacity))
+                .overlay(caseShape.strokeBorder(housing.edge, lineWidth: 1.5).opacity(chromeOpacity))
+                .shadow(color: .black.opacity((theme.colorScheme == .dark ? 0.5 : 0.2) * chromeOpacity),
+                        radius: 14, x: 0, y: 10)
             }
         }
         .frame(width: side)

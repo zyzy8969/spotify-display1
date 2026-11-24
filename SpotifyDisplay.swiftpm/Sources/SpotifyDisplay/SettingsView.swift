@@ -151,7 +151,7 @@ struct SettingsView: View {
     // MARK: Display
 
     /// The board's inner status LED (BLE_PROTOCOL 1.13, ffe6). 100 % = the board's own safe maximum
-    /// (~47 % of the LED's full power), so this can never make it blinding; 0 % = always off.
+    /// (~59 % of the LED's full power), so this can never make it blinding; 0 % = always off.
     private var statusLightRow: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
