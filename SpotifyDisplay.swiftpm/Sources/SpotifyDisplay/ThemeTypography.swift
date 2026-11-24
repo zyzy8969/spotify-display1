@@ -15,6 +15,8 @@ enum TextRole {
     case heading
     case lead
     case sheetTitle
+    /// A group's heading inside a sheet (Settings): one clear step above `.row`, below `.sheetTitle`.
+    case sectionTitle
     case statBig
     case statUnit
     case eyebrow
@@ -76,6 +78,7 @@ extension ThemeID {
         case .heading: return TextSpec(size: 34, style: .largeTitle, face: .bold)
         case .lead: return TextSpec(size: 16, style: .callout)
         case .sheetTitle: return TextSpec(size: 26, style: .title2, face: .bold)
+        case .sectionTitle: return TextSpec(size: 23, style: .title3, face: .bold)
         case .statBig: return TextSpec(size: 72, style: .largeTitle, face: .bold)
         case .statUnit: return TextSpec(size: 22, style: .title2, face: .bold)
         case .eyebrow: return TextSpec(size: 15, style: .subheadline)
@@ -101,6 +104,7 @@ extension ThemeID {
         case .heading: return TextSpec(size: 28, style: .title, face: .semibold)
         case .lead: return TextSpec(size: 15, style: .subheadline)
         case .sheetTitle: return TextSpec(size: 20, style: .title3, face: .semibold)
+        case .sectionTitle: return TextSpec(size: 17, style: .headline, face: .semibold)
         case .statBig: return TextSpec(size: 64, style: .largeTitle, face: .light)
         case .statUnit: return TextSpec(size: 13, style: .footnote, tracking: 1, uppercase: true)
         case .eyebrow: return TextSpec(size: 13, style: .footnote)
@@ -128,6 +132,7 @@ extension ThemeID {
         case .heading: return TextSpec(size: 30, style: .title, face: .bold)
         case .lead: return TextSpec(size: 15, style: .subheadline)
         case .sheetTitle: return TextSpec(size: 20, style: .title3, face: .semibold)
+        case .sectionTitle: return TextSpec(size: 19, style: .title3, face: .semibold)
         case .statBig: return TextSpec(size: 60, style: .largeTitle, face: .semibold, monospaced: true)
         case .statUnit: return TextSpec(size: 12, style: .caption, tracking: 0.8, uppercase: true, monospaced: true)
         case .eyebrow: return TextSpec(size: 11, style: .caption2, tracking: 0.8, uppercase: true, monospaced: true)

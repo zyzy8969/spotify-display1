@@ -1,8 +1,11 @@
 import SwiftUI
 
-/// Settings sheet. Every control is wired to something that already exists in the app:
-/// brightness (BLE), cache count/clear (BLE), Spotify sign-in/out, and the
-/// Client ID override. The theme picker is the only new setting and is purely visual.
+/// Settings sheet, laid out for someone who just bought the keychain (owner, 2026-11-23: "more
+/// consumer friendly"): a status line first (the app's job is glance-and-confirm), then plain
+/// sections in the order people reach for them: the keychain itself, the look, Spotify. Builder
+/// tools (nerd mode, lifetime stats, clearing the card, the Client ID override, the build number)
+/// sit under a collapsed Advanced section. Sections are separated by space and a heading only: no
+/// cards or panels (DESIGN.md, Only-the-Cover-Floats).
 struct SettingsView: View {
     @ObservedObject var spotifyManager: SpotifyManager
     @ObservedObject var bleManager: BLEManager
@@ -31,33 +34,29 @@ struct SettingsView: View {
     @State private var isSigningIn = false
     @State private var isSigningOut = false
     @State private var overrideNote: String?
+    /// The Advanced section is open (closed every time Settings opens).
+    @State private var showAdvanced = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 0) {
                 SheetHeader(title: theme.id.text(.settings)) { dismiss() }
-                // What is on the keychain, and emptying it.
-                cacheRows
-                ThemedDivider()
-                // The display itself: how it looks and draws.
-                brightnessRow
-                statusLightRow
-                transitionsRow
-                ThemedDivider()
-                ThemePicker(selection: $themeRaw, crayonDark: $crayonDark, quietDark: $quietDark, keyringDark: $keyringDark)
-                ThemedDivider()
-                // Numbers: nerd mode (live, on the main screen) and the all-time totals.
-                nerdModeRow
-                lifetimeStatsRow
-                ThemedDivider()
-                spotifyRows
-                ThemedDivider()
-                clientIDRows
-                // Which cloud build this is (the GitHub Actions run number), to match reports to builds.
-                Text("app build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")")
-                    .themeText(.footnote)
-                    .foregroundStyle(theme.inkFaint)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                keychainStatus
+                    .padding(.top, 4)
+
+                section(theme.id.text(.sectionKeychain)) {
+                    brightnessRow
+                    statusLightRow
+                    transitionsRow
+                }
+                section(theme.id.text(.themeTitle)) {
+                    ThemePicker(selection: $themeRaw, crayonDark: $crayonDark, quietDark: $quietDark,
+                                keyringDark: $keyringDark, showsTitle: false)
+                }
+                section(theme.id.text(.sectionSpotify)) {
+                    spotifyRows
+                }
+                advancedSection
             }
             .padding(.horizontal, theme.margin + 4)
             .padding(.bottom, 32)
@@ -71,6 +70,84 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: Layout
+
+    /// One group of settings: a heading, then its rows. More room above the heading than below it,
+    /// so each heading reads as the start of its group.
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(title)
+                .themeText(.sectionTitle)
+                .foregroundStyle(theme.ink)
+                .accessibilityAddTraits(.isHeader)
+            content()
+        }
+        .padding(.top, 36)
+    }
+
+    /// First line of Settings: is the keychain there, and how many covers it holds. The dot is the
+    /// same filled / hollow mark as the main screen's header, so it reads without colour.
+    private var keychainStatus: some View {
+        HStack(spacing: 10) {
+            StateMarker(filled: bleManager.isConnected, fillColor: theme.display, ringColor: theme.ringOff, size: 12)
+            Text(theme.id.text(bleManager.isConnected ? .keychainConnected : .lookingForDisplay))
+                .themeText(.row)
+                .foregroundStyle(theme.ink)
+            Spacer(minLength: 8)
+            if bleManager.isConnected, let count = bleManager.sdCacheEntryCount {
+                Text(theme.id.countText(count))
+                    .themeText(.rowValue)
+                    .monospacedDigit()
+                    .foregroundStyle(theme.inkSoft)
+            }
+        }
+        .frame(minHeight: 44)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Builder tools, closed by default so a new owner sees only the everyday settings.
+    private var advancedSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) { showAdvanced.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(theme.id.text(.sectionAdvanced))
+                        .themeText(.sectionTitle)
+                        .foregroundStyle(theme.ink)
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.inkSoft)
+                        .rotationEffect(.degrees(showAdvanced ? 0 : -90))
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityValue(showAdvanced ? "Open" : "Closed")
+            .accessibilityHint(showAdvanced ? "Hides the advanced settings" : "Shows nerd mode, stats, clearing the keychain and the Spotify Client ID")
+
+            if showAdvanced {
+                VStack(alignment: .leading, spacing: 22) {
+                    nerdModeRow
+                    lifetimeStatsRow
+                    cacheRows
+                    ThemedDivider()
+                    clientIDRows
+                    // Which cloud build this is (the GitHub Actions run number), to match reports to builds.
+                    Text("app build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")")
+                        .themeText(.footnote)
+                        .foregroundStyle(theme.inkFaint)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .transition(.opacity)
+            }
+        }
+        .padding(.top, 36)
+    }
+
     // MARK: Display
 
     /// The board's inner status LED (BLE_PROTOCOL 1.13, ffe6). 100 % = the board's own safe maximum
@@ -78,7 +155,7 @@ struct SettingsView: View {
     private var statusLightRow: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Status light")
+                Text(theme.id.text(.statusLight))
                     .themeText(.row)
                     .foregroundStyle(theme.ink)
                 Spacer()
@@ -87,9 +164,15 @@ struct SettingsView: View {
                     .foregroundStyle(theme.inkSoft)
             }
             .accessibilityHidden(true)
-            Slider(value: $statusLightPercent, in: 0...100, step: 5)
+            Slider(value: $statusLightPercent, in: 0...100, step: 5) {
+                Text(theme.id.text(.statusLight))
+            } minimumValueLabel: {
+                sliderEnd("lightbulb.slash")
+            } maximumValueLabel: {
+                sliderEnd("lightbulb.fill")
+            }
                 .tint(theme.sliderTint)
-                .accessibilityLabel("Status light")
+                .accessibilityLabel(theme.id.text(.statusLight))
                 .accessibilityValue(statusLightPercent < 1 ? "Off" : "\(Int(statusLightPercent)) percent")
                 .onChange(of: statusLightPercent) { newValue in
                     let level = (min(100.0, max(0.0, newValue)) / 100 * 255).rounded()
@@ -136,8 +219,8 @@ struct SettingsView: View {
                 }
             }
             Text(bleManager.lightStyle == .consumer
-                 ? "Calm: white breathing while it looks for your phone, a rainbow when it connects, a pulse in your loading colour while a cover is on its way and drawing, then a short green pulse when it's on the keychain, amber blinking if the phone is lost."
-                 : "Per song: blue = from the card, orange = new cover being sent, blue / orange flashes = saved ahead from your queue, green = drawn, red = error.")
+                 ? "Breathes white while it looks for your phone and shows a rainbow when it finds it. Pulses your loading colour while a cover is on its way, then green once it's on. Blinks amber if it loses your phone."
+                 : "A colour per song: blue from the card, orange sent new, blue and orange flashes saved ahead from your queue, green drawn, red an error.")
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)
@@ -217,20 +300,38 @@ struct SettingsView: View {
                     .themeText(.row)
                     .foregroundStyle(theme.ink)
                 Spacer()
-                Text("\(Int(brightnessValue))")
+                Text("\(brightnessPercent)%")
                     .themeText(.rowValue)
+                    .monospacedDigit()
                     .foregroundStyle(theme.inkSoft)
             }
             .accessibilityHidden(true)
-            Slider(value: $brightnessValue, in: 0...255, step: 1)
+            // The board takes 0...255; people think in percent.
+            Slider(value: $brightnessValue, in: 0...255, step: 1) {
+                Text(theme.id.text(.brightness))
+            } minimumValueLabel: {
+                sliderEnd("sun.min")
+            } maximumValueLabel: {
+                sliderEnd("sun.max.fill")
+            }
                 .tint(theme.sliderTint)
                 .accessibilityLabel(theme.id.text(.brightness))
-                .accessibilityValue("\(Int(brightnessValue)) of 255")
+                .accessibilityValue("\(brightnessPercent) percent")
                 .onChange(of: brightnessValue) { newValue in
                     let clamped = min(255.0, max(0.0, newValue))
                     bleManager.setBrightness(UInt8(clamped))
                 }
         }
+    }
+
+    private var brightnessPercent: Int { Int((brightnessValue / 255 * 100).rounded()) }
+
+    /// Small SF Symbol at a slider's end (decorative: the slider has its own label).
+    private func sliderEnd(_ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(theme.inkSoft)
+            .accessibilityHidden(true)
     }
 
     /// Opens the transition picker (which transitions the display may use, with live examples).
@@ -302,7 +403,7 @@ struct SettingsView: View {
     }
 
     private var cacheRows: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text(theme.id.text(.onTheDisplay))
                     .themeText(.row)
@@ -310,6 +411,7 @@ struct SettingsView: View {
                 Spacer()
                 Text(cacheCountText)
                     .themeText(.rowValue)
+                    .monospacedDigit()
                     .foregroundStyle(theme.inkSoft)
             }
             .frame(minHeight: 44)
@@ -334,7 +436,7 @@ struct SettingsView: View {
                     }
                 }
             } message: {
-                Text("This removes all cached .bin files on the display SD card.")
+                Text("Every cover and photo saved on the keychain's memory card is removed. They are sent again the next time they play.")
             }
         }
     }
@@ -494,14 +596,18 @@ struct ThemePicker: View {
     @Binding var crayonDark: Bool
     @Binding var quietDark: Bool
     @Binding var keyringDark: Bool
+    /// Settings shows the picker under its own section heading, so it hides this one.
+    var showsTitle = true
     @Environment(\.theme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(theme.id.text(.themeTitle))
-                .themeText(.row)
-                .foregroundStyle(theme.ink)
-                .accessibilityAddTraits(.isHeader)
+            if showsTitle {
+                Text(theme.id.text(.themeTitle))
+                    .themeText(.row)
+                    .foregroundStyle(theme.ink)
+                    .accessibilityAddTraits(.isHeader)
+            }
             ForEach(ThemeID.allCases) { option in
                 optionRow(option)
             }

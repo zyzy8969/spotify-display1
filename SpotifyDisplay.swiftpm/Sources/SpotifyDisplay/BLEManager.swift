@@ -519,7 +519,10 @@ final class BLEManager: NSObject, ObservableObject {
     /// switched-off transition play). Same characteristic, `.withResponse`: the board stores the mask
     /// before it sees the draw request.
     private func sendSwapFlipIfAsked() {
-        if sentTransitionMask != TransitionPrefs.currentMask { applyTransitionPrefs(beforeCaps: sawReady) }
+        // Sent even before `CAPS:` (or `READY`) arrived: until the board has our mask it picks from
+        // every transition, so the first cover after a connect could play a switched-off one. Old
+        // firmware just ignores the unknown magic.
+        if sentTransitionMask != TransitionPrefs.currentMask { applyTransitionPrefs(beforeCaps: true) }
         guard flipNextDraw else { return }
         flipNextDraw = false
         // Card Flip switched off: the board picks a random switched-on transition instead.
@@ -545,6 +548,9 @@ final class BLEManager: NSObject, ObservableObject {
     /// The last photo converted for the keychain (cache-key source, RGB565 frame), so showing the same
     /// photo again skips the dithering.
     private var photoFrameCache: (key: String, frame: Data)?
+    /// The song cover (JPEG) that was up when a photo replaced it, and its track. Going back to that
+    /// song shows it again the moment the board confirms, instead of after a new download.
+    private var artBehindPhoto: (trackId: String, art: Data)?
 
     /// Shows a user photo on the display. `jpeg` is already cropped square. Spotify sends stay paused
     /// (`photoHold`) until `endPhotoHold()`. Since 2026-11-22 a photo is saved on the keychain's card
@@ -558,6 +564,9 @@ final class BLEManager: NSObject, ObservableObject {
         holdTransferBackgroundTime()
         defer { releaseTransferBackgroundTime() }
         let hadHold = photoHold
+        if !hadHold, let id = lastConfirmedTrackId, let art = currentAlbumArt {
+            artBehindPhoto = (id, art)
+        }
         photoHold = true
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
@@ -771,12 +780,18 @@ final class BLEManager: NSObject, ObservableObject {
                 // Cache hit confirmed — finish download in background for app preview only.
                 let previewDownload = download
                 activeDownloadTask = nil
-                Task { @MainActor in
-                    // Skip if a newer track started meanwhile: its art must not be replaced by ours.
-                    if let data = try? await previewDownload.value, self.sendStageGen == myStageGen {
-                        self.currentAlbumArt = data
+                if let behind = artBehindPhoto, behind.trackId == trackId {
+                    // Back from a photo to the same song: its cover is already here, no download wait.
+                    currentAlbumArt = behind.art
+                } else {
+                    Task { @MainActor in
+                        // Skip if a newer track started meanwhile: its art must not be replaced by ours.
+                        if let data = try? await previewDownload.value, self.sendStageGen == myStageGen {
+                            self.currentAlbumArt = data
+                        }
                     }
                 }
+                artBehindPhoto = nil
                 Task { @MainActor in
                     if let frame = await frameTask.value, self.drawRequestGen == hitDrawGen {
                         self.boardFrame = frame
@@ -1405,6 +1420,16 @@ final class BLEManager: NSObject, ObservableObject {
             }
         case nil:
             break  // not something this app asked for: nothing to mirror
+        }
+        // Self-check: the board just started a transition the person switched off, so its mask is not
+        // ours (a lost write, or a board that reset). Say so in the log and send it again now, so the
+        // next cover is right. Index 255 = "none" (everything off), never a mismatch.
+        if event.index != 255, TransitionCatalog.info(id: event.index) != nil,
+           !TransitionPrefs.currentMask.contains(event.index) {
+            let name = TransitionCatalog.info(id: event.index)?.name ?? "#\(event.index)"
+            log("board played \(name), which is switched off: re-sending the transition list", kind: .error)
+            sentTransitionMask = nil
+            applyTransitionPrefs(beforeCaps: true)
         }
         transitionStart = event
         mirror.begin(event, old: old)

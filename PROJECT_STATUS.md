@@ -35,7 +35,7 @@ keychain (COM6). BLE protocol **1.18** (`docs/BLE_PROTOCOL.md`).
   (75-80, 92 retired). BLE 1.15 (128-bit mask, 117 speed slots, `CAPS:t128`).
 - Random speed 0.4x-1.3x (on by default); new songs always draw at 1.3x.
 - Shuffle bag over all 128 indices with the hardware RNG; serial logs `Transition pick: ...`.
-- Photo <-> cover swap: app card flips, keychain plays Card Flip (BLE 1.16 one-shot `CAPS:next`).
+- Photo <-> cover swap: keychain plays a random switched-on transition and the app mirrors it (no Card Flip since 2026-11-23); back to the song skips the Spotify poll (`showCurrentSongAgain`).
 - Photos saved on the card under their own key: album -> photo is a cache hit after the first show.
 - Back card behind the cover always shows the other picture (stale `onChange` copy removed).
 - Pop-ups timed to the board's green light (BLE 1.18 `DRAWN`).

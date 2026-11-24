@@ -622,150 +622,7 @@ final class SpotifyManager: ObservableObject {
             setIfChanged(\.isPlaying, state.isPlaying)
             if currentTrack?.id != item.id { currentTrack = item }
 
-            // A photo the person uploaded is on the display: keep following Spotify for the app's own
-            // screen, but send nothing until they tap "Back to Spotify".
-            if bleManager.photoHold { return }
-
-            if let inflight = artInFlightTrackId, inflight != item.id {
-                cancelPrefetch()
-                bleManager.cancelOngoingTransfer()
-                artSendTask?.cancel()
-                artSendTask = nil
-                artInFlightTrackId = nil
-            }
-
-            let artURLs = preferredArtURLs(from: item)
-            let currentReadyEpoch = bleManager.readyEpoch
-            guard let artURL = artURLs.first else {
-                if lastSentToDisplayTrackId != item.id {
-                    lastError = "No album art for this track"
-                }
-                lastSentToDisplayTrackId = item.id
-                lastSentToDisplayArtURL = nil
-                lastSentToDisplayReadyEpoch = currentReadyEpoch
-                pendingTrack = nil
-                pendingSince = nil
-                return
-            }
-
-            // Session-aware dedupe: avoid duplicate cache/send work for same track+art in same BLE epoch.
-            if item.id == lastSentToDisplayTrackId,
-               artURL == lastSentToDisplayArtURL,
-               lastSentToDisplayReadyEpoch == currentReadyEpoch
-            {
-                // Either board confirmed this track, or we already know it has no art.
-                if bleManager.lastConfirmedTrackId == item.id || lastSentToDisplayArtURL == nil {
-                    ensureAlbumArtPreview(trackId: item.id, artURLs: artURLs, bleManager: bleManager)
-                    schedulePrefetch(bleManager: bleManager, currentTrackId: item.id, currentAlbumId: item.album?.id)
-                    return
-                }
-            }
-
-            if pendingTrack?.id != item.id {
-                bleManager.clearTopTransferStatus()
-                pendingTrack = item
-                // Old behavior returned here and waited a full `pollIntervalSeconds` before continuing — often +0.6s latency per new song.
-                // Pretend debounce already elapsed so we can download/send in this same poll (dedupe / in-flight guards still apply).
-                pendingSince = Date().addingTimeInterval(-debounceSeconds)
-            }
-
-            guard let since = pendingSince, Date().timeIntervalSince(since) >= debounceSeconds else { return }
-
-            // Do not re-enter send while the same track is still uploading (~1 Hz poll would cancel mid-BLE).
-            if artSendTask != nil, artInFlightTrackId == item.id {
-                return
-            }
-
-            if let failId = lastDisplayFailureTrackId, let failAt = lastDisplayFailureAt,
-               failId == item.id,
-               Date().timeIntervalSince(failAt) < displayFailureCooldownSeconds
-            {
-                return
-            }
-
-            if let globalFail = lastAnyDisplayFailureAt,
-               Date().timeIntervalSince(globalFail) < displayFailureGlobalBackoffSeconds
-            {
-                return
-            }
-
-            cancelPrefetch()  // the real song always wins the link
-            bleManager.cancelOngoingTransfer()
-            artSendTask?.cancel()
-            artSendTask = nil
-
-            if let shown = lastSentToDisplayTrackId, shown != item.id, recentlyReplaced[shown] == nil {
-                recentlyReplaced[shown] = Date()
-            }
-
-            let capturedId = item.id
-            let capturedURL = artURL
-            // The album id must come from the song being sent, not from `currentTrack` when the task
-            // runs: after a skip that is the next song, and the old art would be cached under the
-            // new album's key (that album would then load the wrong picture from SD).
-            let capturedAlbumId = item.album?.id
-            let ble = bleManager
-            artInFlightTrackId = capturedId
-            artSendGeneration &+= 1
-            let myGeneration = artSendGeneration
-            // Take background time now, synchronously. The heartbeat poll that got us here ends its
-            // own background time as soon as pollOnce returns, before this task would start; iOS
-            // could suspend the app in that gap and freeze the transfer after a few rows.
-            ble.holdTransferBackgroundTime()
-            artSendTask = Task { @MainActor [weak self] in
-                defer { ble.releaseTransferBackgroundTime() }
-                guard let self else { return }
-                do {
-                    try await ble.processTrack(
-                        imageURLs: Array(artURLs.prefix(2)),
-                        albumId: capturedAlbumId,
-                        trackId: capturedId
-                    )
-                    guard self.artSendGeneration == myGeneration else { return }
-                    let cancelled = Task.isCancelled
-                    let sentIsCurrent = !cancelled && self.currentTrack?.id == capturedId
-                    if !cancelled {
-                        // Pause/stop clears `currentTrack` before this finishes: then no dedupe mark, or
-                        // the next play would think the art was already sent and skip it.
-                        if let current = self.currentTrack {
-                            // Mark sent even if the UI already moved on, so the 1 Hz poll does not resend it.
-                            self.lastSentToDisplayTrackId = capturedId
-                            self.lastSentToDisplayArtURL = capturedURL
-                            self.lastSentToDisplayReadyEpoch = ble.readyEpoch
-                            self.lastDisplayFailureAt = nil
-                            self.lastDisplayFailureTrackId = nil
-                            self.lastAnyDisplayFailureAt = nil
-                            if sentIsCurrent { self.lastError = nil }
-                            self.pollStatus = self.isPlaying ? "Playing: \(current.name)" : "Paused"
-                        }
-                        self.pendingTrack = nil
-                        self.pendingSince = nil
-                    }
-                    await self.finishSend()
-                    // The current song is on the board: use the idle link for the next one.
-                    if sentIsCurrent {
-                        self.schedulePrefetch(bleManager: ble, currentTrackId: capturedId,
-                                              currentAlbumId: capturedAlbumId)
-                    }
-                } catch let error where error is CancellationError || (error as? URLError)?.code == .cancelled {
-                    guard self.artSendGeneration == myGeneration else { return }
-                    await self.finishSend()
-                } catch {
-                    guard self.artSendGeneration == myGeneration else { return }
-                    if let displayError = error as? SpotifyDisplayError {
-                        switch displayError {
-                        case .bleTimeout, .bleTransferRejected:
-                            ble.cancelOngoingTransfer()
-                            try? await Task.sleep(nanoseconds: 200_000_000)
-                            guard self.artSendGeneration == myGeneration else { return }
-                        case .notConnected, .conversionFailed, .authFailed:
-                            break
-                        }
-                    }
-                    self.recordSendFailure(trackId: capturedId, error: error)
-                    await self.finishSend()
-                }
-            }
+            sendIfNeeded(item, bleManager: bleManager)
         } catch {
             if let e = error as? SpotifyAPIError, case .http(429) = e {
                 lastError = "Spotify rate limited — pausing requests"
@@ -777,6 +634,177 @@ final class SpotifyManager: ObservableObject {
             } else {
                 lastError = error.localizedDescription
                 pollStatus = "Spotify request failed"
+            }
+        }
+    }
+
+    /// Photo -> song (cover tap): the song playing now is already known and its cover is on the
+    /// keychain's card, so it is sent straight away instead of asking Spotify first (`requestResync`
+    /// polls, a network round trip before the board was even asked). Its frame comes off disk
+    /// (`FrameCache`), so the app mirrors the board's transition at once. No song known yet, or a send
+    /// still running: the usual resync.
+    func showCurrentSongAgain(bleManager: BLEManager) async {
+        guard let item = currentTrack, !transferPipelineBusy else {
+            await requestResync(reason: "photo removed")
+            return
+        }
+        pendingTrack = nil
+        pendingSince = nil
+        lastDisplayFailureAt = nil
+        lastDisplayFailureTrackId = nil
+        lastAnyDisplayFailureAt = nil
+        // The photo replaced the song on the panel: same-track dedupe must not skip it.
+        lastSentToDisplayTrackId = nil
+        lastSentToDisplayArtURL = nil
+        lastSentToDisplayReadyEpoch = nil
+        sendIfNeeded(item, bleManager: bleManager)
+    }
+
+    /// Sends `item`'s cover to the display unless it is already there (or in flight, or cooling down
+    /// after a failure). Called by every poll answer for the playing song and by `showCurrentSongAgain`.
+    private func sendIfNeeded(_ item: Track, bleManager: BLEManager) {
+        // A photo the person uploaded is on the display: keep following Spotify for the app's own
+        // screen, but send nothing until they tap "Back to Spotify".
+        if bleManager.photoHold { return }
+
+        if let inflight = artInFlightTrackId, inflight != item.id {
+            cancelPrefetch()
+            bleManager.cancelOngoingTransfer()
+            artSendTask?.cancel()
+            artSendTask = nil
+            artInFlightTrackId = nil
+        }
+
+        let artURLs = preferredArtURLs(from: item)
+        let currentReadyEpoch = bleManager.readyEpoch
+        guard let artURL = artURLs.first else {
+            if lastSentToDisplayTrackId != item.id {
+                lastError = "No album art for this track"
+            }
+            lastSentToDisplayTrackId = item.id
+            lastSentToDisplayArtURL = nil
+            lastSentToDisplayReadyEpoch = currentReadyEpoch
+            pendingTrack = nil
+            pendingSince = nil
+            return
+        }
+
+        // Session-aware dedupe: avoid duplicate cache/send work for same track+art in same BLE epoch.
+        if item.id == lastSentToDisplayTrackId,
+           artURL == lastSentToDisplayArtURL,
+           lastSentToDisplayReadyEpoch == currentReadyEpoch
+        {
+            // Either board confirmed this track, or we already know it has no art.
+            if bleManager.lastConfirmedTrackId == item.id || lastSentToDisplayArtURL == nil {
+                ensureAlbumArtPreview(trackId: item.id, artURLs: artURLs, bleManager: bleManager)
+                schedulePrefetch(bleManager: bleManager, currentTrackId: item.id, currentAlbumId: item.album?.id)
+                return
+            }
+        }
+
+        if pendingTrack?.id != item.id {
+            bleManager.clearTopTransferStatus()
+            pendingTrack = item
+            // Old behavior returned here and waited a full `pollIntervalSeconds` before continuing — often +0.6s latency per new song.
+            // Pretend debounce already elapsed so we can download/send in this same poll (dedupe / in-flight guards still apply).
+            pendingSince = Date().addingTimeInterval(-debounceSeconds)
+        }
+
+        guard let since = pendingSince, Date().timeIntervalSince(since) >= debounceSeconds else { return }
+
+        // Do not re-enter send while the same track is still uploading (~1 Hz poll would cancel mid-BLE).
+        if artSendTask != nil, artInFlightTrackId == item.id {
+            return
+        }
+
+        if let failId = lastDisplayFailureTrackId, let failAt = lastDisplayFailureAt,
+           failId == item.id,
+           Date().timeIntervalSince(failAt) < displayFailureCooldownSeconds
+        {
+            return
+        }
+
+        if let globalFail = lastAnyDisplayFailureAt,
+           Date().timeIntervalSince(globalFail) < displayFailureGlobalBackoffSeconds
+        {
+            return
+        }
+
+        cancelPrefetch()  // the real song always wins the link
+        bleManager.cancelOngoingTransfer()
+        artSendTask?.cancel()
+        artSendTask = nil
+
+        if let shown = lastSentToDisplayTrackId, shown != item.id, recentlyReplaced[shown] == nil {
+            recentlyReplaced[shown] = Date()
+        }
+
+        let capturedId = item.id
+        let capturedURL = artURL
+        // The album id must come from the song being sent, not from `currentTrack` when the task
+        // runs: after a skip that is the next song, and the old art would be cached under the
+        // new album's key (that album would then load the wrong picture from SD).
+        let capturedAlbumId = item.album?.id
+        let ble = bleManager
+        artInFlightTrackId = capturedId
+        artSendGeneration &+= 1
+        let myGeneration = artSendGeneration
+        // Take background time now, synchronously. The heartbeat poll that got us here ends its
+        // own background time as soon as pollOnce returns, before this task would start; iOS
+        // could suspend the app in that gap and freeze the transfer after a few rows.
+        ble.holdTransferBackgroundTime()
+        artSendTask = Task { @MainActor [weak self] in
+            defer { ble.releaseTransferBackgroundTime() }
+            guard let self else { return }
+            do {
+                try await ble.processTrack(
+                    imageURLs: Array(artURLs.prefix(2)),
+                    albumId: capturedAlbumId,
+                    trackId: capturedId
+                )
+                guard self.artSendGeneration == myGeneration else { return }
+                let cancelled = Task.isCancelled
+                let sentIsCurrent = !cancelled && self.currentTrack?.id == capturedId
+                if !cancelled {
+                    // Pause/stop clears `currentTrack` before this finishes: then no dedupe mark, or
+                    // the next play would think the art was already sent and skip it.
+                    if let current = self.currentTrack {
+                        // Mark sent even if the UI already moved on, so the 1 Hz poll does not resend it.
+                        self.lastSentToDisplayTrackId = capturedId
+                        self.lastSentToDisplayArtURL = capturedURL
+                        self.lastSentToDisplayReadyEpoch = ble.readyEpoch
+                        self.lastDisplayFailureAt = nil
+                        self.lastDisplayFailureTrackId = nil
+                        self.lastAnyDisplayFailureAt = nil
+                        if sentIsCurrent { self.lastError = nil }
+                        self.pollStatus = self.isPlaying ? "Playing: \(current.name)" : "Paused"
+                    }
+                    self.pendingTrack = nil
+                    self.pendingSince = nil
+                }
+                await self.finishSend()
+                // The current song is on the board: use the idle link for the next one.
+                if sentIsCurrent {
+                    self.schedulePrefetch(bleManager: ble, currentTrackId: capturedId,
+                                          currentAlbumId: capturedAlbumId)
+                }
+            } catch let error where error is CancellationError || (error as? URLError)?.code == .cancelled {
+                guard self.artSendGeneration == myGeneration else { return }
+                await self.finishSend()
+            } catch {
+                guard self.artSendGeneration == myGeneration else { return }
+                if let displayError = error as? SpotifyDisplayError {
+                    switch displayError {
+                    case .bleTimeout, .bleTransferRejected:
+                        ble.cancelOngoingTransfer()
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        guard self.artSendGeneration == myGeneration else { return }
+                    case .notConnected, .conversionFailed, .authFailed:
+                        break
+                    }
+                }
+                self.recordSendFailure(trackId: capturedId, error: error)
+                await self.finishSend()
             }
         }
     }

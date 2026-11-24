@@ -77,7 +77,7 @@ old firmware never announces `CAPS:next`, so the app never sends it the write; o
 - **One-shot transition** — Cache characteristic write, 20 bytes: magic `0xCAC4E1ED` (u32 LE) + index (u8) +
   15 bytes padding. The next drawn frame that would otherwise pick at random (cache hit, `0xFF` or `0xFD`
   header) draws this index instead, once; retired or out-of-range indices are ignored. It expires after 15 s
-  and on disconnect. No reply. The app sends Card Flip (23) right before the draw request of a photo <-> cover
+  and on disconnect. No reply. Since 2026-11-23 the app no longer sends it (a photo <-> cover swap plays a random switched-on transition, mirrored in the app); it used to send Card Flip (23) right before the draw request of a photo <-> cover
   swap (the photo header, or the cache check for the cover coming back).
 - **`CAPS:next`** — sent on every stats request after `CAPS:t128`.
 

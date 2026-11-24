@@ -18,6 +18,7 @@ enum CopyKey {
     case sessionLog, waitingForActivity, newestLine, lifetimeStats, transitionsRow, choose
     case summaryLast, summaryHitRate, summaryAvgNew
     case cacheHistory, lastTime, seeAll
+    case sectionKeychain, sectionSpotify, sectionAdvanced, statusLight, keychainConnected
 }
 
 extension ThemeID {
@@ -81,6 +82,11 @@ extension ThemeID {
         case .cacheHistory: return p ? "cache history" : "Cache history"
         case .lastTime: return p ? "last time" : "Last time"
         case .seeAll: return p ? "see all" : "See all"
+        case .sectionKeychain: return p ? "your keychain" : "Keychain"
+        case .sectionSpotify: return p ? "spotify" : "Spotify"
+        case .sectionAdvanced: return p ? "advanced" : "Advanced"
+        case .statusLight: return p ? "little light" : "Status light"
+        case .keychainConnected: return p ? "keychain connected" : "Display connected"
         }
     }
 
@@ -89,6 +95,7 @@ extension ThemeID {
     private func keyringText(_ key: CopyKey) -> String? {
         switch key {
         case .lookingForDisplay: return "Looking for your keychain"
+        case .keychainConnected: return "Keychain connected"
         case .displayReady: return "Keychain linked"
         case .onTheDisplay: return "On your keychain"
         case .emptyCache: return "Clear keychain cache"

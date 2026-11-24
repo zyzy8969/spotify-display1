@@ -55,6 +55,8 @@ enum ModeMotion {
     /// The lower area slides up this far as it fades in.
     static let lowerRise: CGFloat = 14
     static let lowerExit = Animation.easeOut(duration: 0.12)
+    /// The mode's own lower area fades in once the pieces have mostly moved.
+    static let lowerEnter = Animation.easeOut(duration: 0.22).delay(0.14)
     /// Nerd -> normal: the log is gone after this long, then the cover grows back.
     static let exitLead = 0.09
     static let reducedHalf = 0.1
@@ -109,10 +111,8 @@ struct NowPlayingScreen: View {
     @AppStorage("uiDark.crayon") private var crayonDark = false
     @AppStorage("uiDark.quiet") private var quietDark = true
     @AppStorage("uiDark.keyring") private var keyringDark = false
-    /// Nerd mode as laid out right now. Follows `nerdOn`, sequenced by `applyMode`.
+    /// Nerd mode as laid out right now. Follows `nerdOn` through `applyMode`.
     @State private var layoutNerd = NerdMode.isOn
-    /// False while the log fades out, before the cover grows back (nerd -> normal).
-    @State private var showsLower = true
     /// Reduce Motion crossfade: the player dips to the background and comes back.
     @State private var playerOpacity: Double = 1
     @State private var modeGen = 0
@@ -137,17 +137,6 @@ struct NowPlayingScreen: View {
     @State private var songImage: UIImage?
     /// Last uploaded photo, decoded once.
     @State private var photoImage: UIImage?
-    /// Photo <-> cover swap (tap). The FRONT card flips at once to the other picture; the back card
-    /// quietly takes the picture that was in front (it never flips). Both overrides hold until the
-    /// board confirms the swap, or flip back if it fails.
-    @State private var frontOverride: UIImage?
-    @State private var backOverride: UIImage?
-    /// Y rotation of the front card during its flip (0 = flat).
-    @State private var frontFlipAngle: Double = 0
-    /// True from the tap until shortly after the board confirms: the front ignores the board's
-    /// transition mirror for this swap (it already flipped), so nothing plays twice.
-    @State private var quietSwap = false
-    @State private var swapGen = 0
 
     // Progress line under the cover (see `LiveStrip`).
     @State private var stripRun: StripRun = .idle
@@ -177,7 +166,7 @@ struct NowPlayingScreen: View {
                 // Quiet's signature: the cover's glow behind the big cover (normal layout only; nerd
                 // mode's small corner cover would light the wrong place).
                 if theme.ambientArt && !layoutNerd {
-                    AmbientArt(image: frontOverride ?? shownImage)
+                    AmbientArt(image: shownImage)
                         .transition(.opacity)
                 }
             }
@@ -235,17 +224,10 @@ struct NowPlayingScreen: View {
         .onChange(of: bleManager.lastPhotoJPEG) { data in
             photoImage = Self.decode(data)
         }
-        .onChange(of: shownIsPhoto) { _ in
-            // The board drew the swap: the confirmed pictures are the ones already showing.
-            swapConfirmed()
-        }
         .onChange(of: spotifyManager.currentTrack?.id) { _ in
             // While a photo is up, Spotify sends are paused; keep the card behind on the song
             // that is actually playing.
             if shownIsPhoto { loadSongArtForBackCard() }
-        }
-        .onChange(of: photoError) { error in
-            if error != nil { revertSwap() }
         }
         // `sendStage` returns to idle on every exit from processTrack (success, error, skip).
         .onChange(of: bleManager.sendStage) { stage in
@@ -290,23 +272,24 @@ struct NowPlayingScreen: View {
     /// The nerd layout shows only while the feature is on in Settings and the icon is toggled on.
     private var nerdOn: Bool { nerdEnabled && nerdMode }
 
-    /// Moves the layout to `on`. Toggling again mid-way retargets the springs (they are interruptible)
-    /// and `modeGen` drops any step still scheduled by the previous toggle.
+    /// Moves the layout to `on`: one layout whose pieces move and resize (the cover shrinks into the
+    /// corner, title and controls slide beside it, the live details fade in under them), not two
+    /// screens swapping. Every piece is always in the tree; nothing is inserted or removed, so nothing
+    /// from the other mode can linger and take space. Springs are interruptible, so toggling again
+    /// mid-way just retargets. Reduce Motion: a quick dip to the background and a cut.
     private func applyMode(_ on: Bool) {
+        guard reduceMotion else {
+            withAnimation(ModeMotion.spring) { layoutNerd = on }
+            return
+        }
         modeGen &+= 1
         let gen = modeGen
-        // A quick dip to the background, an instant swap of two separate layouts, and back. Nothing is
-        // inserted or removed with an animation, so nothing from the other mode can stay behind and take
-        // space (it did: nerd mode's live details sat where the big cover ends). Reduce Motion: same.
         withAnimation(.easeOut(duration: ModeMotion.reducedHalf)) { playerOpacity = 0 }
         DispatchQueue.main.asyncAfter(deadline: .now() + ModeMotion.reducedHalf) {
             guard gen == modeGen else { return }
             var cut = Transaction()
             cut.disablesAnimations = true
-            withTransaction(cut) {
-                layoutNerd = on
-                showsLower = true
-            }
+            withTransaction(cut) { layoutNerd = on }
             withAnimation(.easeIn(duration: ModeMotion.reducedHalf)) { playerOpacity = 1 }
         }
     }
@@ -331,9 +314,6 @@ struct NowPlayingScreen: View {
                 shownImage = pending
                 shownIsPhoto = bleManager.photoHold
                 if !shownIsPhoto { songImage = pending }
-                swapConfirmed()
-            } else {
-                revertSwap()
             }
             pendingImage = nil
             pendingSinceLogID = nil
@@ -432,93 +412,29 @@ struct NowPlayingScreen: View {
         }
     }
 
-    /// Takes the uploaded photo off the display and goes back to the current Spotify cover.
+    /// Takes the uploaded photo off the display and goes back to the current Spotify cover. The song is
+    /// already known and its cover is on the keychain's card, so it is drawn straight away (no Spotify
+    /// lookup first); the board picks one of the switched-on transitions and the cover here mirrors it.
     private func backToSpotify() {
         bleManager.endPhotoHold()
-        Task { await spotifyManager.requestResync(reason: "photo removed") }
+        Task { await spotifyManager.showCurrentSongAgain(bleManager: bleManager) }
     }
 
     /// Cover tap: a photo is up -> back to Spotify; otherwise show the last uploaded photo again
-    /// (nothing happens when no photo was uploaded since the app was opened).
+    /// (nothing happens when no photo was uploaded since the app was opened). Either way the keychain
+    /// plays a random switched-on transition and the cover here plays the same one (the mirror).
     private func coverTapped() {
         if bleManager.photoHold {
-            // The keychain flips too (Card Flip), like the card here, instead of a random transition.
-            bleManager.flipNextDraw = true
             backToSpotify()
         } else if let jpeg = bleManager.lastPhotoJPEG {
-            bleManager.flipNextDraw = true
             sendPhoto(jpeg)
-        } else {
-            return
         }
-        // The front flips now to the other picture; the back quietly takes the one that was in front.
-        let target = backImage
-        let previousFront = frontOverride ?? shownImage
-        quietSwap = true
-        swapGen &+= 1
-        let gen = swapGen
-        flipFront {
-            frontOverride = target
-            backOverride = previousFront
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
-            // Never confirmed (lost connection, dropped send): flip back.
-            guard gen == swapGen, frontOverride != nil else { return }
-            revertSwap()
-        }
-    }
-
-    /// Flips the front card on its vertical axis; `swap` runs at the edge-on midpoint, so the new
-    /// picture is what turns to face the viewer. Reduce Motion: a cut.
-    private func flipFront(_ swap: @escaping () -> Void) {
-        if reduceMotion {
-            swap()
-            return
-        }
-        let half = 0.15
-        withAnimation(.easeIn(duration: half)) { frontFlipAngle = 90 }
-        DispatchQueue.main.asyncAfter(deadline: .now() + half) {
-            var cut = Transaction()
-            cut.disablesAnimations = true
-            withTransaction(cut) {
-                swap()
-                frontFlipAngle = -90
-            }
-            DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: half + 0.05)) { frontFlipAngle = 0 }
-            }
-        }
-    }
-
-    /// The board drew the swap: the real pictures now match what is showing, so drop the overrides
-    /// (no visible change) and let the mirror play the board's transitions again a moment later.
-    private func swapConfirmed() {
-        guard frontOverride != nil || backOverride != nil || quietSwap else { return }
-        frontOverride = nil
-        backOverride = nil
-        swapGen &+= 1
-        let gen = swapGen
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            guard gen == swapGen else { return }
-            quietSwap = false
-        }
-    }
-
-    /// The swap did not happen: the front flips back to the picture that is on the display.
-    private func revertSwap() {
-        guard frontOverride != nil || backOverride != nil else { return }
-        swapGen &+= 1
-        flipFront {
-            frontOverride = nil
-            backOverride = nil
-        }
-        quietSwap = false
     }
 
     /// The picture that is not on the display: the song cover while a photo is up, otherwise the
     /// last photo (nil until one was uploaded since the app was opened).
     private var backImage: UIImage? {
-        backOverride ?? (shownIsPhoto ? songImage : photoImage)
+        shownIsPhoto ? songImage : photoImage
     }
 
     /// Downloads the playing song's cover for the card behind a photo (no BLE involved).
@@ -538,71 +454,76 @@ struct NowPlayingScreen: View {
 
     // MARK: Layout
 
-    /// Two separate layouts, swapped without animation (`applyMode`): nerd mode is its own plain stack
-    /// (small cover row, progress line, live details + log), so its top is exactly the small cover.
-    @ViewBuilder
+    /// One layout for both modes, so switching moves and resizes the same pieces (`applyMode`):
+    /// - normal: the big cover centred, the line, title, controls and footer under it;
+    /// - nerd: the cover small in the top-left corner with title and controls beside it, the thin line
+    ///   under that row, and the live details right under it (then cache history and the session log).
+    /// The cover row switches between a vertical and a horizontal stack (`AnyLayout` keeps each
+    /// piece's identity, so it animates instead of being replaced). The mode's own extras (footer,
+    /// nerd log) are always present and only collapse to zero height and fade.
     private func player(size: CGSize, scrolls: Bool) -> some View {
-        if layoutNerd {
-            nerdPlayer(size: size, scrolls: scrolls)
-        } else {
-            normalPlayer(size: size, scrolls: scrolls)
-        }
-    }
-
-    /// Normal: the big cover centred with the line, title, controls, footer (and stats) under it.
-    private func normalPlayer(size: CGSize, scrolls: Bool) -> some View {
+        let nerd = layoutNerd
         let bigSide = ArtMetrics.side(for: size, margin: theme.margin, accessibilityText: scrolls)
+        let nerdSide = ArtMetrics.nerdSide(for: size)
         // Keyring's keychain (ring + case) is taller than wide: a slightly smaller slot keeps the
         // column the same height as the bare cover's.
         let artSlot = theme.housing == nil ? bigSide : (bigSide * KeychainMetrics.slotShare).rounded(.down)
+        let stripWidth = theme.housing == nil ? bigSide : KeychainMetrics.caseWidth(for: artSlot)
+        let nerdLowerMax: CGFloat? = nerd ? (scrolls ? nil : CGFloat.infinity) : 0
+        let row = nerd
+            ? AnyLayout(HStackLayout(alignment: .top, spacing: 14))
+            : AnyLayout(VStackLayout(alignment: .center, spacing: 0))
         return VStack(spacing: 0) {
-            Spacer(minLength: ArtMetrics.topGap(for: size))
-                .frame(maxHeight: .infinity)
-            art(side: artSlot)
-                .frame(maxWidth: .infinity, alignment: .center)
-            strip(nerd: false)
-                // As wide as what it sits under: the cover, or Keyring's case.
-                .frame(width: theme.housing == nil ? bigSide : KeychainMetrics.caseWidth(for: artSlot))
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.top, 10)
-            normalTrackBlock(side: bigSide)
-            normalLowerBlock(size: size)
-            Spacer(minLength: 8)
-                .frame(maxHeight: .infinity)
-        }
-        .padding(.horizontal, theme.margin)
-        .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
-    }
-
-    /// Nerd: small cover top-left with title / controls beside it, the progress line right under that
-    /// row, then the live details, cache history and session log filling the rest.
-    private func nerdPlayer(size: CGSize, scrolls: Bool) -> some View {
-        let side = ArtMetrics.nerdSide(for: size)
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 14) {
-                art(side: side)
-                nerdTrackColumn(side: side)
+            Spacer(minLength: nerd ? 2 : ArtMetrics.topGap(for: size))
+                .frame(maxHeight: nerd ? 2 : CGFloat.infinity)
+            row {
+                art(side: nerd ? nerdSide : artSlot)
+                    .frame(maxWidth: nerd ? nil : CGFloat.infinity, alignment: .center)
+                trackBlock(bigSide: bigSide, nerdSide: nerdSide)
             }
-            .padding(.top, 2)
-            strip(nerd: true)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 2)
+            .frame(maxWidth: .infinity, alignment: nerd ? .leading : .center)
+            strip(nerd: nerd)
+                // Normal: as wide as what it sits under (the cover, or Keyring's case).
+                .frame(width: nerd ? nil : stripWidth)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, nerd ? 4 : 10)
+            normalLowerBlock(size: size)
+                .opacity(nerd ? 0 : 1)
+                .animation(nerd ? ModeMotion.lowerExit : ModeMotion.lowerEnter, value: nerd)
+                .frame(height: nerd ? 0 : nil, alignment: .top)
+                .clipped()
+                .allowsHitTesting(!nerd)
+                .accessibilityHidden(nerd)
             nerdLowerBlock(size: size, scrolls: scrolls)
-                .frame(maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
+                .padding(.top, 6)
+                .opacity(nerd ? 1 : 0)
+                .animation(nerd ? ModeMotion.lowerEnter : ModeMotion.lowerExit, value: nerd)
+                .frame(maxHeight: nerdLowerMax, alignment: .top)
+                .clipped()
+                .allowsHitTesting(nerd)
+                .accessibilityHidden(!nerd)
+            Spacer(minLength: nerd ? 0 : 8)
+                .frame(maxHeight: nerd ? 0 : CGFloat.infinity)
         }
         .padding(.horizontal, theme.margin)
         .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
     }
 
-    /// Normal mode under the strip: track info, the photo banner and the controls.
-    private func normalTrackBlock(side: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            TrackInfo(title: trackTitle, subtitle: trackSubtitle)
-                .frame(width: side)
-                .padding(.top, 20)
-            PlaybackControls(spotifyManager: spotifyManager)
-                .padding(.top, 18)
+    /// Title, artist and the controls: centred under the big cover, or beside the small one in nerd
+    /// mode (smaller text, the controls centred in that column).
+    private func trackBlock(bigSide: CGFloat, nerdSide: CGFloat) -> some View {
+        let nerd = layoutNerd
+        return VStack(alignment: nerd ? .leading : .center, spacing: 0) {
+            TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: nerd, leading: nerd)
+                .frame(width: nerd ? nil : bigSide)
+                .frame(maxWidth: nerd ? CGFloat.infinity : nil, alignment: .leading)
+                .padding(.top, nerd ? 0 : 20)
+            PlaybackControls(spotifyManager: spotifyManager, compact: nerd)
+                .frame(maxWidth: nerd ? CGFloat.infinity : nil, alignment: .center)
+                .padding(.top, nerd ? 2 : 18)
         }
+        .frame(maxWidth: nerd ? CGFloat.infinity : nil, minHeight: nerd ? nerdSide : nil, alignment: .topLeading)
+        .environment(\.themeTextScale, nerd ? ArtMetrics.compactTextScale : 1)
     }
 
     /// Normal mode's footer and, when there is room, a quiet line of this session's stats.
@@ -619,31 +540,18 @@ struct NowPlayingScreen: View {
         }
     }
 
-    /// Nerd mode, right of the cover: title and artist, the controls centred under them.
-    private func nerdTrackColumn(side: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: true, leading: true)
-            PlaybackControls(spotifyManager: spotifyManager, compact: true)
-                .frame(maxWidth: .infinity, alignment: .center)
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, minHeight: side, alignment: .topLeading)
-        .environment(\.themeTextScale, ArtMetrics.compactTextScale)
-    }
-
-    /// Nerd mode under the progress line: the live details (fixed, first) + cache history + session log.
+    /// Nerd mode under the progress line: the live details (first, right under the song and its
+    /// controls) + cache history + session log.
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
-        // Always present (only faded), so it can never be inserted twice or linger.
         NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
             .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
             .frame(maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
-            .opacity(showsLower ? 1 : 0)
-        .environment(\.themeTextScale, ArtMetrics.compactTextScale)
+            .environment(\.themeTextScale, ArtMetrics.compactTextScale)
     }
 
     /// The cover, with the other picture (song cover or last photo) peeking out behind it.
-    /// Tap: back to Spotify while a photo is up, otherwise the last photo again. The front card flips
-    /// to the other picture at once; the back card just takes the old one (it never flips).
+    /// Tap: back to Spotify while a photo is up, otherwise the last photo again. The front plays the
+    /// keychain's own transition for the swap (mirrored); the back card takes the old picture.
     private func art(side: CGFloat) -> some View {
         let photoUp = bleManager.photoHold
         let canReshow = !photoUp && bleManager.lastPhotoJPEG != nil
@@ -696,17 +604,15 @@ struct NowPlayingScreen: View {
         .accessibilityAction { coverTapped() }
     }
 
-    /// The front card: the cover as the keychain shows it, flipping on a photo <-> cover swap.
+    /// The front card: the cover as the keychain shows it, playing the board's transitions.
     private func stage(side: CGFloat) -> some View {
         ArtStage(
-            image: frontOverride ?? shownImage,
+            image: shownImage,
             side: side,
             label: artLabel,
             value: artValue,
-            event: bleManager.transitionEvent,
-            quiet: quietSwap
+            event: bleManager.transitionEvent
         )
-        .rotation3DEffect(.degrees(frontFlipAngle), axis: (x: 0, y: 1, z: 0), perspective: 0.5)
     }
 
     /// The progress line: under the big cover in normal mode; full width and thinner under the cover
