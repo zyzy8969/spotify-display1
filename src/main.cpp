@@ -1646,7 +1646,17 @@ bool saveToCache(uint8_t* cacheKey, const uint16_t* src) {
     return false;
   }
 
-  size_t bytesWritten = file.write((const uint8_t*)src, IMAGE_SIZE);
+  // Written in 8 KB pieces with an LED update between them: the save blocks loop() for ~0.4 s, and
+  // a fresh cover's green pulse (started right before it) must animate through it like a cache hit's,
+  // not sit on one frame (owner, 2026-11-23: same length as the cache green).
+  size_t bytesWritten = 0;
+  for (size_t off = 0; off < IMAGE_SIZE; off += 8192) {
+    const size_t n = IMAGE_SIZE - off < 8192 ? IMAGE_SIZE - off : 8192;
+    const size_t w = file.write((const uint8_t*)src + off, n);
+    bytesWritten += w;
+    ledUpdate();
+    if (w != n) break;
+  }
   uint32_t crc = computeCRC32((const uint8_t*)src, IMAGE_SIZE);
   uint8_t crcLE[4] = {
     (uint8_t)(crc & 0xFF),
@@ -1656,7 +1666,9 @@ bool saveToCache(uint8_t* cacheKey, const uint16_t* src) {
   };
   size_t crcWritten = file.write(crcLE, 4);
   file.flush();
+  ledUpdate();
   file.close();
+  ledUpdate();
 
   if (bytesWritten != IMAGE_SIZE || crcWritten != 4) {
     Serial.printf("ERROR: Cache write failed image=%d crc=%d\n", (int)bytesWritten, (int)crcWritten);
@@ -1667,6 +1679,7 @@ bool saveToCache(uint8_t* cacheKey, const uint16_t* src) {
   if (SD.exists(filename)) {
     SD.remove(filename);
   }
+  ledUpdate();
   if (!SD.rename(tmpFilename, filename)) {
     Serial.println("ERROR: Cache atomic rename failed");
     SD.remove(tmpFilename);
@@ -2338,19 +2351,12 @@ void loop() {
     // Green as soon as the cover is on screen, not after the SD save (~0.4 s later).
     ledSetMode(LED_DONE);
     notifyDrawn();
-    // The SD save below blocks loop(), so nothing animates the LED meanwhile. The consumer pulse
-    // starts at 0 brightness, so it used to sit dark through the save and be almost over after it:
-    // fresh covers never showed their green (owner, 2026-11-23). Hold green at full during the save,
-    // then run the rest of the pulse from its peak.
-    ledShow(LED_RGB_GREEN, 255);
 
+    // saveToCache updates the LED between its writes, so this green pulse plays at its normal length
+    // (the same as a cache hit's) while the cover is saved.
     unsigned long saveStart = millis();
     if (!displayOnly) saveToCache(transferCacheKey);
     unsigned long saveTime = millis() - saveStart;
-    if (ledMode == LED_DONE) {
-      ledModeSince = millis() - (ledConsumer() ? LED_GREEN_PULSE_MS / 2 : 0);
-      ledUpdate();
-    }
 
     // 1.12: tell the app which transition just ran (cache hits already do), before the ACK.
     String freshTransitionMsg = "TRANSITION:" + transitionName;

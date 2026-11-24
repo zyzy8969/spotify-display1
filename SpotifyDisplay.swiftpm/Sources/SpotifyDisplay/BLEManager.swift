@@ -299,6 +299,19 @@ final class BLEManager: NSObject, ObservableObject {
             queue: .main,
             options: [CBCentralManagerOptionRestoreIdentifierKey: Self.centralRestoreIdentifier]
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appWillTerminate),
+            name: UIApplication.willTerminateNotification, object: nil
+        )
+    }
+
+    /// The app is being closed (swiped away while it was still running): drop the link ourselves.
+    /// Left to iOS, the link sometimes stayed up for a while, so the keychain kept the last cover
+    /// instead of going back to its Bluetooth screen (owner, 2026-11-23). iOS gives no such call when
+    /// it kills an app it had already suspended; then the board waits for iOS to close the link.
+    @objc private func appWillTerminate() {
+        guard let p = peripheral else { return }
+        central.cancelPeripheralConnection(p)
     }
 
     /// Background time is counted, not on/off. On a skip the cancelled `processTrack` exits while the

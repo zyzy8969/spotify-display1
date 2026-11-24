@@ -558,8 +558,16 @@ struct NowPlayingScreen: View {
     /// mode (smaller text, the controls centred in that column).
     private func trackBlock(bigSide: CGFloat, nerdSide: CGFloat) -> some View {
         let nerd = layoutNerd
+        let textScale = nerd ? ArtMetrics.compactTextScale : 1
         return VStack(alignment: nerd ? .leading : .center, spacing: 0) {
-            TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: nerd, leading: nerd)
+            // Drawn once at its normal size and scaled as a picture (owner, 2026-11-23: the text was
+            // still "funky"). Resizing the font instead re-wrapped and redrew the words at every step of
+            // the switch; a scale keeps them identical, only smaller or bigger. `ScaleLayout` reports the
+            // scaled size so the column around it stays exact.
+            ScaleLayout(scale: textScale) {
+                TrackInfo(title: trackTitle, subtitle: trackSubtitle, compact: nerd, leading: nerd)
+                    .scaleEffect(textScale, anchor: .topLeading)
+            }
                 .frame(width: nerd ? nil : bigSide)
                 .frame(maxWidth: nerd ? CGFloat.infinity : nil, alignment: .leading)
                 .padding(.top, nerd ? 0 : 20)
@@ -568,9 +576,6 @@ struct NowPlayingScreen: View {
                 .padding(.top, nerd ? 2 : 18)
         }
         .frame(maxWidth: nerd ? CGFloat.infinity : nil, minHeight: nerd ? nerdSide : nil, alignment: .topLeading)
-        // Animated, not set: a plain font change can't animate, so SwiftUI crossfaded the old and new
-        // text and the title / artist seemed to vanish and come back on every mode switch.
-        .modifier(AnimatedTextScale(scale: nerd ? ArtMetrics.compactTextScale : 1))
     }
 
     /// Normal mode's footer and, when there is room, a quiet line of this session's stats.
@@ -751,17 +756,31 @@ struct NowPlayingScreen: View {
     }
 }
 
-/// Sets `themeTextScale` as animatable data: during a mode switch SwiftUI steps the scale frame by
-/// frame, so text sizes grow and shrink with the layout instead of crossfading between two sizes.
-private struct AnimatedTextScale: ViewModifier, Animatable {
+/// Lays its one child out `1 / scale` times larger and reports `scale` times that size, so a child
+/// drawn with the same `.scaleEffect(scale, anchor: .topLeading)` fills exactly the space it reports.
+/// `scale` is animatable: during a mode switch the space and the drawing shrink together, frame by frame.
+private struct ScaleLayout: Layout {
     var scale: CGFloat
     var animatableData: CGFloat {
         get { scale }
         set { scale = newValue }
     }
 
-    func body(content: Content) -> some View {
-        content.environment(\.themeTextScale, scale)
+    private var safeScale: CGFloat { max(scale, 0.01) }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let s = safeScale
+        let inner = child.sizeThatFits(ProposedViewSize(width: proposal.width.map { $0 / s },
+                                                        height: proposal.height.map { $0 / s }))
+        return CGSize(width: inner.width * s, height: inner.height * s)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let child = subviews.first else { return }
+        let s = safeScale
+        child.place(at: bounds.origin, anchor: .topLeading,
+                    proposal: ProposedViewSize(width: bounds.width / s, height: bounds.height / s))
     }
 }
 
