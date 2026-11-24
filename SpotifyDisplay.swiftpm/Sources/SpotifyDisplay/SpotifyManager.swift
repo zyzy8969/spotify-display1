@@ -10,9 +10,13 @@ private let kSpotifyClientIDPlistKey = "SpotifyClientID"
 
 @MainActor
 final class SpotifyManager: ObservableObject {
-    @Published var currentTrack: Track?
+    @Published var currentTrack: Track? {
+        didSet { if oldValue?.id != currentTrack?.id { updateIdleLight() } }
+    }
     @Published var isPlaying = false
-    @Published var isAuthenticated = false
+    @Published var isAuthenticated = false {
+        didSet { if oldValue != isAuthenticated { updateIdleLight() } }
+    }
     @Published var lastError: String?
     @Published var pollStatus: String?
 
@@ -322,8 +326,15 @@ final class SpotifyManager: ObservableObject {
         }
     }
 
+    /// BLE 1.22: the keychain loops its rainbow while the app says "Play something on Spotify"
+    /// (signed in, no song). Paused on a song is not "nothing playing".
+    private func updateIdleLight() {
+        monitoredBle?.setNothingPlaying(isAuthenticated && currentTrack == nil)
+    }
+
     func startMonitoring(bleManager: BLEManager) {
         monitoredBle = bleManager
+        updateIdleLight()
         startNetworkMonitor()
 
         // The transition picker only gets the BLE manager; it asks for the next queued cover here.

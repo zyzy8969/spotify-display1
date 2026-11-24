@@ -137,6 +137,12 @@ struct NowPlayingScreen: View {
     @State private var songImage: UIImage?
     /// Last uploaded photo, decoded once.
     @State private var photoImage: UIImage?
+    /// A tap swap in flight: the card behind takes the picture that was in front, and the glow behind
+    /// the cover takes the one coming, right at the tap (owner, 2026-11-23: "should update quicker"),
+    /// instead of when the keychain confirms. Cleared once the front changes, or the swap fails.
+    @State private var swapBack: UIImage?
+    @State private var swapFront: UIImage?
+    @State private var swapGen = 0
 
     // Progress line under the cover (see `LiveStrip`).
     @State private var stripRun: StripRun = .idle
@@ -166,7 +172,7 @@ struct NowPlayingScreen: View {
                 // Quiet's signature: the cover's glow behind the big cover (normal layout only; nerd
                 // mode's small corner cover would light the wrong place).
                 if theme.ambientArt && !layoutNerd {
-                    AmbientArt(image: shownImage)
+                    AmbientArt(image: swapFront ?? shownImage)
                         .transition(.opacity)
                 }
             }
@@ -228,6 +234,13 @@ struct NowPlayingScreen: View {
         }
         .onChange(of: bleManager.lastPhotoJPEG) { data in
             photoImage = Self.decode(data)
+        }
+        .onChange(of: shownImage) { _ in
+            // The front now shows what the board drew: the swap's stand-ins are no longer needed.
+            endSwap()
+        }
+        .onChange(of: photoError) { error in
+            if error != nil { endSwap() }
         }
         .onChange(of: spotifyManager.currentTrack?.id) { _ in
             // While a photo is up, Spotify sends are paused; keep the card behind on the song
@@ -432,17 +445,41 @@ struct NowPlayingScreen: View {
     /// (nothing happens when no photo was uploaded since the app was opened). Either way the keychain
     /// plays a random switched-on transition and the cover here plays the same one (the mirror).
     private func coverTapped() {
+        let coming = backImage
         if bleManager.photoHold {
             backToSpotify()
         } else if let jpeg = bleManager.lastPhotoJPEG {
             sendPhoto(jpeg)
+        } else {
+            return
+        }
+        // The cards behind swap now; the front follows the keychain's transition (the mirror).
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) {
+            swapBack = shownImage
+            swapFront = coming
+        }
+        swapGen &+= 1
+        let gen = swapGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
+            // Never confirmed (lost connection, dropped send): put the cards back.
+            if gen == swapGen { endSwap() }
+        }
+    }
+
+    private func endSwap() {
+        guard swapBack != nil || swapFront != nil else { return }
+        swapGen &+= 1
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) {
+            swapBack = nil
+            swapFront = nil
         }
     }
 
     /// The picture that is not on the display: the song cover while a photo is up, otherwise the
-    /// last photo (nil until one was uploaded since the app was opened).
+    /// last photo (nil until one was uploaded since the app was opened). During a tap swap, the
+    /// picture that was in front.
     private var backImage: UIImage? {
-        shownIsPhoto ? songImage : photoImage
+        swapBack ?? (shownIsPhoto ? songImage : photoImage)
     }
 
     /// Downloads the playing song's cover for the card behind a photo (no BLE involved).
@@ -531,7 +568,9 @@ struct NowPlayingScreen: View {
                 .padding(.top, nerd ? 2 : 18)
         }
         .frame(maxWidth: nerd ? CGFloat.infinity : nil, minHeight: nerd ? nerdSide : nil, alignment: .topLeading)
-        .environment(\.themeTextScale, nerd ? ArtMetrics.compactTextScale : 1)
+        // Animated, not set: a plain font change can't animate, so SwiftUI crossfaded the old and new
+        // text and the title / artist seemed to vanish and come back on every mode switch.
+        .modifier(AnimatedTextScale(scale: nerd ? ArtMetrics.compactTextScale : 1))
     }
 
     /// Normal mode's footer and, when there is room, a quiet line of this session's stats.
@@ -551,7 +590,7 @@ struct NowPlayingScreen: View {
     /// Nerd mode under the progress line: the live details (first, right under the song and its
     /// controls) + cache history + session log.
     private func nerdLowerBlock(size: CGSize, scrolls: Bool) -> some View {
-        NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager)
+        NerdLogView(bleManager: bleManager, spotifyManager: spotifyManager, active: layoutNerd)
             .frame(height: scrolls ? max(300, size.height * 0.6) : nil)
             .frame(maxHeight: scrolls ? nil : CGFloat.infinity, alignment: .top)
             .environment(\.themeTextScale, ArtMetrics.compactTextScale)
@@ -709,6 +748,20 @@ struct NowPlayingScreen: View {
             return "Spotify rate limited \u{2014} retrying soon"
         }
         return nil
+    }
+}
+
+/// Sets `themeTextScale` as animatable data: during a mode switch SwiftUI steps the scale frame by
+/// frame, so text sizes grow and shrink with the layout instead of crossfading between two sizes.
+private struct AnimatedTextScale: ViewModifier, Animatable {
+    var scale: CGFloat
+    var animatableData: CGFloat {
+        get { scale }
+        set { scale = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content.environment(\.themeTextScale, scale)
     }
 }
 

@@ -45,6 +45,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// The loading-colour picker is on screen: the board keeps pulsing the colour (BLE_PROTOCOL 1.21).
     /// Lives here, not in the extension with `setLightPreview`: extensions can't hold stored properties.
     private var lightPreviewHold = false
+    /// BLE 1.22: nothing is playing on Spotify; the keychain loops its rainbow (consumer lights).
+    private var nothingPlaying = false
     /// When the current connection came up (the consumer rainbow plays from then) and whether one ever
     /// did this launch (then a lost connection is the amber blink, not the white "looking" breathing).
     @Published private(set) var connectedAt: Date?
@@ -1768,6 +1770,15 @@ extension BLEManager {
         writeStatusLight()
     }
 
+    /// Spotify has no song (BLE 1.22): the keychain loops a slow rainbow until one plays. Sent with
+    /// every status-light write, so a reconnect picks it up too.
+    func setNothingPlaying(_ on: Bool) {
+        guard on != nothingPlaying else { return }
+        nothingPlaying = on
+        writeStatusLight()
+        if isConnected { log("tx      status light: \(on ? "nothing playing, rainbow" : "song playing")", kind: .tx) }
+    }
+
     /// Settings' colour picker appeared (true) or went away (false).
     func setLightPreview(_ on: Bool) {
         guard on != lightPreviewHold else { return }
@@ -1775,12 +1786,14 @@ extension BLEManager {
         writeStatusLight()
     }
 
-    /// ffe6: [level, style, colour, preview] to boards that said `CAPS:lights` (1.19-1.20 boards ignore
-    /// the 4th byte); just [level] to older ones (they drop any other length, which would lose the level).
+    /// ffe6: [level, style, colour, preview, nothing playing] to boards that said `CAPS:lights`
+    /// (1.19-1.21 boards read only what they know and ignore the rest); just [level] to older ones (they
+    /// drop any other length, which would lose the level).
     private func writeStatusLight() {
         guard let p = peripheral, let c = statusLedChar else { return }
         let bytes: [UInt8] = boardSupportsLights
-            ? [statusLedLevel, UInt8(lightStyle.rawValue), UInt8(loadingColour.rawValue), lightPreviewHold ? 1 : 0]
+            ? [statusLedLevel, UInt8(lightStyle.rawValue), UInt8(loadingColour.rawValue), lightPreviewHold ? 1 : 0,
+               nothingPlaying ? 1 : 0]
             : [statusLedLevel]
         p.writeValue(Data(bytes), for: c, type: .withResponse)
     }

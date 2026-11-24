@@ -203,6 +203,10 @@ static volatile uint32_t transitionMaskW3 = 0xFFFFFFFFu;
 #define TRANSITION_NEXT_TTL_MS 15000
 static volatile uint8_t nextDrawTransition = 0xFF;
 static volatile unsigned long nextDrawTransitionAt = 0;
+// BLE_PROTOCOL 1.22 (ffe6 5th byte, see StatusLedCallbacks): 1 = nothing is playing on Spotify (the app
+// says "Play something on Spotify"): consumer lights loop a slow rainbow while nothing else is lit, until
+// 0 or a disconnect.
+static volatile bool ledIdleRainbow = false;
 #define TRANSITION_SPEED_RANDOM_MIN 0.4f
 #define TRANSITION_SPEED_RANDOM_MAX 1.3f
 static volatile uint8_t transitionSpeedPct[TRANSITION_SPEEDS_COUNT] = {0};
@@ -373,6 +377,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
         nextDrawTransition = 0xFF;
+        ledIdleRainbow = false;  // 1.22: the app sends it again after reconnecting
         peerAddrValid = false;
         uint8_t notReady = 0x00;
         pStatusChar->setValue(&notReady, 1);
@@ -630,6 +635,7 @@ class StatusLedCallbacks: public BLECharacteristicCallbacks {
         std::string value = pCharacteristic->getValue();
         if (value.length() != 1 && value.length() < 3) return;
         statusLedLevel = (uint8_t)value[0];
+        if (value.length() >= 5) ledIdleRainbow = (uint8_t)value[4] != 0;
         if (value.length() >= 4) {
             const bool hold = (uint8_t)value[3] != 0;
             if (hold != ledPreviewHold) {
@@ -1780,6 +1786,7 @@ enum LedMode : uint8_t { LED_OFF, LED_CACHE, LED_NEW, LED_BOTH, LED_WAITING, LED
                          LED_LOADING, LED_RAINBOW, LED_PREVIEW };  // the last three: consumer only
 #define LED_PREVIEW_MS 3200           // consumer: a new loading colour pulses twice so you can see it
 #define LED_PREVIEW_HOLD_MS 120000    // consumer: the colour picker's held preview gives up after this
+#define LED_IDLE_RAINBOW_MS 6000      // consumer, 1.22: one colour wheel while nothing is playing
 #define LED_GREEN_PULSE_MS 500        // consumer: one short green "confirmed" pulse after DRAWN
 #define LED_LOADING_TIMEOUT_MS 12000  // consumer: a load that never finishes (phone gave up) goes dark
 #define LED_ERROR_BLINK_MS 170        // three red blinks, 2.9 a second
@@ -1857,6 +1864,9 @@ static bool ledUpdateConsumer(unsigned long t) {
       if (!deviceConnected) {
         if (ledEverConnected) ledShow(LED_RGB_AMBER, (now % 2000) < 700 ? 200 : 0);  // slow amber blink
         else ledShow(LED_RGB_WHITE, 15 + ledWave(now, 2500) * 200 / 255);            // white breathing
+      } else if (ledIdleRainbow) {
+        // 1.22: nothing playing on Spotify: a slow rainbow, one colour wheel every 6 s.
+        ledShow(ledHue((now % LED_IDLE_RAINBOW_MS) * 1536 / LED_IDLE_RAINBOW_MS), 200);
       } else if (ledCharging()) {
         ledShow(LED_RGB_GREEN, 120);
       } else if (ledBatteryLow() && (now % 10000) < 150) {
@@ -2327,11 +2337,20 @@ void loop() {
     pendingTransition = 0xFF;  // a later cache hit must not inherit this frame's header byte
     // Green as soon as the cover is on screen, not after the SD save (~0.4 s later).
     ledSetMode(LED_DONE);
-        notifyDrawn();
+    notifyDrawn();
+    // The SD save below blocks loop(), so nothing animates the LED meanwhile. The consumer pulse
+    // starts at 0 brightness, so it used to sit dark through the save and be almost over after it:
+    // fresh covers never showed their green (owner, 2026-11-23). Hold green at full during the save,
+    // then run the rest of the pulse from its peak.
+    ledShow(LED_RGB_GREEN, 255);
 
     unsigned long saveStart = millis();
     if (!displayOnly) saveToCache(transferCacheKey);
     unsigned long saveTime = millis() - saveStart;
+    if (ledMode == LED_DONE) {
+      ledModeSince = millis() - (ledConsumer() ? LED_GREEN_PULSE_MS / 2 : 0);
+      ledUpdate();
+    }
 
     // 1.12: tell the app which transition just ran (cache hits already do), before the ACK.
     String freshTransitionMsg = "TRANSITION:" + transitionName;

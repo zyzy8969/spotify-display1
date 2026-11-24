@@ -8,11 +8,18 @@ import SwiftUI
 struct NerdLogView: View {
     @ObservedObject var bleManager: BLEManager
     @ObservedObject var spotifyManager: SpotifyManager
+    /// Nerd mode is showing this (it stays in the tree, collapsed, in normal mode).
+    var active = true
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// The bottom of the list is on screen (set by the sentinel row's appear / disappear).
-    @State private var atBottom = true
+    /// The log keeps scrolling to each new line (owner, 2026-11-23: "scroll constantly"). Only the
+    /// person dragging it upward stops that; reaching the bottom again (or "newest") resumes it. It
+    /// used to follow the bottom row's appear / disappear, which also fired while the log was
+    /// collapsed in normal mode or lines arrived faster than the scroll, so it stopped on its own.
+    @State private var following = true
+    /// The bottom row is on screen.
+    @State private var bottomVisible = true
     /// The full cache history sheet (from the button beside "Cache history").
     @State private var showFullHistory = false
 
@@ -60,19 +67,33 @@ struct NerdLogView: View {
                     Color.clear
                         .frame(height: 16)
                         .id(Self.bottomID)
-                        .onAppear { atBottom = true }
-                        .onDisappear { atBottom = false }
+                        .onAppear {
+                            bottomVisible = true
+                            following = true  // scrolled back down: follow again
+                        }
+                        .onDisappear { bottomVisible = false }
                 }
                 .textSelection(.enabled)
             }
+            // Finger moving down = scrolling up to older lines: stop following. A drag that ends with
+            // the bottom row still in view keeps following.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        if value.translation.height > 8 { following = false }
+                    }
+                    .onEnded { _ in
+                        if bottomVisible { following = true }
+                    }
+            )
             .overlay(alignment: .bottomTrailing) {
-                if !atBottom && !lines.isEmpty {
+                if !following && !lines.isEmpty {
                     newestButton(proxy)
                         .transition(.opacity)
                 }
             }
             .onChange(of: lines.last?.id) { _ in
-                guard atBottom else { return }
+                guard following, active else { return }
                 if reduceMotion {
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 } else {
@@ -87,12 +108,20 @@ struct NerdLogView: View {
                     proxy.scrollTo(Self.bottomID, anchor: .bottom)
                 }
             }
+            .onChange(of: active) { on in
+                // Entering nerd mode: start at the newest line, following.
+                guard on else { return }
+                following = true
+                DispatchQueue.main.async {
+                    proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                }
+            }
         }
     }
 
     private func newestButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
-            atBottom = true
+            following = true
             if reduceMotion {
                 proxy.scrollTo(Self.bottomID, anchor: .bottom)
             } else {

@@ -2,7 +2,16 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.21** (the app can hold the loading-colour preview while its colour picker is open.)
+Version: **1.22** (the keychain loops a rainbow while nothing is playing on Spotify.)
+
+Changes in 1.22 (2026-11-23; owner-approved). Additive: the status-light write (ffe6) may carry a 5th byte,
+`nothing playing`. `1` = the app is signed in to Spotify and no song is loaded (it shows "Play something on
+Spotify"); `0` = a song is loaded (playing or paused). While it is `1` and nothing else is lit, consumer
+lights loop a slow rainbow (one colour wheel per 6 s, below the loading pulse and the green / error lights).
+Cleared on disconnect; the app sends it with every status-light write, so a reconnect restores it.
+Developer lights ignore it. 1.19-1.21 firmware reads only the bytes it knows, so no new `CAPS:`. Also in
+this firmware (no wire change): a fresh cover's green pulse is held at full brightness through its SD save
+instead of sitting dark, and `STATUS_LED_MAX` is ~59% (was ~47%).
 
 Changes in 1.21 (2026-11-23; owner-approved). Additive: the status-light write (ffe6) may carry a 4th byte,
 `preview`. `1` = keep pulsing the loading colour now (the app's colour picker is open; a colour change while
@@ -242,7 +251,7 @@ log or collect unknown messages must ignore it.
 | Image (write + notify) | `0000ffe3-0000-1000-8000-00805f9b34fb` |
 | Message (notify, UTF-8) | `0000ffe4-0000-1000-8000-00805f9b34fb` |
 | Brightness (write, 1 byte 0..255) | `0000ffe5-0000-1000-8000-00805f9b34fb` |
-| Status LED (write: 1 byte level 0..255, 1.13; or 3 bytes level + style + colour, 1.19) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
+| Status LED (write: 1 byte level 0..255, 1.13; or 3 bytes level + style + colour, 1.19; + preview, 1.21; + nothing playing, 1.22) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
 
 Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications after discovery. Firmware signals readiness with status byte `0x01` and/or message `READY`.
 
