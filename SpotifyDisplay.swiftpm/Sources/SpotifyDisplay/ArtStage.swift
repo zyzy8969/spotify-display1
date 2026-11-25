@@ -25,6 +25,9 @@ struct ArtStage: View {
     /// A tap swap is in flight (photo <-> cover): the card already flipped to the new picture, so the
     /// board's transition for it is not mirrored and picture changes cut.
     var quiet = false
+    /// A GIF playing on the keychain (BLE_PROTOCOL 1.25): plays over `image` (its poster) with the
+    /// keychain's own 120 px frames and timing, pixels kept sharp like its screen. Reduce Motion: poster.
+    var animation: UIImage? = nil
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -220,7 +223,10 @@ struct ArtStage: View {
 
     @ViewBuilder
     private func artLayer(_ image: UIImage?) -> some View {
-        if let image {
+        if let animation, !reduceMotion, let image, image === self.image {
+            AnimatedImageView(image: animation, pixelated: true)
+                .frame(width: side, height: side)
+        } else if let image {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()

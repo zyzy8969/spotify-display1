@@ -2,7 +2,31 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.24** (gradient loading colour: the pulse fades through 1-6 chosen colours.)
+Version: **1.25** (GIFs: one 16-byte "ANIM" header + a deflated stream of every frame; the board loops it.)
+
+Changes in 1.25 (2026-11-24; owner-approved). Additive: a new **animation transfer** on the Image
+characteristic (ffe3), announced by `CAPS:anim` in the stats reply (sent only when the board could set
+aside its two 2 MB PSRAM buffers).
+- **Header**, 16 bytes, LE: magic `0x4D494E41` ("ANIM" as bytes) + format `0x01` (raw DEFLATE; the only
+  one) + frame side `120` or `240` + frame count `u16` (1-96) + raw size `u32` + packed size `u32`.
+  Raw size must equal `count * 2 + count * side * side * 2`, at most 2 MiB; packed size 1..2 MiB.
+- **Body**: the packed bytes, chunked like an image. Inflated, they are `count` frame delays (`u16` LE,
+  milliseconds; the board clamps to 30-5000) followed by `count` frames of `side x side` RGB565 LE.
+  A 120 frame is drawn pixel-doubled to 240x240.
+- The board draws frame 0 with a random enabled transition (or the 1.16 one-shot), then sends the usual
+  fresh-frame order (`TRANSITION_START` → `DRAWN` → `TRANSITION` → Image `0x01` → `SUCCESS`) and loops
+  the frames from `loop()` at their delays. Never written to SD (GIPHY's terms forbid storing copies;
+  a power cycle or disconnect ends it). Any non-probe cache check, any drawn image transfer, a new
+  animation or a disconnect stops it; probes and store-only prefetches do not.
+- Errors: `ERROR: Invalid animation header` (bad header) or `ERROR: Animation decompress failed`, both with
+  Image `0x02`. Deliberately not `ERROR: Decompress…`, which makes the app send covers raw.
+- A valid animation header mid-transfer is a resync, like an image header. A 1.24 board answers the
+  16-byte header with `ERROR: Invalid image header`; the app only sends it after `CAPS:anim`.
+- App: GIFs come from GIPHY search (the owner's own API key, Settings or the GIFs tab) or from 4 s of a
+  video from a chosen start (12 fps). Nothing is saved on the phone. Frames are 120x120, stretched to the
+  square (nothing cropped, like photos), rounded to 565 without dither, at most 48. The app's cover plays
+  the same frames while the GIF is up.
+  Python tools: not implemented (they never send animations).
 
 Changes in 1.24 (2026-11-24; owner-approved). Additive: the status-light write (ffe6) may carry
 `[... 12 bytes of 1.23 ..., gradient count, R, G, B x count]`, up to 31 bytes. Byte 13 = how many gradient
@@ -314,6 +338,7 @@ On a hit, the `0x01` reply is sent only **after** the SD load and the full trans
    - Legacy: 4-byte little-endian `uint32` payload size (random transition).
    - 5-byte header: `transitionIndex (1 byte)` + payload size `uint32` LE (4 bytes). `0xFF` keeps random transition. `0xFE` = store-only (1.9): save to SD, don't draw.
    - Compressed (1.11): 10-byte header: `transitionIndex (1)` + `0x01` (raw DEFLATE) + raw size `uint32` LE (`115200`) + packed size `uint32` LE. Only after `CAPS:deflate`.
+   - Animation (1.25): 16-byte "ANIM" header, every GIF frame in one deflated body. Only after `CAPS:anim`; see "Changes in 1.25".
 2. **Body**: consecutive chunks of RGB565 LE (or, after a 10-byte header, of its DEFLATE stream; the board inflates it before drawing). The **iOS app** applies Atkinson dither during quantization before sending; firmware draws nothing while the frame arrives (the previous picture stays up), then draws the whole frame with the header's transition and saves the same bytes to SD. The ESP32 does **not** re-dither.
 
 **Client cancel / new transfer:** If a client stops mid-image and later sends a new transfer, the first write must be a valid 4-byte or 5-byte header. While still receiving a partial frame, firmware treats a valid header (4/5-byte with `115200` payload, or a well-formed 10-byte header) as resync and discards the partial frame.
@@ -359,6 +384,7 @@ message they do not recognise.
 | `CAPS:newsong` | Stats request, after `CAPS:next` (1.17) | iOS: may send the new-song cache check (orange LED) |
 | `DRAWN` | A cover is fully on screen, with the green LED (1.18) | iOS: pop the "new" / "cache" word now |
 | `CAPS:lights` | Stats request, after `CAPS:newsong` (1.19) | iOS: may send the 3-byte status-light write (style + loading colour) |
+| `CAPS:anim` | Stats request, after `CAPS:lights`, only if the animation buffers exist (1.25) | iOS: may send 16-byte "ANIM" transfers (GIFs) |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |

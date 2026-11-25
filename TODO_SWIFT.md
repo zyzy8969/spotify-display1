@@ -149,7 +149,7 @@ Mockups for these live on the design canvas. None are started.
   `ImageProcessor.convertToRGB565()` → existing BLE image path. **No firmware change, no API, no
   licensing question.** Needs a "pinned" mode so the next track does not overwrite it — app-side
   only, since the app decides what to send. Ship this before the GIF work.
-- [ ] **GIF search from an API** `[both]` — mocked up. Extends roadmap item 19.
+- [x] **GIF search from an API** `[both]` — built 2026-11-24 on `feat/gif` (BLE 1.25; GIPHY or one video, nothing saved, see docs/DEV_HANDOFF.md). Notes below are the original research. Extends roadmap item 19.
   **Use GIPHY: Tenor is out.** Tenor's own quickstart carries the notice "As of Jan 2026, we are no
   longer accepting new API clients", so a new key is not obtainable
   (<https://developers.google.com/tenor/guides/quickstart>).

@@ -48,5 +48,7 @@
 	<string>Find and send album art to your Spotify Display over Bluetooth.</string>
 	<key>SpotifyClientID</key>
 	<string></string>
+	<key>GiphyAPIKey</key>
+	<string></string>
 </dict>
 </plist>

@@ -54,10 +54,12 @@ enum ImageProcessor {
     static let applyColorGrade = false
 
     /// Raw DEFLATE (RFC 1951, no zlib header): what Apple's `COMPRESSION_ZLIB` emits and what the
-    /// board's ROM `tinfl_decompress` reads (BLE_PROTOCOL 1.11). Nil when it would not be smaller.
-    static func deflateRaw(_ data: Data) -> Data? {
+    /// board's ROM `tinfl_decompress` reads (BLE_PROTOCOL 1.11). Nil when it would not be smaller,
+    /// unless `allowLarger` (animations, 1.25, which are always sent deflated).
+    static func deflateRaw(_ data: Data, allowLarger: Bool = false) -> Data? {
         guard !data.isEmpty else { return nil }
-        let capacity = data.count  // bigger than the input = not worth sending
+        // Bigger than the input = not worth sending. Stored blocks add ~5 bytes per 64 KB.
+        let capacity = allowLarger ? data.count + data.count / 64 + 1024 : data.count
         var out = Data(count: capacity)
         let written = out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
             data.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Int in
@@ -66,7 +68,7 @@ enum ImageProcessor {
                 return compression_encode_buffer(d, capacity, s, data.count, nil, COMPRESSION_ZLIB)
             }
         }
-        guard written > 0, written < data.count else { return nil }
+        guard written > 0, allowLarger || written < data.count else { return nil }
         out.count = written
         return out
     }

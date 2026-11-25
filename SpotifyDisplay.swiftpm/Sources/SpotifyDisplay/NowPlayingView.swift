@@ -118,6 +118,10 @@ struct NowPlayingScreen: View {
     @State private var modeGen = 0
 
     @State private var photoError: String?
+    /// The alert is about a GIF (its title says so).
+    @State private var photoErrorIsGIF = false
+    /// The GIF being downloaded / sent; a newer tap cancels it.
+    @State private var gifTask: Task<Void, Never>?
     /// The Photos page (header icon).
     @State private var showPhotos = false
     /// What the keychain shows right now, decoded once per change instead of on every render.
@@ -192,14 +196,15 @@ struct NowPlayingScreen: View {
                 onChoose: { jpeg in
                     PhotoLibrary.shared.add(jpeg)  // to the front of the list
                     sendPhoto(jpeg)
-                }
+                },
+                onGIF: { choice in sendGIF(choice) }
             )
             .environment(\.theme, theme)
             .preferredColorScheme(theme.colorScheme)
         }
-        .alert("Photo", isPresented: Binding(
+        .alert(photoErrorIsGIF ? "GIF" : "Photo", isPresented: Binding(
             get: { photoError != nil },
-            set: { if !$0 { photoError = nil } }
+            set: { if !$0 { photoError = nil; photoErrorIsGIF = false } }
         )) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -423,6 +428,7 @@ struct NowPlayingScreen: View {
 
     /// Same path as an upload: `BLEManager.sendPhoto(jpeg:)`.
     private func sendPhoto(_ jpeg: Data) {
+        gifTask?.cancel()  // a GIF still downloading must not land over this photo
         Task {
             do {
                 try await bleManager.sendPhoto(jpeg: jpeg)
@@ -433,10 +439,48 @@ struct NowPlayingScreen: View {
         }
     }
 
+    /// Shows a GIF on the keychain (BLE_PROTOCOL 1.25). Like a photo it pauses Spotify until the cover is
+    /// tapped. GIPHY GIFs are downloaded here each time (never stored, GIPHY's terms). A newer GIF cancels
+    /// one still downloading, so the last one tapped is the one shown.
+    private func sendGIF(_ choice: GifChoice) {
+        gifTask?.cancel()
+        gifTask = Task {
+            do {
+                let animation: KeychainAnimation
+                switch choice {
+                case .video(let made):
+                    animation = made
+                case .giphy(let gif):
+                    let data = try await GiphyClient.download(gif)
+                    try Task.checkCancellation()
+                    guard let built = await Task.detached(priority: .userInitiated, operation: {
+                        AnimationPrep.fromGIF(data)
+                    }).value else {
+                        showGIFError("Could not read that GIF.")
+                        return
+                    }
+                    animation = built
+                }
+                try Task.checkCancellation()
+                try await bleManager.sendAnimation(animation)
+            } catch is CancellationError {
+            } catch let error as URLError where error.code == .cancelled {
+            } catch {
+                showGIFError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func showGIFError(_ message: String) {
+        photoErrorIsGIF = true
+        photoError = message
+    }
+
     /// Takes the uploaded photo off the display and goes back to the current Spotify cover. The song is
     /// already known and its cover is on the keychain's card, so it is drawn straight away (no Spotify
     /// lookup first); the board picks one of the switched-on transitions and the cover here mirrors it.
     private func backToSpotify() {
+        gifTask?.cancel()  // a GIF still downloading must not land over the song
         bleManager.endPhotoHold()
         Task { await spotifyManager.showCurrentSongAgain(bleManager: bleManager) }
     }
@@ -666,7 +710,9 @@ struct NowPlayingScreen: View {
             side: side,
             label: artLabel,
             value: artValue,
-            event: bleManager.transitionEvent
+            event: bleManager.transitionEvent,
+            // A GIF on the keychain plays here too, frame for frame (only while it is the front card).
+            animation: shownIsPhoto ? bleManager.playingAnimation : nil
         )
     }
 

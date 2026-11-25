@@ -20,6 +20,7 @@ struct SettingsView: View {
     @AppStorage(TransitionPrefs.storageKey) private var disabledTransitionsRaw = ""
     /// Nerd mode is available: the main screen shows its terminal icon.
     @AppStorage(NerdMode.enabledKey) private var nerdEnabled = false
+    @AppStorage(GiphyClient.keyDefaultsKey) private var giphyKey = ""
     /// Nerd layout currently on (the terminal icon's state); switched off with the feature.
     @AppStorage(NerdMode.layoutKey) private var nerdLayout = false
     @State private var showTransitions = false
@@ -138,6 +139,8 @@ struct SettingsView: View {
                     cacheRows
                     ThemedDivider()
                     clientIDRows
+                    ThemedDivider()
+                    giphyKeyRows
                     // Which cloud build this is (the GitHub Actions run number), to match reports to builds.
                     Text("app build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?")")
                         .themeText(.footnote)
@@ -733,6 +736,36 @@ struct SettingsView: View {
                     .themeText(.footnote)
                     .foregroundStyle(theme.inkSoft)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: GIPHY
+
+    /// The owner's own GIPHY API key for the GIFs tab (developers.giphy.com, free beta key). Kept on this
+    /// phone only, never in the repo.
+    private var giphyKeyRows: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("GIPHY API key")
+                .themeText(.row)
+                .foregroundStyle(theme.ink)
+                .accessibilityAddTraits(.isHeader)
+            Text(GiphyClient.apiKey == nil
+                 ? "Needed to search GIFs on the Photos page. Get a free key at developers.giphy.com (Create an App, API)."
+                 : "Set. GIF search on the Photos page uses it.")
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 6) {
+                TextField("", text: $giphyKey, prompt: Text("Paste your GIPHY key").foregroundColor(theme.inkFaint))
+                    .themeText(.rowValue)
+                    .foregroundStyle(theme.ink)
+                    .keyboardType(.asciiCapable)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .frame(minHeight: 44)
+                    .accessibilityLabel("GIPHY API key")
+                ThemedDivider()
             }
         }
     }

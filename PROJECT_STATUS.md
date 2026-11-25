@@ -6,6 +6,12 @@ Branch: `feat/faster-transfer` (worktree `C:\Users\Zyan\Desktop\spotify-display1
 **#62** (app shows "app build 62" at the bottom of Settings). Firmware from the same commit is flashed on the
 keychain (COM6). BLE protocol **1.18** (`docs/BLE_PROTOCOL.md`).
 
+## 2026-11-24: GIFs (`feat/gif`, BLE 1.25)
+
+GIFs tab on the Photos page (GIPHY search or 4 s of a video), played on the keychain from PSRAM and on the
+app's cover. Awaiting CI build and device test; details in `docs/DEV_HANDOFF.md`, checks in
+`docs/VALIDATION_CHECKLIST.md` "GIFs".
+
 ## In progress — owner will continue (NOT done, do not treat as settled)
 
 1. **Status light / app line colours ("lighting situation").** Owner's rules (2026-11-23, branch

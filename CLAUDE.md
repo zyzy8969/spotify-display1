@@ -15,7 +15,10 @@ listening as album art. Three cooperating parts:
 - **Python tools** (`python/`) — archived prototype sender/color-tuning scripts. Not the active
   client; kept for reference.
 
-Planned next: GIF support, peer-to-peer connection (see `docs/FUTURE_*.md`).
+GIFs (BLE 1.25, 2026-11-24): GIPHY search or 4 s of one video on the Photos page's GIFs tab (nothing saved;
+frames stretched to square), 120x120 frames held in PSRAM and looped by `animTick()` in `loop()`; never on SD.
+The app's cover plays the same frames (`BLEManager.playingAnimation`). Planned next: peer-to-peer connection (see
+`docs/FUTURE_*.md`).
 
 ## Developer environment constraints (important)
 
@@ -214,9 +217,9 @@ night = chalkboard) and **Quiet** (system font, small colour accents; night = ne
 original, day = light grey). The theme is picked in Settings and stored under
 `@AppStorage("uiTheme")`; each theme's day/night choice under `uiDark.<theme>`. The
 older monochrome `SpotifyDisplay_UI_Spec.md` is superseded; only its live strip under the art
-and its "debug stats behind a Settings toggle" ideas were kept. The canvas's live serial log,
-"+ gif" upload and 240x240 device-screen boards need firmware or BLE protocol changes and are
-not built; ask before starting them.
+and its "debug stats behind a Settings toggle" ideas were kept. GIFs are built (a tab on the Photos
+page, not the canvas's "+ gif" button). The canvas's live serial log and 240x240 device-screen boards
+need firmware or BLE protocol changes and are not built; ask before starting them.
 
 ## Hardware pins (do not change without asking)
 

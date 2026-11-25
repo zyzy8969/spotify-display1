@@ -92,6 +92,11 @@ struct PhotoLibraryView: View {
     let onPicked: (PhotosPickerItem) -> Void
     /// A saved photo chosen (its exact JPEG).
     let onChoose: (Data) -> Void
+    /// A GIF chosen on the GIFs tab (BLE_PROTOCOL 1.25): from GIPHY, or made from a video.
+    let onGIF: (GifChoice) -> Void
+
+    private enum Tab: Hashable { case photos, gifs }
+    @State private var tab = Tab.photos
 
     @ObservedObject private var library = PhotoLibrary.shared
     @Environment(\.dismiss) private var dismiss
@@ -106,7 +111,15 @@ struct PhotoLibraryView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                SheetHeader(title: "Photos") { dismiss() }
+                SheetHeader(title: tab == .photos ? "Photos" : "GIFs") { dismiss() }
+                Picker("Show", selection: $tab) {
+                    Text("Photos").tag(Tab.photos)
+                    Text("GIFs").tag(Tab.gifs)
+                }
+                .pickerStyle(.segmented)
+                if tab == .gifs {
+                    GifPageContent(onSend: onGIF) { dismiss() }
+                } else {
                 // Several at once go straight into Saved; a single pick is shown on the keychain.
                 // `.current`: the photo as stored (often HEIC), not transcoded to JPEG first, which was
                 // the slow part of loading one; ImageIO reads HEIC directly.
@@ -181,6 +194,7 @@ struct PhotoLibraryView: View {
                         .accessibilityHint("Shows it on the display")
                     }
                 }
+                }  // photos tab
             }
             .padding(.horizontal, theme.margin + 4)
             .padding(.bottom, 32)

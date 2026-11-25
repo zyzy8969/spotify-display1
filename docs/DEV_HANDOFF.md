@@ -1,8 +1,17 @@
 # Dev handoff — iOS BLE / background work
 
-Last updated: 2026-11-22
+Last updated: 2026-11-24
 
 ## What was committed
+
+- **2026-11-24, `feat/gif` (BLE 1.25, awaiting CI and device test):** GIFs. Photos page gains a GIFs tab:
+  GIPHY search (owner's own key, Settings or the tab; nothing stored, GIPHY's terms) or 4 s of one video
+  from a chosen start. 120x120 frames, stretched, no dither, max 48, one deflated "ANIM" transfer; firmware
+  keeps them in two 2 MB PSRAM buffers and loops them in `loop()` (`animTick`), never on SD. The app's cover
+  plays the same frames (`BLEManager.playingAnimation`). Shared `writeTransfer` now carries covers, photos
+  and GIFs. Firmware builds with PlatformIO; Swift reviewed twice (ECC) but only CI compiles it. Script:
+  `docs/VALIDATION_CHECKLIST.md` "GIFs". The start-up picture (starred photos) is a separate branch,
+  `feat/startup-picture`; both touch `PhotoLibrary.swift`, `SettingsView.swift` and `BLEManager.swift`.
 
 - **2026-11-22 (later), `feat/faster-transfer`, builds #48-#62 (BLE 1.15-1.18), all pushed, last firmware
   flashed:** build-46 transitions merged into the shared core, 0.4-1.3x speeds, swap Card Flip, photos cached

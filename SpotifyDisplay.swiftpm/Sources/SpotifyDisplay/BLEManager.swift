@@ -201,6 +201,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var boardSupportsNextTransition = false
     /// Board said `CAPS:newsong` (BLE_PROTOCOL 1.17): it takes the new-song cache check.
     @Published private(set) var boardSupportsNewSong = false
+    /// Board said `CAPS:anim` (BLE_PROTOCOL 1.25): it takes 16-byte "ANIM" headers and plays GIFs.
+    @Published private(set) var boardSupportsAnimation = false
     /// What the keychain's status LED shows right now, for the app's line under the cover. Every change
     /// is tied to a BLE message the board sends at the same moment it changes the LED (firmware
     /// `ledSetMode` next to the notify), so the two stay in step (owner, 2026-11-23):
@@ -247,7 +249,13 @@ final class BLEManager: NSObject, ObservableObject {
     /// Card Flip (header index 23).
     static let swapFlipTransition: UInt8 = 23
     /// A photo the person uploaded is on the display: Spotify sends are paused until `endPhotoHold()`.
-    @Published private(set) var photoHold = false
+    @Published private(set) var photoHold = false {
+        // Spotify takes the display back (or the link dropped): no GIF is playing any more.
+        didSet { if !photoHold { playingAnimation = nil } }
+    }
+    /// The GIF on the keychain right now (BLE_PROTOCOL 1.25), as the cover plays it: the board's own
+    /// 120 px frames and timing. nil when anything else is shown.
+    @Published private(set) var playingAnimation: UIImage?
     /// The last photo the person uploaded (square JPEG), so tapping the cover can show it again.
     /// In memory only: gone when the app quits.
     @Published private(set) var lastPhotoJPEG: Data?
@@ -291,6 +299,8 @@ final class BLEManager: NSObject, ObservableObject {
     private let nextTransitionMagic = UInt32(0xCAC4E1ED)
     /// BLE_PROTOCOL 1.11: image header format byte for a raw-DEFLATE payload (10-byte header).
     private let deflateFormat: UInt8 = 0x01
+    /// BLE_PROTOCOL 1.25: first 4 bytes of the 16-byte animation header ("ANIM").
+    private let animMagic = UInt32(0x4D49_4E41)
     /// Board said `CAPS:deflate` (in reply to the stats request sent on every connect). Cleared on
     /// disconnect, and for the rest of the connection if the board ever fails to inflate a frame.
     private var boardSupportsDeflate = false
@@ -629,6 +639,7 @@ final class BLEManager: NSObject, ObservableObject {
             artBehindPhoto = (id, art)
         }
         photoHold = true
+        playingAnimation = nil  // a GIF on the cover gives way to the picture coming
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         prepareDrawTransition()
@@ -1039,10 +1050,44 @@ final class BLEManager: NSObject, ObservableObject {
         } else {
             withUnsafeBytes(of: UInt32(imagePayloadBytes).littleEndian) { header.append(contentsOf: $0) }
         }
-        p.writeValue(header, for: img, type: .withResponse)
         if !storeOnly {
             log("tx      image header (\(displayOnly ? "photo, no SD save" : (chosenTransition == nil ? "board's pick" : "chosen transition"))), \(payload.count / 1024) KB\(packed != nil ? " deflated" : " raw")", kind: .tx)
         }
+        try await writeTransfer(header: header, payload: payload, peripheral: p, characteristic: img,
+                                epochAtStart: epochAtStart, showProgress: !storeOnly)
+        let total = payload.count
+
+        try ensureTransferEpoch(epochAtStart)
+
+        // The board ACKs only after its SD save, so a saved frame (everything but a photo) is one more
+        // cover on the card right now: bump the count at once, prefetches included (they otherwise
+        // never refreshed it). The board's own count, read after every drawn frame and on reconnect,
+        // corrects it if a save didn't add a file.
+        if !displayOnly, let n = sdCacheEntryCount {
+            sdCacheEntryCount = n + 1
+        }
+        if storeOnly { return total }
+        log("rx      image ACK", kind: .rx)
+        if drawRequestGen == myDrawGen { boardFrame = rgb565 }
+
+        isTransferring = false
+        transferProgress = 0
+        statusMessage = "Sent to display"
+        setLivePhase("idle")
+
+        Task { @MainActor in
+            try? await self.refreshSDCacheCount()
+        }
+        return total
+    }
+
+    /// Writes `header` (with response), then `payload` in MTU-sized chunks, then waits for the board's ACK
+    /// (Image `0x01` / `SUCCESS`; an `ERROR:` fails it) for up to 8 s. Covers, photos and GIFs (1.25).
+    private func writeTransfer(header: Data, payload: Data, peripheral p: CBPeripheral,
+                               characteristic img: CBCharacteristic, epochAtStart: UInt64,
+                               showProgress: Bool, ackTimeoutNs: UInt64 = 8_000_000_000) async throws {
+        let storeOnly = !showProgress
+        p.writeValue(header, for: img, type: .withResponse)
 
         try ensureTransferEpoch(epochAtStart)
 
@@ -1095,7 +1140,7 @@ final class BLEManager: NSObject, ObservableObject {
                 }
                 do {
                     // Firmware ACKs after the whole frame is drawn (with its transition) and saved; typically <2 s.
-                    try await Task.sleep(nanoseconds: 8_000_000_000)
+                    try await Task.sleep(nanoseconds: ackTimeoutNs)
                 } catch {
                     return
                 }
@@ -1109,29 +1154,110 @@ final class BLEManager: NSObject, ObservableObject {
 
 
         cancelImageSuccessTimeoutTask()
+    }
 
-        try ensureTransferEpoch(epochAtStart)
-
-        // The board ACKs only after its SD save, so a saved frame (everything but a photo) is one more
-        // cover on the card right now: bump the count at once, prefetches included (they otherwise
-        // never refreshed it). The board's own count, read after every drawn frame and on reconnect,
-        // corrects it if a save didn't add a file.
-        if !displayOnly, let n = sdCacheEntryCount {
-            sdCacheEntryCount = n + 1
+    /// Shows a GIF on the display (BLE_PROTOCOL 1.25, needs `CAPS:anim`): every frame in one deflated
+    /// transfer, which the board keeps in memory (never on its card) and loops until something else is
+    /// drawn. Like a photo, Spotify sends stay paused (`photoHold`) until `endPhotoHold()`.
+    func sendAnimation(_ animation: KeychainAnimation) async throws {
+        guard boardSupportsAnimation else {
+            throw SpotifyDisplayError.bleTransferRejected("This display's firmware is too old for GIFs. Flash the latest firmware.")
         }
-        if storeOnly { return total }
-        log("rx      image ACK", kind: .rx)
-        if drawRequestGen == myDrawGen { boardFrame = rgb565 }
-
-        isTransferring = false
-        transferProgress = 0
-        statusMessage = "Sent to display"
-        setLivePhase("idle")
-
-        Task { @MainActor in
-            try? await self.refreshSDCacheCount()
+        holdTransferBackgroundTime()
+        defer { releaseTransferBackgroundTime() }
+        let hadHold = photoHold
+        if !hadHold, let id = lastConfirmedTrackId, let art = currentAlbumArt {
+            artBehindPhoto = (id, art)
         }
-        return total
+        photoHold = true
+        playingAnimation = nil  // a GIF on the cover gives way to the picture coming
+        cancelOngoingTransfer()
+        if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
+        prepareDrawTransition()
+        popupForNextDraw = nil
+        trackForNextDraw = nil
+        checkIsSavedAhead = false
+        boardLight = .off
+        loadingSince = nil
+
+        sendStageGen &+= 1
+        let myStageGen = sendStageGen
+        defer { if sendStageGen == myStageGen { sendStage = .idle } }
+        let epochAtStart = transferEpoch
+        let totalStart = CFAbsoluteTimeGetCurrent()
+        do {
+            // The view takes the poster when the stage goes back to idle with a new log entry.
+            sendStage = .preparingFresh
+            currentAlbumArt = animation.posterJPEG
+            setLivePhase("gif: compressing…")
+            let convertStart = CFAbsoluteTimeGetCurrent()
+            // Everything heavy off the main thread: payload, deflate, the mirror's first frame, the cover's
+            // animation.
+            let prepared = await Task.detached(priority: .userInitiated, operation: { () -> (Data, Data?, Data, UIImage?) in
+                let raw = animation.rawPayload
+                return (raw, ImageProcessor.deflateRaw(raw, allowLarger: true), animation.firstFrame240,
+                        animation.previewImage())
+            }).value
+            let raw = prepared.0
+            let firstFrame = prepared.2
+            let preview = prepared.3
+            guard let packed = prepared.1 else {
+                throw SpotifyDisplayError.conversionFailed
+            }
+            let convertMs = ms(since: convertStart)
+            try ensureTransferEpoch(epochAtStart)
+            try ensureGattReady()
+            guard let p = peripheral, let img = imageChar else { throw SpotifyDisplayError.notConnected }
+
+            awaitingImageComplete = true
+            defer { awaitingImageComplete = false }
+            transferContinuation?.resume(throwing: CancellationError())
+            transferContinuation = nil
+
+            // The mirror plays the board's transition into the first frame, doubled like the board draws it.
+            noteDrawRequest(.image(firstFrame))
+            let myDrawGen = drawRequestGen
+            sendChosenTransition()  // a photo <-> cover swap's one-shot flip applies to GIFs too
+
+            var header = Data()
+            withUnsafeBytes(of: animMagic.littleEndian) { header.append(contentsOf: $0) }
+            header.append(deflateFormat)
+            header.append(UInt8(KeychainAnimation.side))
+            withUnsafeBytes(of: UInt16(animation.count).littleEndian) { header.append(contentsOf: $0) }
+            withUnsafeBytes(of: UInt32(raw.count).littleEndian) { header.append(contentsOf: $0) }
+            withUnsafeBytes(of: UInt32(packed.count).littleEndian) { header.append(contentsOf: $0) }
+            log("tx      animation header, \(animation.count) frames, \(raw.count / 1024) KB -> \(packed.count / 1024) KB deflated", kind: .tx)
+
+            boardLight = .new  // the board shows its loading light while the GIF arrives
+            loadingSince = Date()
+            setLivePhase("gif: sending BLE…")
+            let uploadStart = CFAbsoluteTimeGetCurrent()
+            // The board inflates up to ~1.4 MB and draws the transition before it ACKs: allow 20 s.
+            try await writeTransfer(header: header, payload: packed, peripheral: p, characteristic: img,
+                                    epochAtStart: epochAtStart, showProgress: true,
+                                    ackTimeoutNs: 20_000_000_000)
+            try ensureTransferEpoch(epochAtStart)
+            let uploadMs = ms(since: uploadStart)
+            log("rx      animation ACK", kind: .rx)
+            if drawRequestGen == myDrawGen { boardFrame = firstFrame }
+            playingAnimation = photoHold ? preview : nil
+            isTransferring = false
+            transferProgress = 0
+            statusMessage = "Sent to display"
+
+            let totalMs = ms(since: totalStart)
+            lastTransferResult = "GIF shown  \(secondsLabel(fromMs: totalMs))"
+            boardAckStatus = "Board ACK: GIF playing (\(animation.count) frames)"
+            appendLog(TransferLogEntry(
+                cacheHit: false, transitionName: lastTransitionName, cacheCheckMs: 0,
+                downloadMs: nil, convertMs: convertMs, uploadMs: uploadMs,
+                totalMs: totalMs, outcome: "gif"
+            ))
+            setLivePhase("last: GIF \(secondsLabel(fromMs: totalMs))")
+        } catch {
+            if !hadHold { photoHold = false }
+            throw error
+        }
     }
 
     enum PrefetchOutcome { case alreadyCached, stored, noArt }
@@ -1234,6 +1360,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardSupports128 = false
         boardSupportsNextTransition = false
         boardSupportsNewSong = false
+        boardSupportsAnimation = false
         boardLight = .off  // the board turns its LED off on disconnect
         flipNextDraw = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
@@ -1348,6 +1475,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         if text == "CAPS:next" { boardSupportsNextTransition = true }
         if text == "CAPS:newsong" { boardSupportsNewSong = true }
+        if text == "CAPS:anim" { boardSupportsAnimation = true }
         if text == "CAPS:lights" {
             // Repeated on every stats reply: send the style + colour once per connection.
             let firstTime = !boardSupportsLights

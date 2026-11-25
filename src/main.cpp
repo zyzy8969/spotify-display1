@@ -84,6 +84,31 @@ static tinfl_decompressor* inflator = nullptr;
 // composeBuffer = scratch frame those transitions build before pushing it to the panel.
 static uint16_t* prevBuffer = nullptr;
 static uint16_t* composeBuffer = nullptr;
+
+// BLE_PROTOCOL 1.25 animations (GIFs). One transfer carries every frame, deflated: it lands in
+// animPacked, loop() inflates it into animFrames = [count x u16 LE delay ms][count frames, side x side
+// RGB565 LE]. Frames are 120x120 (drawn doubled) or 240x240. PSRAM only, never written to SD: a GIF is
+// gone after a power cycle (GIPHY's terms forbid storing copies). Without these buffers the board never
+// says CAPS:anim.
+#define ANIM_MAGIC 0x4D494E41u  // "ANIM" as bytes
+#define ANIM_HEADER_LEN 16
+#define ANIM_MAX_FRAMES 96
+#define ANIM_MAX_RAW (2u * 1024u * 1024u)
+#define ANIM_MIN_DELAY_MS 30
+#define ANIM_MAX_DELAY_MS 5000
+static uint8_t* animFrames = nullptr;
+static uint8_t* animPacked = nullptr;
+struct AnimHeader {
+  uint16_t side;
+  uint16_t count;
+  uint32_t rawBytes;
+  uint32_t packedBytes;
+};
+// The animation on the panel. loop() only.
+static bool animActive = false;
+static AnimHeader anim = {0, 0, 0, 0};
+static uint16_t animIndex = 0;
+static unsigned long animNextAt = 0;
 // False whenever a non-cover screen (startup / ready / Bluetooth) is up: the old frame is then
 // treated as black instead of a stale cover.
 static bool panelShowsImage = false;
@@ -147,6 +172,12 @@ uint32_t receivedBytes = 0;
 bool rxCompressed = false;
 // Snapshot of rxCompressed when the frame completed (callback resets state right after).
 volatile bool completedCompressed = false;
+// 1.25: the transfer being received is an animation (chunks go to animPacked), and its header.
+bool rxAnim = false;
+AnimHeader rxAnimHeader = {0, 0, 0, 0};
+// Snapshots taken when an animation transfer completes.
+volatile bool completedAnim = false;
+AnimHeader completedAnimHeader = {0, 0, 0, 0};
 #define IMAGE_FORMAT_DEFLATE 0x01
 uint8_t currentCacheKey[16];
 // Key of the frame being received, snapshotted when its header arrives. A later cache check
@@ -505,19 +536,55 @@ static bool parseImageHeader(const std::string& v, ImageHeader& h) {
     return false;
 }
 
-// Inflates one raw-DEFLATE frame (BLE_PROTOCOL 1.11) into `out` (IMAGE_SIZE bytes). loop() only:
-// takes ~10-30 ms. True only if the stream ends cleanly with exactly IMAGE_SIZE bytes.
-static bool inflateFrame(const uint8_t* in, size_t inBytes, uint8_t* out, size_t* outBytes) {
+// 1.25 animation header, 16 bytes: magic "ANIM" (u32 LE 0x4D494E41) + format (0x01 = raw DEFLATE, the
+// only one) + frame side (120 or 240) + frame count u16 LE + raw size u32 LE + packed size u32 LE.
+// Raw = count * 2 (delays) + count * side * side * 2. No allocation: safe on BTC_TASK.
+static bool parseAnimHeader(const std::string& v, AnimHeader& a) {
+    if (v.length() != ANIM_HEADER_LEN || decodeLE32At(v, 0) != ANIM_MAGIC) return false;
+    if (!animFrames || !animPacked || !inflator) return false;
+    if ((uint8_t)v[4] != IMAGE_FORMAT_DEFLATE) return false;
+    a.side = (uint8_t)v[5];
+    a.count = (uint16_t)((uint8_t)v[6] | ((uint8_t)v[7] << 8));
+    a.rawBytes = decodeLE32At(v, 8);
+    a.packedBytes = decodeLE32At(v, 12);
+    if (a.side != 120 && a.side != 240) return false;
+    if (a.count < 1 || a.count > ANIM_MAX_FRAMES) return false;
+    const uint32_t expected = (uint32_t)a.count * 2u + (uint32_t)a.count * a.side * a.side * 2u;
+    if (a.rawBytes != expected || a.rawBytes > ANIM_MAX_RAW) return false;
+    return a.packedBytes > 0 && a.packedBytes <= ANIM_MAX_RAW;
+}
+
+// Inflates a whole raw-DEFLATE stream into `out`. loop() only. True only if the stream ends cleanly
+// with exactly `expected` bytes.
+static bool inflateInto(const uint8_t* in, size_t inBytes, uint8_t* out, size_t expected, size_t* outBytes) {
     *outBytes = 0;
     if (!in || !out || !inflator || inBytes == 0) return false;
     tinfl_init(inflator);
     size_t inSize = inBytes;
-    size_t outSize = IMAGE_SIZE;
-    // Whole input present (no HAS_MORE_INPUT); output buffer holds the whole frame.
+    size_t outSize = expected;
+    // Whole input present (no HAS_MORE_INPUT); output buffer holds the whole result.
     tinfl_status st = tinfl_decompress(inflator, in, &inSize, out, out, &outSize,
                                        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
     *outBytes = outSize;
-    return st == TINFL_STATUS_DONE && outSize == IMAGE_SIZE;
+    return st == TINFL_STATUS_DONE && outSize == expected;
+}
+
+// Inflates one raw-DEFLATE frame (BLE_PROTOCOL 1.11) into `out` (IMAGE_SIZE bytes). ~10-30 ms.
+static bool inflateFrame(const uint8_t* in, size_t inBytes, uint8_t* out, size_t* outBytes) {
+    return inflateInto(in, inBytes, out, IMAGE_SIZE, outBytes);
+}
+
+// Starts receiving a 1.25 animation (header already validated). BTC_TASK: only sets state.
+static void beginAnimReceive(const AnimHeader& a) {
+    pendingTransition = TRANSITION_DISPLAY_ONLY;  // drawn with a random transition, never saved
+    expectedSize = a.packedBytes;
+    rxCompressed = true;
+    rxAnim = true;
+    rxAnimHeader = a;
+    receivedBytes = 0;
+    imageState = RECEIVING_DATA;
+    Serial.printf("BLE: Expecting animation, %u frames %ux%u, %u bytes deflated\n", (unsigned)a.count,
+                  (unsigned)a.side, (unsigned)a.side, (unsigned)a.packedBytes);
 }
 
 // Image transfer callbacks - handle image data reception
@@ -527,7 +594,19 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
         std::string value = pCharacteristic->getValue();
         ImageHeader hdr;
 
+        AnimHeader animHdr;
+
         if (imageState == WAITING_FOR_SIZE) {
+            // 1.25 animation header (16 bytes, "ANIM" magic).
+            if (value.length() == ANIM_HEADER_LEN && decodeLE32At(value, 0) == ANIM_MAGIC) {
+                if (parseAnimHeader(value, animHdr)) {
+                    beginAnimReceive(animHdr);
+                } else {
+                    Serial.println("ERROR: Bad animation header");
+                    notifyImageTransferRejected("ERROR: Invalid animation header");
+                }
+                return;
+            }
             if (!isImageHeaderLength(value.length())) {
                 Serial.printf("ERROR: Expected 4/5/10-byte header, got %d\n", value.length());
                 notifyImageTransferRejected("ERROR: Invalid image header");
@@ -544,18 +623,29 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
             pendingTransition = hdr.transition;
             expectedSize = hdr.payloadBytes;
             rxCompressed = hdr.compressed;
+            rxAnim = false;
             Serial.printf("BLE: Expecting %u bytes%s\n", (unsigned)expectedSize, rxCompressed ? " (deflate)" : "");
             memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
             receivedBytes = 0;
             imageState = RECEIVING_DATA;
 
         } else if (imageState == RECEIVING_DATA) {
+            // New animation header mid-stream (1.25): same resync as an image header.
+            if (value.length() == ANIM_HEADER_LEN && parseAnimHeader(value, animHdr)) {
+                Serial.println("BLE: Animation header (resync) — discarding partial transfer");
+                memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
+                imageTransferComplete = false;
+                completedImageBytes = 0;
+                beginAnimReceive(animHdr);
+                return;
+            }
             // New image header mid-stream: client cancelled and started a fresh transfer
             if (isImageHeaderLength(value.length()) && parseImageHeader(value, hdr)) {
                 Serial.println("BLE: Image header (resync) — discarding partial frame");
                 pendingTransition = hdr.transition;
                 expectedSize = hdr.payloadBytes;
                 rxCompressed = hdr.compressed;
+                rxAnim = false;
                 memcpy(transferCacheKey, currentCacheKey, sizeof(transferCacheKey));
                 receivedBytes = 0;
                 // Prevent a stale completion from a prior partial frame from firing in loop().
@@ -577,7 +667,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
 
             // Copy chunk to the receive buffer (memcpy is fast, safe in callback). Never imageBuffer:
             // that holds the last complete picture, which loop() may be reading for a transition.
-            uint8_t* dst = rxCompressed ? rxPacked : (uint8_t*)rxBuffer;
+            uint8_t* dst = rxAnim ? animPacked : (rxCompressed ? rxPacked : (uint8_t*)rxBuffer);
             memcpy(dst + receivedBytes, value.data(), chunkSize);
             receivedBytes += chunkSize;
 
@@ -592,6 +682,8 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 Serial.println("BLE: Image transfer complete");
                 completedImageBytes = receivedBytes;
                 completedCompressed = rxCompressed;
+                completedAnim = rxAnim;
+                completedAnimHeader = rxAnimHeader;
 
                 // Set flag for loop() to handle inflate/display/save
                 // CRITICAL: Don't do display/SD card work here - BTC_TASK stack is tiny!
@@ -602,6 +694,7 @@ class ImageTransferCallbacks: public BLECharacteristicCallbacks {
                 receivedBytes = 0;
                 expectedSize = 0;
                 rxCompressed = false;
+                rxAnim = false;
 
                 // Return immediately - let loop() do the heavy work
             }
@@ -1120,6 +1213,7 @@ void showBluetoothConnectionScreen(uint16_t yesColor, uint16_t noColor) {
 }
 
 void resetToWaitingScreen() {
+    animActive = false;  // 1.25: a disconnect ends a GIF (the app sends it again if wanted)
     panelShowsImage = false;
     showingStartupScreen = true;
     pulseIsWhite = false;
@@ -1425,6 +1519,18 @@ void setup() {
     inflator = (tinfl_decompressor*)ps_malloc(sizeof(tinfl_decompressor));
   }
   Serial.printf("Deflate receive: %s\n", (rxPacked && inflator) ? "ok" : "MISSING (raw frames only)");
+  // 1.25 animations: two 2 MB PSRAM buffers. Both or neither; without them no CAPS:anim.
+  if (psramFound() && rxPacked && inflator) {
+    animFrames = (uint8_t*)ps_malloc(ANIM_MAX_RAW);
+    animPacked = (uint8_t*)ps_malloc(ANIM_MAX_RAW);
+    if (!animFrames || !animPacked) {
+      free(animFrames);
+      free(animPacked);
+      animFrames = animPacked = nullptr;
+    }
+  }
+  Serial.printf("Animation buffers: %s (PSRAM free %u)\n", animFrames ? "ok" : "MISSING (no GIFs)",
+                (unsigned)ESP.getFreePsram());
 
   if (!imageBuffer || !rxBuffer) {
     Serial.println("FATAL: Cannot allocate image buffers");
@@ -2164,6 +2270,54 @@ static void ledPoll() {
   ledUpdate();
 }
 
+// ---- 1.25 animation playback (loop() only) ----
+
+static inline uint16_t animDelayMs(uint16_t i) {
+  const uint16_t* delays = (const uint16_t*)animFrames;
+  uint16_t d = delays[i];
+  if (d < ANIM_MIN_DELAY_MS) d = ANIM_MIN_DELAY_MS;
+  if (d > ANIM_MAX_DELAY_MS) d = ANIM_MAX_DELAY_MS;
+  return d;
+}
+
+// Frame `i` of the animation into imageBuffer (240x240; a 120 frame is pixel-doubled).
+static void animRenderFrame(uint16_t i) {
+  const size_t px = (size_t)anim.side * anim.side;
+  const uint16_t* src = (const uint16_t*)(animFrames + (size_t)anim.count * 2) + (size_t)i * px;
+  if (anim.side == DISPLAY_WIDTH) {
+    memcpy(imageBuffer, src, IMAGE_SIZE);
+    return;
+  }
+  for (int y = 0; y < anim.side; y++) {
+    const uint16_t* s = src + (size_t)y * anim.side;
+    uint16_t* d = imageBuffer + (size_t)(2 * y) * DISPLAY_WIDTH;
+    for (int x = 0; x < anim.side; x++) d[2 * x] = d[2 * x + 1] = s[x];
+    memcpy(d + DISPLAY_WIDTH, d, DISPLAY_WIDTH * sizeof(uint16_t));
+  }
+}
+
+// Something else is about to draw (a cover, a photo, a new GIF): stop, and leave the frame on screen as
+// the old picture for that transition (runTransition reads prevBuffer).
+static void animStop() {
+  if (!animActive) return;
+  animActive = false;
+  if (prevBuffer) memcpy(prevBuffer, imageBuffer, IMAGE_SIZE);
+  Serial.println("Animation stopped");
+}
+
+// Next frame when it is due. Plain full-frame draws (~23 ms at 40 MHz SPI); BLE keeps receiving meanwhile.
+static void animTick() {
+  if (!animActive || !deviceConnected || imageTransferComplete || cacheCheckPending) return;
+  const unsigned long now = millis();
+  if ((long)(now - animNextAt) < 0) return;
+  animIndex = (uint16_t)((animIndex + 1) % anim.count);
+  animRenderFrame(animIndex);
+  gfx->draw16bitRGBBitmap(0, 0, imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  // Keep the GIF's own pace, but never try to catch up after a stall (a transition, an SD save).
+  animNextAt += animDelayMs(animIndex);
+  if ((long)(now - animNextAt) > 0) animNextAt = now + animDelayMs(animIndex);
+}
+
 void loop() {
   ledPoll();
 
@@ -2244,6 +2398,11 @@ void loop() {
     // BLE_PROTOCOL 1.19: ffe6 takes [level, style, loading colour] (consumer / developer lights).
     pMsgChar->setValue("CAPS:lights");
     pMsgChar->notify();
+    // BLE_PROTOCOL 1.25: the board takes 16-byte "ANIM" headers (GIFs, kept in PSRAM).
+    if (animFrames && animPacked) {
+      pMsgChar->setValue("CAPS:anim");
+      pMsgChar->notify();
+    }
     publishCacheCount();
     publishCacheStats();
   }
@@ -2283,6 +2442,7 @@ void loop() {
       imageTransferComplete = false;
       completedImageBytes = 0;
       rxCompressed = false;
+      rxAnim = false;
       pendingTransition = 0xFF;  // drop a cut-off prefetch's store-only marker
     }
 
@@ -2295,6 +2455,8 @@ void loop() {
       pCacheChar->setValue(&response, 1);
       pCacheChar->notify();
     } else {
+
+    animStop();  // a cover is coming (hit now, or a transfer after the miss)
 
     // 1.17 new-song check = (since 2026-11-23) a cover the app's queue prefetch saved ahead and never
     // drew: on a hit the LED flashes blue / orange while it draws; any other hit is blue. Nothing lights
@@ -2399,6 +2561,48 @@ void loop() {
 
     Serial.println("Processing image transfer completion...");
 
+    if (completedAnim) {
+      // 1.25: a whole GIF. Inflate every frame, draw the first with a transition, then animTick loops it.
+      completedAnim = false;
+      completedCompressed = false;
+      animStop();
+      const AnimHeader a = completedAnimHeader;
+      unsigned long inflateStart = millis();
+      size_t outBytes = 0;
+      const bool ok = inflateInto(animPacked, completedImageBytes, animFrames, a.rawBytes, &outBytes);
+      Serial.printf("BLE: Animation inflated %u -> %u bytes in %lums (%s)\n", (unsigned)completedImageBytes,
+                    (unsigned)outBytes, millis() - inflateStart, ok ? "ok" : "FAILED");
+      pendingTransition = 0xFF;
+      completedImageBytes = 0;
+      if (!ok) {
+        // Not "ERROR: Decompress": that one makes the app send covers raw for the rest of the connection.
+        notifyImageTransferRejected("ERROR: Animation decompress failed");
+      } else {
+        anim = a;
+        animIndex = 0;
+        animRenderFrame(0);
+        showingStartupScreen = false;
+        unsigned long displayStart = millis();
+        String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                                              TRANSITION_DISPLAY_ONLY, /*quick=*/false);
+        ledSetMode(LED_DONE);
+        notifyDrawn();
+        animActive = true;
+        animNextAt = millis() + animDelayMs(0);
+        Serial.printf("⚡ Animation: %u frames, %s draw %lums\n", (unsigned)a.count, transitionName.c_str(),
+                      millis() - displayStart);
+        String msg = "TRANSITION:" + transitionName;
+        pMsgChar->setValue(msg.c_str());
+        pMsgChar->notify();
+        delay(5);
+        uint8_t success = 0x01;
+        pImageChar->setValue(&success, 1);
+        pImageChar->notify();
+        pMsgChar->setValue("SUCCESS");
+        pMsgChar->notify();
+      }
+    } else {
+
     bool frameOk = true;
     if (completedCompressed) {
       completedCompressed = false;
@@ -2434,6 +2638,7 @@ void loop() {
     // RGB565 is already Atkinson-dithered on the phone before BLE send; no dithering here.
 
     // The frame is whole: it becomes the picture on the panel (and what saveToCache writes).
+    animStop();  // a cover or photo replaces a GIF
     memcpy(imageBuffer, rxBuffer, IMAGE_SIZE);
     showingStartupScreen = false;
 
@@ -2479,7 +2684,10 @@ void loop() {
 
     completedImageBytes = 0;
     }  // not store-only
+    }  // not an animation
   }
+
+  animTick();
 
   // Handle BLE connection state changes
   if (!deviceConnected && oldDeviceConnected) {

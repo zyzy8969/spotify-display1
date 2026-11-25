@@ -157,3 +157,27 @@ Check "app build 62" at the bottom of Settings first. Keep `pio device monitor -
       text over the old cover. Repeat a few times.
 - [ ] Nerd mode: live details right under the small cover row and its line (owner still reports it wrong).
 
+
+## GIFs — branch feat/gif (BLE 1.25)
+
+Flash this branch's firmware, install the matching cloud build, keep `pio device monitor -b 921600` open.
+Paste your GIPHY key on the Photos page's GIFs tab (or Settings > Advanced) first.
+
+- [ ] Boot log says `Animation buffers: ok`. (MISSING = no PSRAM to spare: GIFs stay off and the app says
+      the firmware is too old.)
+- [ ] GIFs tab opens on Trending; a search shows Results; ✕ goes back to Trending without a new GIPHY call
+      (serial/app log quiet); "More" adds a page.
+- [ ] Switching Photos <-> GIFs or reopening the page does not reload (no new results flash in).
+- [ ] Tap a GIF: loading light while it sends (~5-10 s), then a transition and the GIF loops on the keychain
+      at a normal pace, no tearing, right colours, stretched to the square (nothing cropped).
+- [ ] The app's cover plays the same GIF, sharp pixels, same pace; the keychain and the cover stay in step.
+- [ ] Tap the cover: back to the song on both; the cover stops animating.
+- [ ] Tap one GIF, then quickly another: the second one ends up on the keychain. Tap a GIF, then pick a photo
+      before it arrives: the photo wins.
+- [ ] Make a GIF from a portrait and a landscape video: the slider moves the start (still updates), the bar
+      fills, both come out the right way up, stretched.
+- [ ] Close the Photos page mid-conversion: nothing appears on the keychain afterwards.
+- [ ] Skip songs during a GIF send, disconnect mid-GIF, power-cycle: no half pictures; after reconnecting the
+      song's cover is back (the GIF is gone, as designed).
+- [ ] Covers and photos still send and cache-hit as before (the chunk/ACK code is now shared with GIFs).
+- [ ] Reduce Motion on: grid thumbnails and the cover show stills.

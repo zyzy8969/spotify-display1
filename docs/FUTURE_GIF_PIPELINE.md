@@ -1,5 +1,8 @@
 # Future Scope: Custom Images + GIF Pipeline
 
+> **Built 2026-11-24 (BLE 1.25, branch `feat/gif`).** As built, GIFs are not stored under `/anim`: frames
+> stay in PSRAM only (GIPHY's terms). See `docs/BLE_PROTOCOL.md` "Changes in 1.25". This page is the original plan.
+
 ## Goal
 Allow users to send camera-roll images and short GIF animations.
 
