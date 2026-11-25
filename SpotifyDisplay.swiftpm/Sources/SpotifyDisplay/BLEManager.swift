@@ -44,6 +44,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var loadingColour: LoadingColour = .current
     /// BLE 1.23: the colour-wheel loading colour (used when `loadingColour == .custom`).
     @Published private(set) var customLoadingHex: UInt32 = LoadingColour.customHex
+    /// BLE 1.24: the gradient loading colour's 1-6 colours (used when `loadingColour == .gradient`).
+    @Published private(set) var gradientHexes: [UInt32] = LoadingColour.gradientHexes
     /// BLE 1.23: what the light does while a song is on the board (consumer lights), and the static colour.
     @Published private(set) var songLight: SongLight = .current
     @Published private(set) var songLightHex: UInt32 = SongLight.staticHex
@@ -1802,6 +1804,18 @@ extension BLEManager {
         throttledWrite(.lightColour) { [weak self] in self?.writeStatusLight() }
     }
 
+    /// The gradient loading colour's colours (BLE 1.24, 1-6 of them); selects `.gradient` too. Throttled
+    /// like the wheel.
+    func setGradient(_ hexes: [UInt32]) {
+        let clean = Array(hexes.prefix(LoadingColour.gradientMax)).map { $0 & 0xFFFFFF }
+        guard !clean.isEmpty else { return }
+        gradientHexes = clean
+        loadingColour = .gradient
+        UserDefaults.standard.set(clean.map { Int($0) }, forKey: LoadingColour.gradientStorageKey)
+        UserDefaults.standard.set(LoadingColour.gradient.rawValue, forKey: LoadingColour.storageKey)
+        throttledWrite(.lightColour) { [weak self] in self?.writeStatusLight() }
+    }
+
     /// The light while a song is on the board (BLE 1.23): off, rainbow, a static colour or the album's.
     func setSongLight(_ mode: SongLight) {
         songLight = mode
@@ -1846,17 +1860,21 @@ extension BLEManager {
         writeStatusLight()
     }
 
-    /// ffe6: [level, style, colour, preview, nothing playing, song light, song R, G, B, custom R, G, B]
+    /// ffe6: [level, style, colour, preview, nothing playing, song light, song R, G, B, custom R, G, B,
+    /// gradient count, gradient RGB x count] (up to 31 bytes)
     /// to boards that said `CAPS:lights` (1.19-1.22 boards read only what they know and ignore the rest;
     /// they show the custom loading colour 12 as blue); just [level] to older ones (they drop any other
     /// length, which would lose the level).
     private func writeStatusLight() {
         guard let p = peripheral, let c = statusLedChar else { return }
-        let song = songLight == .album ? albumLightHex : songLightHex
+        // Wheel colours are gamma-decoded for the LED (`LightPalette.ledHex`); the album colour already is.
+        let song = songLight == .album ? albumLightHex : LightPalette.ledHex(songLightHex)
         func rgb(_ hex: UInt32) -> [UInt8] { [UInt8((hex >> 16) & 0xFF), UInt8((hex >> 8) & 0xFF), UInt8(hex & 0xFF)] }
         let bytes: [UInt8] = boardSupportsLights
             ? [statusLedLevel, UInt8(lightStyle.rawValue), UInt8(loadingColour.rawValue), lightPreviewHold ? 1 : 0,
-               nothingPlaying ? 1 : 0, UInt8(songLight.rawValue)] + rgb(song) + rgb(customLoadingHex)
+               nothingPlaying ? 1 : 0, UInt8(songLight.rawValue)] + rgb(song) + rgb(LightPalette.ledHex(customLoadingHex))
+              // 1.24: gradient colour count, then the colours
+              + [UInt8(gradientHexes.count)] + gradientHexes.map(LightPalette.ledHex).flatMap(rgb)
             : [statusLedLevel]
         p.writeValue(Data(bytes), for: c, type: .withResponse)
     }

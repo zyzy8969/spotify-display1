@@ -3,68 +3,97 @@ import Foundation
 /// BLE_PROTOCOL 1.23 "album" song light: one LED colour that matches a cover.
 ///
 /// Reads the frame the board shows (240x240 little-endian RGB565), so cache hits, fresh sends and
-/// photos all work without another download. Vivid areas win over greys, black and white: each sampled
-/// pixel votes for one of 24 hue buckets, weighted by saturation and brightness, and the strongest
-/// bucket (with its two neighbours) gives the hue. The result is pushed to full brightness and a good
-/// saturation, because one small LED shows dark or washed-out colours as muddy grey. A cover with
-/// almost no colour (black and white) gets white.
+/// photos all work without another download.
+///
+/// Owner, 2026-11-24: the colour covering the most of the cover wins ("most shown colour"). Each sampled
+/// pixel with real colour votes for one of 24 hue buckets, one vote each; black, white and greys don't
+/// vote, because one small LED can't show them (they come out as white or off). The strongest bucket,
+/// with its two neighbours, gives the hue. If under 3% of the cover has real colour, the most vivid
+/// colour is used instead (a mostly black cover with a red logo gets red); with almost no colour at all
+/// (a black-and-white cover) it is white. The result is pushed to full brightness and a good saturation:
+/// the LED shows dark or washed-out colours as muddy grey (navy becomes blue, brown becomes orange).
 enum AlbumLightColour {
     static let grey: UInt32 = 0xFFFFFF
     private static let buckets = 24
     private static let step = 7  // every 7th pixel: ~8,200 samples of 57,600
 
+    private struct Votes {
+        var weight = [Double](repeating: 0, count: AlbumLightColour.buckets)
+        var r = [Double](repeating: 0, count: AlbumLightColour.buckets)
+        var g = [Double](repeating: 0, count: AlbumLightColour.buckets)
+        var b = [Double](repeating: 0, count: AlbumLightColour.buckets)
+        var voters = 0
+        var total: Double { weight.reduce(0, +) }
+
+        mutating func add(bucket k: Int, r: Double, g: Double, b: Double, w: Double) {
+            weight[k] += w; self.r[k] += r * w; self.g[k] += g * w; self.b[k] += b * w
+            voters += 1
+        }
+    }
+
     /// 0xRRGGBB for the LED.
     static func from(rgb565 frame: Data) -> UInt32 {
         let pixels = frame.count / 2
         guard pixels > 0 else { return grey }
-        var weight = [Double](repeating: 0, count: buckets)
-        var sumR = [Double](repeating: 0, count: buckets)
-        var sumG = [Double](repeating: 0, count: buckets)
-        var sumB = [Double](repeating: 0, count: buckets)
+        var area = Votes()   // one vote per clearly coloured pixel
+        var vivid = Votes()  // fallback: weighted towards saturated, bright pixels
         var samples = 0
         frame.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            let b = raw.bindMemory(to: UInt8.self)
+            let px = raw.bindMemory(to: UInt8.self)
             var i = 0
             while i < pixels {
                 defer { i += step }
                 samples += 1
-                let v = UInt16(b[2 * i]) | (UInt16(b[2 * i + 1]) << 8)
+                let v = UInt16(px[2 * i]) | (UInt16(px[2 * i + 1]) << 8)
                 let r = Double((v >> 11) & 0x1F) / 31
                 let g = Double((v >> 5) & 0x3F) / 63
-                let bl = Double(v & 0x1F) / 31
-                let mx = max(r, g, bl), mn = min(r, g, bl), d = mx - mn
+                let b = Double(v & 0x1F) / 31
+                let mx = max(r, g, b), d = mx - min(r, g, b)
                 guard mx > 0.12, d > 0 else { continue }
                 let s = d / mx
                 guard s > 0.18 else { continue }
-                let h = hue(r: r, g: g, b: bl, mx: mx, d: d)
-                let k = min(buckets - 1, Int(h * Double(buckets)))
-                let w = s * s * mx
-                weight[k] += w
-                sumR[k] += r * w
-                sumG[k] += g * w
-                sumB[k] += bl * w
+                let k = min(buckets - 1, Int(hue(r: r, g: g, b: b, mx: mx, d: d) * Double(buckets)))
+                vivid.add(bucket: k, r: r, g: g, b: b, w: s * s * mx)
+                if s > 0.25 && mx > 0.2 { area.add(bucket: k, r: r, g: g, b: b, w: 1) }
             }
         }
-        // Almost no colour anywhere: a black-and-white cover.
-        let total = weight.reduce(0, +)
-        guard samples > 0, total > Double(samples) * 0.01 else { return grey }
+        guard samples > 0 else { return grey }
+        if Double(area.voters) >= Double(samples) * 0.03 { return pick(area) }
+        if vivid.total > Double(samples) * 0.01 { return pick(vivid) }
+        return grey
+    }
+
+    /// The strongest hue (bucket plus neighbours), at full brightness and a good saturation.
+    private static func pick(_ votes: Votes) -> UInt32 {
         var best = 0
         var bestScore = -1.0
         for k in 0..<buckets {
-            let score = weight[(k + buckets - 1) % buckets] + weight[k] + weight[(k + 1) % buckets]
+            let score = votes.weight[(k + buckets - 1) % buckets] + votes.weight[k] + votes.weight[(k + 1) % buckets]
             if score > bestScore { bestScore = score; best = k }
         }
-        var w = 0.0, r = 0.0, g = 0.0, bl = 0.0
+        var w = 0.0, r = 0.0, g = 0.0, b = 0.0
         for k in [(best + buckets - 1) % buckets, best, (best + 1) % buckets] {
-            w += weight[k]; r += sumR[k]; g += sumG[k]; bl += sumB[k]
+            w += votes.weight[k]; r += votes.r[k]; g += votes.g[k]; b += votes.b[k]
         }
         guard w > 0 else { return grey }
-        r /= w; g /= w; bl /= w
-        let mx = max(r, g, bl), d = mx - min(r, g, bl)
+        r /= w; g /= w; b /= w
+        let mx = max(r, g, b), d = mx - min(r, g, b)
         guard mx > 0, d > 0 else { return grey }
-        let h = hue(r: r, g: g, b: bl, mx: mx, d: d)
-        let s = min(1, max(0.6, d / mx * 1.2))
-        return hsvToHex(h: h, s: s, v: 1)
+        let h = hue(r: r, g: g, b: b, mx: mx, d: d)
+        // Owner, 2026-11-24: the LED should look like the cover on the screen. Keep the cover's own
+        // saturation (a small boost only; the old 60% floor made muted covers too vivid) at full brightness.
+        let s = min(1, d / mx * 1.15)
+        return ledGamma(hsvToHex(h: h, s: s, v: 1))
+    }
+
+    /// Screen colours are gamma-encoded (sRGB-like); the WS2812's PWM is linear, so a mid value looks far
+    /// too bright on it (orange turns yellow, pastels go white). Decode each channel with gamma 2.2 so the
+    /// LED shows the colour the screen does. The brightest channel stays 255.
+    static func ledGamma(_ hex: UInt32) -> UInt32 {
+        func lin(_ c: UInt32) -> UInt32 {
+            UInt32((pow(Double(c) / 255, 2.2) * 255).rounded())
+        }
+        return (lin(hex >> 16 & 0xFF) << 16) | (lin(hex >> 8 & 0xFF) << 8) | lin(hex & 0xFF)
     }
 
     /// Hue 0..<1 (0 = red).

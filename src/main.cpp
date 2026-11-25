@@ -618,9 +618,15 @@ volatile uint8_t statusLedLevel = 255;
 // white, amber, pink, teal; 1.20 adds 6-10 orange, yellow, cyan, lavender, coral and 11 rainbow. loop() saves style + colour in NVS when they change.
 #define LED_STYLE_CONSUMER 0
 #define LED_STYLE_DEVELOPER 1
-#define LED_LOAD_COLOURS 13  // 0-10 solid colours, 11 = rainbow (1.20), 12 = custom RGB (1.23)
+#define LED_LOAD_COLOURS 14  // 0-10 solid colours, 11 = rainbow (1.20), 12 = custom RGB (1.23), 13 = gradient (1.24)
 #define LED_LOAD_RAINBOW 11
 #define LED_LOAD_CUSTOM 12
+#define LED_LOAD_GRADIENT 13
+// BLE_PROTOCOL 1.24: byte 13 = gradient colour count (0-6), then that many RGB triples. Loading colour 13
+// fades through them in a loop.
+#define LED_GRADIENT_MAX 6
+volatile uint8_t ledGradientCount = 0;
+volatile uint32_t ledGradient[LED_GRADIENT_MAX] = {0};
 volatile uint8_t ledStyle = LED_STYLE_CONSUMER;
 volatile uint8_t ledLoadColour = 0;
 // BLE_PROTOCOL 1.23 (bytes 6-12, consumer lights only): what the light does while a song plays and nothing
@@ -665,6 +671,21 @@ class StatusLedCallbacks: public BLECharacteristicCallbacks {
             if (rgb != ledLoadCustomRGB) {
                 ledLoadCustomRGB = rgb;
                 if (ledLoadColour == LED_LOAD_CUSTOM) ledColourChanged = true;  // preview the new custom colour
+            }
+        }
+        if (value.length() >= 13) {
+            const uint8_t n = (uint8_t)value[12] <= LED_GRADIENT_MAX ? (uint8_t)value[12] : LED_GRADIENT_MAX;
+            if (value.length() >= 13u + 3u * n) {
+                bool changed = n != ledGradientCount;
+                for (uint8_t i = 0; i < n; i++) {
+                    const size_t o = 13 + 3 * i;
+                    const uint32_t rgb = ((uint32_t)(uint8_t)value[o] << 16) | ((uint32_t)(uint8_t)value[o + 1] << 8) |
+                                         (uint8_t)value[o + 2];
+                    if (rgb != ledGradient[i]) changed = true;
+                    ledGradient[i] = rgb;
+                }
+                ledGradientCount = n;
+                if (changed && ledLoadColour == LED_LOAD_GRADIENT) ledColourChanged = true;
             }
         }
         if (value.length() >= 4) {
@@ -1849,7 +1870,9 @@ static const uint32_t LED_LOAD_RGB[LED_LOAD_COLOURS] = {
   0xFF6450,  // coral
   0xFFFFFF,  // rainbow: placeholder, the hue turns instead (LED_LOAD_RAINBOW)
   0x0050FF,  // custom (1.23): placeholder, ledLoadCustomRGB is used instead (LED_LOAD_CUSTOM)
+  0x0050FF,  // gradient (1.24): placeholder, ledGradientColour() is used instead (LED_LOAD_GRADIENT)
 };
+#define LED_GRADIENT_STEP_MS 1000  // 1.24: each gradient colour blends into the next over 1 s
 #define LED_SONG_RAINBOW_MS 8000  // 1.23 song light "rainbow": one colour wheel every 8 s
 #define LED_SONG_LEVEL 200        // 1.23 song light brightness (out of 255, before the caps)
 #define LED_SONG_FADE_MS 400      // the song light fades in after the green pulse / a settings change
@@ -1897,6 +1920,22 @@ static uint32_t ledHue(uint32_t h) {
     case 4: return (f << 16) | 0x0000FF;
     default: return 0xFF0000 | (255 - f);
   }
+}
+
+// 1.24 gradient loading colour: fades from each chosen colour to the next, looping. No colours = blue.
+static uint32_t ledGradientColour(unsigned long t) {
+  const uint8_t n = ledGradientCount;
+  if (n == 0) return LED_LOAD_RGB[0];
+  if (n == 1) return ledGradient[0];
+  const uint8_t i = (t / LED_GRADIENT_STEP_MS) % n;
+  const uint32_t a = ledGradient[i], b = ledGradient[(i + 1) % n];
+  const uint32_t f = (t % LED_GRADIENT_STEP_MS) * 255 / LED_GRADIENT_STEP_MS;  // 0..255
+  uint32_t out = 0;
+  for (int shift = 16; shift >= 0; shift -= 8) {
+    const uint32_t ca = (a >> shift) & 0xFF, cb = (b >> shift) & 0xFF;
+    out |= ((ca * (255 - f) + cb * f) / 255) << shift;
+  }
+  return out;
 }
 
 // Stubs (owner, 2026-11-23): the board has no charge-status pin, and reading the battery sense on GPIO6
@@ -1948,6 +1987,7 @@ static bool ledUpdateConsumer(unsigned long t) {
         const uint8_t c = ledLoadColour % LED_LOAD_COLOURS;
         const uint32_t rgb = c == LED_LOAD_RAINBOW ? ledHue((t % LED_LOAD_RAINBOW_MS) * 1536 / LED_LOAD_RAINBOW_MS)
                            : c == LED_LOAD_CUSTOM  ? (uint32_t)ledLoadCustomRGB
+                           : c == LED_LOAD_GRADIENT ? ledGradientColour(t)
                                                    : LED_LOAD_RGB[c];
         ledShow(rgb, 255 - ledWave(t, 1600) * 191 / 255);
       }

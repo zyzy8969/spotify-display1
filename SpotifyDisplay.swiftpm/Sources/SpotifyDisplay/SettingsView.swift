@@ -36,6 +36,8 @@ struct SettingsView: View {
     @State private var overrideNote: String?
     /// The Advanced section is open (closed every time Settings opens).
     @State private var showAdvanced = false
+    /// The LED-only colour wheel sheet that is open, if any.
+    @State private var wheelTarget: WheelTarget?
 
     var body: some View {
         ScrollView {
@@ -188,6 +190,10 @@ struct SettingsView: View {
             if bleManager.lightStyle == .consumer {
                 loadingColourPicker
                 songLightPicker
+                    .sheet(item: $wheelTarget) { target in
+                        wheelSheet(target)
+                            .environment(\.theme, theme)
+                    }
             }
             if bleManager.isConnected && bleManager.boardSupportsStatusLed && !bleManager.boardSupportsLights {
                 Text("This display's firmware only knows the developer lights. Flash the latest firmware for the consumer lights and loading colour.")
@@ -242,21 +248,141 @@ struct SettingsView: View {
             Text("Loading colour")
                 .themeText(.rowValue)
                 .foregroundStyle(theme.ink)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 6) {
-                ForEach(LoadingColour.allCases.filter { $0 != .custom }) { colour in
-                    let selected = bleManager.loadingColour == colour
-                    Button { bleManager.setLoadingColour(colour) } label: {
-                        swatchCell(title: colour.title, selected: selected) {
-                            LoadingSwatch(colour: colour, pulsing: selected)
+            // Owner, 2026-11-24: ROYGBIV + pink + white, then Rainbow / Wheel / Gradient: a 4x3 grid (was 13 named swatches).
+            LazyVGrid(columns: swatchColumns, spacing: 6) {
+                ForEach(LightPalette.swatches, id: \.hex) { swatch in
+                    let selected = bleManager.loadingColour == .custom && bleManager.customLoadingHex == swatch.hex
+                    Button { bleManager.setCustomLoadingColour(swatch.hex) } label: {
+                        swatchCell(title: swatch.name, selected: selected) {
+                            PulsingFill(pulsing: selected) { Circle().fill(Color(hex: swatch.hex)) }
                         }
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("\(colour.title) loading colour")
+                    .accessibilityLabel("\(swatch.name) loading colour")
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
+                let rainbowSelected = bleManager.loadingColour == .rainbow
+                Button { bleManager.setLoadingColour(.rainbow) } label: {
+                    swatchCell(title: "Rainbow", selected: rainbowSelected) {
+                        LoadingSwatch(colour: .rainbow, pulsing: rainbowSelected)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rainbow loading colour")
+                .accessibilityAddTraits(rainbowSelected ? .isSelected : [])
                 // BLE 1.23: any colour from the colour wheel.
-                wheelCell(hex: bleManager.customLoadingHex, selected: bleManager.loadingColour == .custom,
-                          label: "Custom loading colour") { bleManager.setCustomLoadingColour($0) }
+                wheelCell(hex: bleManager.customLoadingHex,
+                          selected: bleManager.loadingColour == .custom
+                              && !LightPalette.isSwatch(bleManager.customLoadingHex),
+                          label: "Custom loading colour", target: .loading)
+                // BLE 1.24: fade through 1-6 colours.
+                let gradientSelected = bleManager.loadingColour == .gradient
+                Button { bleManager.setGradient(bleManager.gradientHexes) } label: {
+                    swatchCell(title: "Gradient", selected: gradientSelected) {
+                        PulsingFill(pulsing: gradientSelected) {
+                            Circle().fill(AngularGradient(
+                                colors: (bleManager.gradientHexes + [bleManager.gradientHexes[0]]).map { Color(hex: $0) },
+                                center: .center))
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Gradient loading colour")
+                .accessibilityAddTraits(gradientSelected ? .isSelected : [])
+            }
+            if bleManager.loadingColour == .gradient {
+                gradientEditor
+            }
+        }
+    }
+
+    private var swatchColumns: [GridItem] { Array(repeating: GridItem(.flexible(), spacing: 6), count: 4) }
+
+    /// BLE 1.24: the gradient's colours, each a colour well; − drops the last, + adds one (up to 6).
+    private var gradientEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Gradient colours (\(bleManager.gradientHexes.count) of \(LoadingColour.gradientMax))")
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+            HStack(spacing: 10) {
+                ForEach(bleManager.gradientHexes.indices, id: \.self) { index in
+                    Button { wheelTarget = .gradient(index) } label: {
+                        Circle()
+                            .fill(Color(hex: bleManager.gradientHexes[index]))
+                            .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
+                            .frame(width: 28, height: 28)
+                            .frame(width: 36, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Gradient colour \(index + 1)")
+                }
+                Spacer(minLength: 0)
+                Button {
+                    bleManager.setGradient(Array(bleManager.gradientHexes.dropLast()))
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(bleManager.gradientHexes.count > 1 ? theme.ink : theme.inkFaint)
+                .disabled(bleManager.gradientHexes.count <= 1)
+                .accessibilityLabel("Remove last gradient colour")
+                Button {
+                    // A new stop starts as the next palette colour after the last one, so it differs.
+                    let last = bleManager.gradientHexes.last ?? 0xFF0000
+                    let i = LightPalette.swatches.firstIndex { $0.hex == last } ?? -1
+                    let next = LightPalette.swatches[(i + 1) % LightPalette.swatches.count].hex
+                    bleManager.setGradient(bleManager.gradientHexes + [next])
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(bleManager.gradientHexes.count < LoadingColour.gradientMax ? theme.ink : theme.inkFaint)
+                .disabled(bleManager.gradientHexes.count >= LoadingColour.gradientMax)
+                .accessibilityLabel("Add a gradient colour")
+            }
+            Text("The light fades from each colour to the next while a cover loads, 1 s per colour.")
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Which colour the LED-only wheel sheet is editing.
+    enum WheelTarget: Identifiable, Equatable {
+        case loading, song, gradient(Int)
+        var id: String {
+            switch self {
+            case .loading: return "loading"
+            case .song: return "song"
+            case .gradient(let i): return "gradient\(i)"
+            }
+        }
+    }
+
+    /// The LED-only colour wheel (`LEDColourWheelSheet`) for one target.
+    @ViewBuilder
+    private func wheelSheet(_ target: WheelTarget) -> some View {
+        switch target {
+        case .loading:
+            LEDColourWheelSheet(title: "Loading colour", initialHex: bleManager.customLoadingHex) {
+                bleManager.setCustomLoadingColour($0)
+            }
+        case .song:
+            LEDColourWheelSheet(title: "Song colour", initialHex: bleManager.songLightHex) {
+                bleManager.setSongLightColour($0)
+            }
+        case .gradient(let index):
+            LEDColourWheelSheet(title: "Gradient colour \(index + 1)",
+                                initialHex: index < bleManager.gradientHexes.count ? bleManager.gradientHexes[index] : 0xFF0000) { hex in
+                var hexes = bleManager.gradientHexes
+                guard index < hexes.count else { return }
+                hexes[index] = hex
+                bleManager.setGradient(hexes)
             }
         }
     }
@@ -289,21 +415,21 @@ struct SettingsView: View {
                 }
             }
             if bleManager.songLight == .colour {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 6) {
-                    ForEach(LoadingColour.solids) { colour in
-                        let selected = colour.hex == bleManager.songLightHex
-                        Button { bleManager.setSongLightColour(colour.hex) } label: {
-                            swatchCell(title: colour.title, selected: selected) {
-                                Circle().fill(Color(hex: colour.hex))
+                LazyVGrid(columns: swatchColumns, spacing: 6) {
+                    ForEach(LightPalette.swatches, id: \.hex) { swatch in
+                        let selected = swatch.hex == bleManager.songLightHex
+                        Button { bleManager.setSongLightColour(swatch.hex) } label: {
+                            swatchCell(title: swatch.name, selected: selected) {
+                                Circle().fill(Color(hex: swatch.hex))
                             }
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("\(colour.title) song colour")
+                        .accessibilityLabel("\(swatch.name) song colour")
                         .accessibilityAddTraits(selected ? .isSelected : [])
                     }
                     wheelCell(hex: bleManager.songLightHex,
-                              selected: !LoadingColour.solids.contains { $0.hex == bleManager.songLightHex },
-                              label: "Custom song colour") { bleManager.setSongLightColour($0) }
+                              selected: !LightPalette.isSwatch(bleManager.songLightHex),
+                              label: "Custom song colour", target: .song)
                 }
             }
             if bleManager.songLight == .album {
@@ -358,37 +484,22 @@ struct SettingsView: View {
         .contentShape(Rectangle())
     }
 
-    /// The colour-wheel cell (BLE 1.23): the system colour picker; picking a colour selects it.
-    private func wheelCell(hex: UInt32, selected: Bool, label: String,
-                           set: @escaping (UInt32) -> Void) -> some View {
-        let binding = Binding<Color>(
-            get: { Color(hex: hex) },
-            set: { colour in
-                var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                UIColor(colour).getRed(&r, green: &g, blue: &b, alpha: &a)
-                func byte(_ x: CGFloat) -> UInt32 { UInt32(max(0, min(255, (x * 255).rounded()))) }
-                set((byte(r) << 16) | (byte(g) << 8) | byte(b))
-            })
-        return VStack(spacing: 4) {
-            ZStack {
-                ColorPicker(label, selection: binding, supportsOpacity: false)
-                    .labelsHidden()
-                    .frame(width: 30, height: 30)
+    /// The colour-wheel cell: opens the LED-only wheel (`LEDColourWheelSheet`); picking a colour selects
+    /// it. Shows the picked colour once chosen, a little hue wheel otherwise.
+    private func wheelCell(hex: UInt32, selected: Bool, label: String, target: WheelTarget) -> some View {
+        Button { wheelTarget = target } label: {
+            swatchCell(title: "Wheel", selected: selected) {
                 if selected {
-                    Circle()
-                        .stroke(theme.ink, lineWidth: 2)
-                        .frame(width: 34, height: 34)
-                        .allowsHitTesting(false)
+                    Circle().fill(Color(hex: hex))
+                } else {
+                    Circle().fill(AngularGradient(colors: [.red, .yellow, .green, .cyan, .blue, .purple, .red],
+                                                  center: .center))
                 }
             }
-            .frame(width: 36, height: 36)
-            Text("Wheel")
-                .themeText(.statCaption)
-                .foregroundStyle(selected ? theme.ink : theme.inkSoft)
-                .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, minHeight: 56)
-        .accessibilityElement(children: .contain)
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     /// Turns nerd mode on as a feature: the terminal icon appears at the top of the main screen.
@@ -770,7 +881,8 @@ struct ThemePicker: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(option.displayName) theme, \(option.blurb)")
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
-            DayNightSwitch(isDark: dark, themeName: option.displayName)
+            // Day / night lives only on the main screen's header toggle (owner, 2026-11-24); each
+            // preview still shows its theme in the look it was last left in.
         }
     }
 
@@ -853,43 +965,25 @@ struct ThemePicker: View {
     }
 }
 
-/// Day / night for one theme: a sun and a moon, the chosen one filled. 44 pt targets.
-struct DayNightSwitch: View {
-    @Binding var isDark: Bool
-    let themeName: String
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        HStack(spacing: 0) {
-            segment(dark: false, symbol: "sun.max.fill", label: "Day")
-            segment(dark: true, symbol: "moon.fill", label: "Night")
-        }
-        .padding(2)
-        .background(Capsule().stroke(theme.ringOff.opacity(0.6), lineWidth: 1))
-    }
-
-    private func segment(dark: Bool, symbol: String, label: String) -> some View {
-        let on = isDark == dark
-        return Button {
-            withAnimation(.easeOut(duration: 0.15)) { isDark = dark }
-        } label: {
-            Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(on ? theme.background : theme.inkSoft)
-                .frame(width: 40, height: 32)
-                .background(Capsule().fill(on ? theme.ink : Color.clear))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(themeName) \(label)")
-        .accessibilityAddTraits(on ? [.isButton, .isSelected] : [.isButton])
-    }
-}
-
 /// One loading-colour swatch. The picked one pulses like the keychain's LED (100% -> 25% -> 100% every
 /// 1.6 s; Rainbow also turns, one turn per 0.8 s), so you see the colour while choosing; the board
 /// pulses it the whole time the picker is on screen (BLE_PROTOCOL 1.21). Reduce Motion: still.
+/// Any swatch fill, pulsing like the keychain's loading light while it is the chosen one.
+private struct PulsingFill<Fill: View>: View {
+    let pulsing: Bool
+    @ViewBuilder let fill: () -> Fill
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(paused: !pulsing || reduceMotion)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            let animate = pulsing && !reduceMotion
+            fill()
+                .opacity(animate ? 1 - 0.75 * (1 - cos(t.truncatingRemainder(dividingBy: 1.6) / 1.6 * 2 * .pi)) / 2 : 1)
+        }
+    }
+}
+
 private struct LoadingSwatch: View {
     let colour: LoadingColour
     let pulsing: Bool

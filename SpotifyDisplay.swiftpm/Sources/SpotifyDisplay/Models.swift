@@ -102,11 +102,23 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
     /// BLE_PROTOCOL 1.23: any colour from the colour wheel, sent as RGB (`customHex`). A 1.19-1.22
     /// board shows it as blue.
     case custom
+    /// BLE_PROTOCOL 1.24: the pulse fades through 1-6 chosen colours (`gradientHexes`). A 1.19-1.23
+    /// board shows it as blue.
+    case gradient
 
     var id: Int { rawValue }
-    /// The 11 plain colours (no rainbow, no custom): also the static song-light swatches.
-    static var solids: [LoadingColour] { allCases.filter { $0 != .rainbow && $0 != .custom } }
+    // The named solid cases 0-10 (1.19-1.20) are no longer shown in Settings (owner, 2026-11-24: 13
+    // swatches looked cluttered); a saved one is turned into `.custom` with the same RGB by `current`.
     static let customStorageKey = "statusLightCustomRGB"
+    static let gradientStorageKey = "statusLightGradient"
+    static let gradientMax = 6
+    /// The gradient's colours (0xRRGGBB), 1...6 of them; default violet -> blue (palette swatches, so
+    /// they go to the LED as tuned).
+    static var gradientHexes: [UInt32] {
+        let stored = (UserDefaults.standard.array(forKey: gradientStorageKey) as? [Int]) ?? []
+        let hexes = stored.prefix(gradientMax).map { UInt32(truncatingIfNeeded: $0) & 0xFFFFFF }
+        return hexes.isEmpty ? [0xA028FF, 0x0050FF] : Array(hexes)
+    }
     /// The custom loading colour (0xRRGGBB), default blue.
     static var customHex: UInt32 {
         guard let v = UserDefaults.standard.object(forKey: customStorageKey) as? Int else { return 0x0050FF }
@@ -127,6 +139,7 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
         case .coral: return "Coral"
         case .rainbow: return "Rainbow"
         case .custom: return "Custom"
+        case .gradient: return "Gradient"
         }
     }
     var hex: UInt32 {
@@ -144,11 +157,41 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
         case .coral: return 0xFF6450
         case .rainbow: return 0xFFFFFF  // not used: the hue turns
         case .custom: return LoadingColour.customHex
+        case .gradient: return LoadingColour.gradientHexes[0]  // the app's strip shows the first colour
         }
     }
     static let storageKey = "statusLightColour"
+    /// The saved choice. An old named solid (0-10, also the default blue) becomes `.custom` with its RGB,
+    /// so it shows as the matching swatch (or the wheel) in the new picker.
     static var current: LoadingColour {
-        LoadingColour(rawValue: UserDefaults.standard.integer(forKey: storageKey)) ?? .blue
+        let saved = LoadingColour(rawValue: UserDefaults.standard.integer(forKey: storageKey)) ?? .blue
+        guard saved.rawValue <= LoadingColour.coral.rawValue else { return saved }
+        UserDefaults.standard.set(Int(saved.hex), forKey: customStorageKey)
+        UserDefaults.standard.set(LoadingColour.custom.rawValue, forKey: storageKey)
+        return .custom
+    }
+}
+
+/// The swatches Settings shows for the loading colour and the static song colour (owner, 2026-11-24:
+/// ROYGBIV + pink + white). They are sent as RGB (`.custom` / the song colour), so the board needs no table.
+enum LightPalette {
+    struct Swatch: Hashable {
+        let name: String
+        let hex: UInt32
+    }
+    static let swatches: [Swatch] = [
+        Swatch(name: "Red", hex: 0xFF0000), Swatch(name: "Orange", hex: 0xFF5A00),
+        Swatch(name: "Yellow", hex: 0xFFD200), Swatch(name: "Green", hex: 0x00FF28),
+        Swatch(name: "Blue", hex: 0x0050FF), Swatch(name: "Indigo", hex: 0x3C14FF),
+        Swatch(name: "Violet", hex: 0xA028FF), Swatch(name: "Pink", hex: 0xFF3C8C),
+        Swatch(name: "White", hex: 0xFFFFFF),
+    ]
+    static func isSwatch(_ hex: UInt32) -> Bool { swatches.contains { $0.hex == hex } }
+    /// What to send the LED for a colour chosen in Settings. Swatches are already tuned by eye for the
+    /// LED and go as they are; a colour from the colour wheel is a screen (sRGB) colour, so it is
+    /// gamma-decoded like the album colour (owner, 2026-11-24) to look the same on the LED.
+    static func ledHex(_ hex: UInt32) -> UInt32 {
+        isSwatch(hex) ? hex : AlbumLightColour.ledGamma(hex)
     }
 }
 

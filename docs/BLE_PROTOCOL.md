@@ -2,7 +2,21 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.23** (song lights: rainbow, a static colour or the album's colour while a song plays; custom colours.)
+Version: **1.24** (gradient loading colour: the pulse fades through 1-6 chosen colours.)
+
+Changes in 1.24 (2026-11-24; owner-approved). Additive: the status-light write (ffe6) may carry
+`[... 12 bytes of 1.23 ..., gradient count, R, G, B x count]`, up to 31 bytes. Byte 13 = how many gradient
+colours follow (0-6; more is read as 6), then that many RGB triples. `colour` (byte 3) gains `13` =
+gradient: the loading pulse fades from each colour to the next, 1 s per colour, looping (one colour = that
+colour; none = blue). Changing the colours while gradient is chosen previews them like any colour change.
+A 1.19-1.23 board shows 13 as blue. No new `CAPS:`. App only (no wire change): Settings shows red, orange,
+yellow, green, blue, indigo, violet, pink and white, then Rainbow / Wheel / Gradient; the swatches are sent as the
+custom RGB (12), so the old named colours 0-10 are no longer sent (a saved one becomes custom with the
+same RGB). The album song colour now takes the colour covering the most of the cover (it was the most
+vivid one), keeps the cover's own saturation, and is gamma-decoded (2.2) for the LED's linear PWM, so
+it looks like the cover on the screen. Colours picked on the app's colour wheel (static song colour,
+custom loading colour, gradient colours; an LED-only wheel: hue and strength at full brightness) are gamma-decoded the same way before they are sent; the nine
+swatches go as they are (tuned by eye on the LED).
 
 Changes in 1.23 (2026-11-24; owner-approved). Additive: the status-light write (ffe6) may carry 12 bytes:
 `[level, style, colour, preview, nothing playing, song mode, song R, song G, song B, custom R, custom G, custom B]`.
@@ -265,7 +279,7 @@ log or collect unknown messages must ignore it.
 | Image (write + notify) | `0000ffe3-0000-1000-8000-00805f9b34fb` |
 | Message (notify, UTF-8) | `0000ffe4-0000-1000-8000-00805f9b34fb` |
 | Brightness (write, 1 byte 0..255) | `0000ffe5-0000-1000-8000-00805f9b34fb` |
-| Status LED (write: 1 byte level 0..255, 1.13; or 3 bytes level + style + colour, 1.19; + preview, 1.21; + nothing playing, 1.22; + song light + RGB + custom loading RGB, 1.23) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
+| Status LED (write: 1 byte level 0..255, 1.13; or 3 bytes level + style + colour, 1.19; + preview, 1.21; + nothing playing, 1.22; + song light + RGB + custom loading RGB, 1.23; + gradient colours, 1.24) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
 
 Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications after discovery. Firmware signals readiness with status byte `0x01` and/or message `READY`.
 

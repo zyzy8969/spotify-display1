@@ -39,6 +39,31 @@ final class AlbumLightColourTests: XCTestCase {
         XCTAssertLessThan(g, 120)
     }
 
+    /// Owner, 2026-11-24: the biggest colour area wins, even over a smaller, more vivid one.
+    func testBiggestAreaBeatsMoreVividPatch() {
+        // 80% muted red (r 24/31, g 20/63, b 10/31), 20% pure blue.
+        let hex = AlbumLightColour.from(rgb565: frame { i in (i % 240) < 192 ? 0xC28A : 0x001F })
+        let (r, _, b) = channels(hex)
+        XCTAssertEqual(r, 255)
+        XCTAssertLessThan(b, 120)
+    }
+
+    /// Under 3% coloured: a small logo on black still sets the colour (vivid fallback), not white.
+    func testSmallLogoOnBlackUsesLogoColour() {
+        let hex = AlbumLightColour.from(rgb565: frame { i in (i % 240) < 4 ? 0xF800 : 0x0000 })
+        let (r, g, b) = channels(hex)
+        XCTAssertEqual(r, 255)
+        XCTAssertLessThan(g, 40)
+        XCTAssertLessThan(b, 40)
+    }
+
+    /// The LED's PWM is linear: a mid screen value must come out much lower (gamma 2.2), full stays full.
+    func testLedGamma() {
+        XCTAssertEqual(AlbumLightColour.ledGamma(0xFF8000), 0xFF3800)
+        XCTAssertEqual(AlbumLightColour.ledGamma(0xFFFFFF), 0xFFFFFF)
+        XCTAssertEqual(AlbumLightColour.ledGamma(0x000000), 0x000000)
+    }
+
     func testEmptyFrameIsWhite() {
         XCTAssertEqual(AlbumLightColour.from(rgb565: Data()), AlbumLightColour.grey)
     }
