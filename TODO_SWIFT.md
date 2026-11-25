@@ -4,6 +4,15 @@
 some bugs i forgot to put in this idk if they r solved  (4-byte cache key truncation, awaitWriteWindow lost-wakeup race, the two timeout-task continuation races, the drawHorizontalSplit/drawBarnDoors comment-vs-code mismatch, the per-pixel SPI in the diagonal/circular transitions)
 ---
 
+## NEW TODO (added 2026-11-25)
+
+- [ ] **Power latch on breadboard** (soft on/off: momentary button + P-MOSFET latch, GPIO holds power, long press releases). Blocks the custom PCB item below.
+- [ ] **Firmware clean shutdown:** on off-press, disconnect BLE, close any open SD file, then release the latch.
+- [ ] **Custom PCB with power latch:** bare ESP32-S3 module, LiPo charger with protection, latch circuit, quiescent-current test point. Pinout and parts list: see [`docs/CUSTOM_PCB_LATCH.md`](docs/CUSTOM_PCB_LATCH.md).
+- [ ] **Album color mode (toggle on/off in app):** when on, after the album art finishes downloading, the display shows a solid color closest to the album cover's dominant color. When off, normal album art behavior. Open design question: compute the color on the phone (it already has the image) and send it over BLE, or average the RGB565 buffer in firmware after download. Leaning phone-side, so firmware needs no new parsing.
+
+---
+
 ## GitHub Current Focus (April 2026)
 
 ### Done recently
