@@ -187,6 +187,7 @@ struct SettingsView: View {
             lightStylePicker
             if bleManager.lightStyle == .consumer {
                 loadingColourPicker
+                songLightPicker
             }
             if bleManager.isConnected && bleManager.boardSupportsStatusLed && !bleManager.boardSupportsLights {
                 Text("This display's firmware only knows the developer lights. Flash the latest firmware for the consumer lights and loading colour.")
@@ -242,36 +243,152 @@ struct SettingsView: View {
                 .themeText(.rowValue)
                 .foregroundStyle(theme.ink)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 6) {
-                ForEach(LoadingColour.allCases) { colour in
+                ForEach(LoadingColour.allCases.filter { $0 != .custom }) { colour in
                     let selected = bleManager.loadingColour == colour
                     Button { bleManager.setLoadingColour(colour) } label: {
-                        VStack(spacing: 4) {
-                            ZStack {
-                                LoadingSwatch(colour: colour, pulsing: selected)
-                                    .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
-                                    .frame(width: 26, height: 26)
-                                if selected {
-                                    Circle()
-                                        .stroke(theme.ink, lineWidth: 2)
-                                        .frame(width: 34, height: 34)
-                                }
-                            }
-                            .frame(width: 36, height: 36)
-                            Text(colour.title)
-                                .themeText(.statCaption)
-                                .foregroundStyle(selected ? theme.ink : theme.inkSoft)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
+                        swatchCell(title: colour.title, selected: selected) {
+                            LoadingSwatch(colour: colour, pulsing: selected)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 56)
-                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("\(colour.title) loading colour")
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
+                // BLE 1.23: any colour from the colour wheel.
+                wheelCell(hex: bleManager.customLoadingHex, selected: bleManager.loadingColour == .custom,
+                          label: "Custom loading colour") { bleManager.setCustomLoadingColour($0) }
             }
         }
+    }
+
+    /// BLE 1.23: what the light does while a song is on the keychain (after the loading pulse and green):
+    /// off, a slow rainbow, one colour you pick, or a colour that matches the cover.
+    private var songLightPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("During a song")
+                .themeText(.rowValue)
+                .foregroundStyle(theme.ink)
+            HStack(spacing: 0) {
+                ForEach(SongLight.allCases) { mode in
+                    let selected = bleManager.songLight == mode
+                    Button { bleManager.setSongLight(mode) } label: {
+                        HStack(spacing: 6) {
+                            StateMarker(filled: selected, fillColor: theme.display, ringColor: theme.ringOff, size: 9)
+                            Text(mode.title)
+                                .themeText(.rowValue)
+                                .foregroundStyle(selected ? theme.ink : theme.inkSoft)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(mode.title) during a song")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+            if bleManager.songLight == .colour {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6), spacing: 6) {
+                    ForEach(LoadingColour.solids) { colour in
+                        let selected = colour.hex == bleManager.songLightHex
+                        Button { bleManager.setSongLightColour(colour.hex) } label: {
+                            swatchCell(title: colour.title, selected: selected) {
+                                Circle().fill(Color(hex: colour.hex))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(colour.title) song colour")
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
+                    wheelCell(hex: bleManager.songLightHex,
+                              selected: !LoadingColour.solids.contains { $0.hex == bleManager.songLightHex },
+                              label: "Custom song colour") { bleManager.setSongLightColour($0) }
+                }
+            }
+            if bleManager.songLight == .album {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color(hex: bleManager.albumLightHex))
+                        .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
+                        .frame(width: 18, height: 18)
+                        .accessibilityHidden(true)
+                    Text("Now: picked from the cover on the keychain")
+                        .themeText(.footnote)
+                        .foregroundStyle(theme.inkSoft)
+                }
+            }
+            Text(songLightHint)
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var songLightHint: String {
+        switch bleManager.songLight {
+        case .off: return "The light goes dark once a cover is on."
+        case .rainbow: return "A slow rainbow while the song plays. New covers still pulse your loading colour, then green."
+        case .colour: return "Stays on your colour while the song plays. New covers still pulse your loading colour, then green."
+        case .album: return "Takes the strongest colour from each cover. Black-and-white covers get white."
+        }
+    }
+
+    /// One round swatch with its name under it; a ring marks the chosen one.
+    private func swatchCell<Fill: View>(title: String, selected: Bool, @ViewBuilder fill: () -> Fill) -> some View {
+        VStack(spacing: 4) {
+            ZStack {
+                fill()
+                    .overlay(Circle().stroke(theme.ringOff, lineWidth: 1))
+                    .frame(width: 26, height: 26)
+                if selected {
+                    Circle()
+                        .stroke(theme.ink, lineWidth: 2)
+                        .frame(width: 34, height: 34)
+                }
+            }
+            .frame(width: 36, height: 36)
+            Text(title)
+                .themeText(.statCaption)
+                .foregroundStyle(selected ? theme.ink : theme.inkSoft)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, minHeight: 56)
+        .contentShape(Rectangle())
+    }
+
+    /// The colour-wheel cell (BLE 1.23): the system colour picker; picking a colour selects it.
+    private func wheelCell(hex: UInt32, selected: Bool, label: String,
+                           set: @escaping (UInt32) -> Void) -> some View {
+        let binding = Binding<Color>(
+            get: { Color(hex: hex) },
+            set: { colour in
+                var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                UIColor(colour).getRed(&r, green: &g, blue: &b, alpha: &a)
+                func byte(_ x: CGFloat) -> UInt32 { UInt32(max(0, min(255, (x * 255).rounded()))) }
+                set((byte(r) << 16) | (byte(g) << 8) | byte(b))
+            })
+        return VStack(spacing: 4) {
+            ZStack {
+                ColorPicker(label, selection: binding, supportsOpacity: false)
+                    .labelsHidden()
+                    .frame(width: 30, height: 30)
+                if selected {
+                    Circle()
+                        .stroke(theme.ink, lineWidth: 2)
+                        .frame(width: 34, height: 34)
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(width: 36, height: 36)
+            Text("Wheel")
+                .themeText(.statCaption)
+                .foregroundStyle(selected ? theme.ink : theme.inkSoft)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, minHeight: 56)
+        .accessibilityElement(children: .contain)
     }
 
     /// Turns nerd mode on as a feature: the terminal icon appears at the top of the main screen.

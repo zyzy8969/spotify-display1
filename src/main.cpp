@@ -618,10 +618,23 @@ volatile uint8_t statusLedLevel = 255;
 // white, amber, pink, teal; 1.20 adds 6-10 orange, yellow, cyan, lavender, coral and 11 rainbow. loop() saves style + colour in NVS when they change.
 #define LED_STYLE_CONSUMER 0
 #define LED_STYLE_DEVELOPER 1
-#define LED_LOAD_COLOURS 12  // 0-10 solid colours, 11 = rainbow (BLE_PROTOCOL 1.20)
+#define LED_LOAD_COLOURS 13  // 0-10 solid colours, 11 = rainbow (1.20), 12 = custom RGB (1.23)
 #define LED_LOAD_RAINBOW 11
+#define LED_LOAD_CUSTOM 12
 volatile uint8_t ledStyle = LED_STYLE_CONSUMER;
 volatile uint8_t ledLoadColour = 0;
+// BLE_PROTOCOL 1.23 (bytes 6-12, consumer lights only): what the light does while a song plays and nothing
+// else is lit. Mode 0 = off (as before), 1 = slow rainbow, 2 = a static colour, 3 = the album's colour (the
+// app works it out per cover and sends it the same way as 2). Bytes 7-9 = that colour's RGB; bytes 10-12 =
+// the custom loading colour's RGB (loading colour 12).
+#define LED_SONG_OFF 0
+#define LED_SONG_RAINBOW 1
+#define LED_SONG_COLOUR 2
+#define LED_SONG_ALBUM 3
+volatile uint8_t ledSongMode = LED_SONG_OFF;
+volatile uint32_t ledSongRGB = 0xFFFFFF;
+volatile uint32_t ledLoadCustomRGB = 0x0050FF;
+volatile bool ledSongChanged = false;  // show the new song light at once if nothing else is lit
 volatile bool ledPrefsDirty = false;
 volatile bool ledStyleChanged = false;   // drop what the other style was showing
 volatile bool ledColourChanged = false;  // consumer: preview the new loading colour (two pulses)
@@ -636,6 +649,24 @@ class StatusLedCallbacks: public BLECharacteristicCallbacks {
         if (value.length() != 1 && value.length() < 3) return;
         statusLedLevel = (uint8_t)value[0];
         if (value.length() >= 5) ledIdleRainbow = (uint8_t)value[4] != 0;
+        if (value.length() >= 9) {
+            const uint8_t mode = (uint8_t)value[5] <= LED_SONG_ALBUM ? (uint8_t)value[5] : LED_SONG_OFF;
+            const uint32_t rgb = ((uint32_t)(uint8_t)value[6] << 16) | ((uint32_t)(uint8_t)value[7] << 8) |
+                                 (uint8_t)value[8];
+            if (mode != ledSongMode || rgb != ledSongRGB) {
+                ledSongMode = mode;
+                ledSongRGB = rgb;
+                ledSongChanged = true;
+            }
+        }
+        if (value.length() >= 12) {
+            const uint32_t rgb = ((uint32_t)(uint8_t)value[9] << 16) | ((uint32_t)(uint8_t)value[10] << 8) |
+                                 (uint8_t)value[11];
+            if (rgb != ledLoadCustomRGB) {
+                ledLoadCustomRGB = rgb;
+                if (ledLoadColour == LED_LOAD_CUSTOM) ledColourChanged = true;  // preview the new custom colour
+            }
+        }
         if (value.length() >= 4) {
             const bool hold = (uint8_t)value[3] != 0;
             if (hold != ledPreviewHold) {
@@ -1817,7 +1848,11 @@ static const uint32_t LED_LOAD_RGB[LED_LOAD_COLOURS] = {
   0xB48CFF,  // lavender
   0xFF6450,  // coral
   0xFFFFFF,  // rainbow: placeholder, the hue turns instead (LED_LOAD_RAINBOW)
+  0x0050FF,  // custom (1.23): placeholder, ledLoadCustomRGB is used instead (LED_LOAD_CUSTOM)
 };
+#define LED_SONG_RAINBOW_MS 8000  // 1.23 song light "rainbow": one colour wheel every 8 s
+#define LED_SONG_LEVEL 200        // 1.23 song light brightness (out of 255, before the caps)
+#define LED_SONG_FADE_MS 400      // the song light fades in after the green pulse / a settings change
 #define LED_LOAD_RAINBOW_MS 800   // rainbow loading colour: one full hue turn (quick: cached covers
                                   // draw in about a second). 1.25 red passes a second.
 #define LED_RGB_WHITE  0xFFFFFF
@@ -1880,6 +1915,16 @@ static bool ledUpdateConsumer(unsigned long t) {
       } else if (ledIdleRainbow) {
         // 1.22: nothing playing on Spotify: a slow rainbow, one colour wheel every 6 s.
         ledShow(ledHue((now % LED_IDLE_RAINBOW_MS) * 1536 / LED_IDLE_RAINBOW_MS), 200);
+      } else if (ledSongMode != LED_SONG_OFF) {
+        // 1.23: a song is on the board: rainbow, the static colour or the album's colour, faded in after
+        // the green pulse (ledModeSince is reset when it ends) or a settings change.
+        const uint16_t level = t < LED_SONG_FADE_MS ? (uint16_t)(t * LED_SONG_LEVEL / LED_SONG_FADE_MS)
+                                                    : LED_SONG_LEVEL;
+        if (ledSongMode == LED_SONG_RAINBOW) {
+          ledShow(ledHue((now % LED_SONG_RAINBOW_MS) * 1536 / LED_SONG_RAINBOW_MS), level);
+        } else {
+          ledShow(ledSongRGB, level);
+        }
       } else if (ledCharging()) {
         ledShow(LED_RGB_GREEN, 120);
       } else if (ledBatteryLow() && (now % 10000) < 150) {
@@ -1902,6 +1947,7 @@ static bool ledUpdateConsumer(unsigned long t) {
       {
         const uint8_t c = ledLoadColour % LED_LOAD_COLOURS;
         const uint32_t rgb = c == LED_LOAD_RAINBOW ? ledHue((t % LED_LOAD_RAINBOW_MS) * 1536 / LED_LOAD_RAINBOW_MS)
+                           : c == LED_LOAD_CUSTOM  ? (uint32_t)ledLoadCustomRGB
                                                    : LED_LOAD_RGB[c];
         ledShow(rgb, 255 - ledWave(t, 1600) * 191 / 255);
       }
@@ -1912,7 +1958,12 @@ static bool ledUpdateConsumer(unsigned long t) {
       return true;
     case LED_DONE:
       // "Confirmed, on the board": one short green pulse (fade in, fade out) after DRAWN.
-      if (t >= LED_GREEN_PULSE_MS) { ledMode = LED_OFF; ledWriteRaw(0, 0, 0); return true; }
+      if (t >= LED_GREEN_PULSE_MS) {
+        ledMode = LED_OFF;
+        ledModeSince = millis();  // 1.23: the song light fades in from here
+        ledWriteRaw(0, 0, 0);
+        return true;
+      }
       ledShow(LED_RGB_GREEN, (uint16_t)(sinf((float)t / (float)LED_GREEN_PULSE_MS * (float)M_PI) * 255.0f));
       return true;
     default:
@@ -2043,6 +2094,16 @@ static void ledPoll() {
       else ledModeSince = millis();  // restart the 2-minute limit
     } else if (!ledPreviewHold && ledMode == LED_PREVIEW) {
       ledSetMode(LED_OFF);
+    }
+  }
+  if (ledSongChanged) {
+    ledSongChanged = false;
+    // 1.23: a new song-light mode / colour shows at once (fading in) when nothing else is lit. A held
+    // loading-colour preview gives way so the choice can be seen; picking a loading colour brings it back.
+    // During a load / green pulse nothing changes: the new album colour appears after the green.
+    if (ledConsumer() && deviceConnected && (ledMode == LED_OFF || ledMode == LED_PREVIEW)) {
+      ledMode = LED_OFF;
+      ledModeSince = millis();
     }
   }
   bool receiving = deviceConnected && imageState == RECEIVING_DATA &&

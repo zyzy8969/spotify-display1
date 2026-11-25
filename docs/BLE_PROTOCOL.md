@@ -2,7 +2,21 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.22** (the keychain loops a rainbow while nothing is playing on Spotify.)
+Version: **1.23** (song lights: rainbow, a static colour or the album's colour while a song plays; custom colours.)
+
+Changes in 1.23 (2026-11-24; owner-approved). Additive: the status-light write (ffe6) may carry 12 bytes:
+`[level, style, colour, preview, nothing playing, song mode, song R, song G, song B, custom R, custom G, custom B]`.
+- `song mode` (byte 6): what consumer lights show while a song is on the board and nothing else is lit.
+  `0` off (as before), `1` slow rainbow (one colour wheel per 8 s), `2` a static colour, `3` the album's
+  colour. Bytes 7-9 are that colour's RGB (modes 2 and 3; the app works the album colour out from each
+  cover it sees drawn, `AlbumLightColour`, and re-sends the write when it changes). The loading pulse and
+  green confirm still play for every new cover; the song light fades in (0.4 s) after the green. The
+  nothing-playing rainbow (1.22) wins over it. A new mode / colour shows at once if nothing else is lit,
+  and ends a held loading-colour preview (1.21). Not saved on the board; the app sends it on every connect.
+- `colour` (byte 3) gains `12` = custom: the loading pulse uses bytes 10-12 as RGB (the app's colour wheel).
+  A 1.19-1.22 board shows 12 as blue.
+Developer lights ignore bytes 6-12. Older firmware reads only the bytes it knows, so no new `CAPS:`. The
+board has one status LED (a single WS2812B on GPIO15).
 
 Changes in 1.22 (2026-11-23; owner-approved). Additive: the status-light write (ffe6) may carry a 5th byte,
 `nothing playing`. `1` = the app is signed in to Spotify and no song is loaded (it shows "Play something on
@@ -251,7 +265,7 @@ log or collect unknown messages must ignore it.
 | Image (write + notify) | `0000ffe3-0000-1000-8000-00805f9b34fb` |
 | Message (notify, UTF-8) | `0000ffe4-0000-1000-8000-00805f9b34fb` |
 | Brightness (write, 1 byte 0..255) | `0000ffe5-0000-1000-8000-00805f9b34fb` |
-| Status LED (write: 1 byte level 0..255, 1.13; or 3 bytes level + style + colour, 1.19; + preview, 1.21; + nothing playing, 1.22) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
+| Status LED (write: 1 byte level 0..255, 1.13; or 3 bytes level + style + colour, 1.19; + preview, 1.21; + nothing playing, 1.22; + song light + RGB + custom loading RGB, 1.23) | `0000ffe6-0000-1000-8000-00805f9b34fb` |
 
 Subscribe to **Status**, **Cache**, **Image**, and **Message** notifications after discovery. Firmware signals readiness with status byte `0x01` and/or message `READY`.
 

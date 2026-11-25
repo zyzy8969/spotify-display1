@@ -99,8 +99,19 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
     case orange, yellow, cyan, lavender, coral
     /// The pulse also turns through the hues (0.8 s a turn).
     case rainbow
+    /// BLE_PROTOCOL 1.23: any colour from the colour wheel, sent as RGB (`customHex`). A 1.19-1.22
+    /// board shows it as blue.
+    case custom
 
     var id: Int { rawValue }
+    /// The 11 plain colours (no rainbow, no custom): also the static song-light swatches.
+    static var solids: [LoadingColour] { allCases.filter { $0 != .rainbow && $0 != .custom } }
+    static let customStorageKey = "statusLightCustomRGB"
+    /// The custom loading colour (0xRRGGBB), default blue.
+    static var customHex: UInt32 {
+        guard let v = UserDefaults.standard.object(forKey: customStorageKey) as? Int else { return 0x0050FF }
+        return UInt32(truncatingIfNeeded: v) & 0xFFFFFF
+    }
     var title: String {
         switch self {
         case .blue: return "Blue"
@@ -115,6 +126,7 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
         case .lavender: return "Lavender"
         case .coral: return "Coral"
         case .rainbow: return "Rainbow"
+        case .custom: return "Custom"
         }
     }
     var hex: UInt32 {
@@ -131,11 +143,44 @@ enum LoadingColour: Int, CaseIterable, Identifiable {
         case .lavender: return 0xB48CFF
         case .coral: return 0xFF6450
         case .rainbow: return 0xFFFFFF  // not used: the hue turns
+        case .custom: return LoadingColour.customHex
         }
     }
     static let storageKey = "statusLightColour"
     static var current: LoadingColour {
         LoadingColour(rawValue: UserDefaults.standard.integer(forKey: storageKey)) ?? .blue
+    }
+}
+
+/// What the keychain's light does while a song is on it and nothing else is lit (BLE_PROTOCOL 1.23,
+/// consumer lights only). The loading pulse and green confirm still play on every new cover first.
+enum SongLight: Int, CaseIterable, Identifiable {
+    case off = 0
+    /// A slow rainbow (one colour wheel every 8 s).
+    case rainbow
+    /// One colour, always the same (`staticHex`).
+    case colour
+    /// A colour picked from the cover on the board (`AlbumLightColour`), new for every song.
+    case album
+
+    var id: Int { rawValue }
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .rainbow: return "Rainbow"
+        case .colour: return "Colour"
+        case .album: return "Album"
+        }
+    }
+    static let storageKey = "statusLightSong"
+    static let staticStorageKey = "statusLightSongRGB"
+    static var current: SongLight {
+        SongLight(rawValue: UserDefaults.standard.integer(forKey: storageKey)) ?? .off
+    }
+    /// The static song colour (0xRRGGBB), default white.
+    static var staticHex: UInt32 {
+        guard let v = UserDefaults.standard.object(forKey: staticStorageKey) as? Int else { return 0xFFFFFF }
+        return UInt32(truncatingIfNeeded: v) & 0xFFFFFF
     }
 }
 

@@ -42,6 +42,13 @@ final class BLEManager: NSObject, ObservableObject {
     /// Consumer / developer lights and the loading colour (saved on the phone; sent with the level).
     @Published private(set) var lightStyle: LightStyle = .current
     @Published private(set) var loadingColour: LoadingColour = .current
+    /// BLE 1.23: the colour-wheel loading colour (used when `loadingColour == .custom`).
+    @Published private(set) var customLoadingHex: UInt32 = LoadingColour.customHex
+    /// BLE 1.23: what the light does while a song is on the board (consumer lights), and the static colour.
+    @Published private(set) var songLight: SongLight = .current
+    @Published private(set) var songLightHex: UInt32 = SongLight.staticHex
+    /// BLE 1.23: the colour picked from the cover on the board (`AlbumLightColour`), for `.album`.
+    @Published private(set) var albumLightHex: UInt32 = AlbumLightColour.grey
     /// The loading-colour picker is on screen: the board keeps pulsing the colour (BLE_PROTOCOL 1.21).
     /// Lives here, not in the extension with `setLightPreview`: extensions can't hold stored properties.
     private var lightPreviewHold = false
@@ -52,7 +59,7 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var connectedAt: Date?
     @Published private(set) var everConnected = false
     /// Slider settings whose writes are throttled (see `throttledWrite`).
-    private enum ThrottledSetting { case brightness, statusLed }
+    private enum ThrottledSetting { case brightness, statusLed, lightColour }
     private var lastSettingWriteAt: [ThrottledSetting: Date] = [:]
     private var settingWriteScheduled: Set<ThrottledSetting> = []
     @Published private(set) var transferLog: [TransferLogEntry] = []
@@ -133,7 +140,9 @@ final class BLEManager: NSObject, ObservableObject {
     /// the board starts drawing a frame (`TRANSITION_START`) and again when a draw is confirmed:
     /// a fresh send's bytes, a cache hit's downloaded cover converted exactly like a send (so it
     /// matches the SD copy), a photo's bytes. nil = waiting screen (after a disconnect) or unknown.
-    @Published private(set) var boardFrame: Data?
+    @Published private(set) var boardFrame: Data? {
+        didSet { updateAlbumLight() }
+    }
     /// Newest `TRANSITION_START` (BLE_PROTOCOL 1.13): the board is about to draw a transition.
     /// `newFrame` is filled in when the app has it (for a cache hit, once the cover is converted).
     @Published private(set) var transitionStart: TransitionStartEvent?
@@ -1783,6 +1792,44 @@ extension BLEManager {
         writeStatusLight()
     }
 
+    /// Loading colour from the colour wheel (BLE 1.23): selects `.custom` too. Throttled, since the
+    /// wheel reports every drag step.
+    func setCustomLoadingColour(_ hex: UInt32) {
+        customLoadingHex = hex & 0xFFFFFF
+        loadingColour = .custom
+        UserDefaults.standard.set(Int(customLoadingHex), forKey: LoadingColour.customStorageKey)
+        UserDefaults.standard.set(LoadingColour.custom.rawValue, forKey: LoadingColour.storageKey)
+        throttledWrite(.lightColour) { [weak self] in self?.writeStatusLight() }
+    }
+
+    /// The light while a song is on the board (BLE 1.23): off, rainbow, a static colour or the album's.
+    func setSongLight(_ mode: SongLight) {
+        songLight = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: SongLight.storageKey)
+        if mode == .album, let frame = boardFrame { albumLightHex = AlbumLightColour.from(rgb565: frame) }
+        writeStatusLight()
+        log("tx      song light: \(mode.title)", kind: .tx)
+    }
+
+    /// The static song colour (a swatch or the colour wheel); selects `.colour` too.
+    func setSongLightColour(_ hex: UInt32) {
+        songLightHex = hex & 0xFFFFFF
+        songLight = .colour
+        UserDefaults.standard.set(Int(songLightHex), forKey: SongLight.staticStorageKey)
+        UserDefaults.standard.set(SongLight.colour.rawValue, forKey: SongLight.storageKey)
+        throttledWrite(.lightColour) { [weak self] in self?.writeStatusLight() }
+    }
+
+    /// A new cover is on (or going onto) the board: in album mode, work out its colour and send it. The
+    /// board keeps it dark through the loading pulse and green, then fades it in.
+    private func updateAlbumLight() {
+        guard songLight == .album, let frame = boardFrame else { return }
+        let hex = AlbumLightColour.from(rgb565: frame)
+        guard hex != albumLightHex else { return }
+        albumLightHex = hex
+        writeStatusLight()
+    }
+
     /// Spotify has no song (BLE 1.22): the keychain loops a slow rainbow until one plays. Sent with
     /// every status-light write, so a reconnect picks it up too.
     func setNothingPlaying(_ on: Bool) {
@@ -1799,14 +1846,17 @@ extension BLEManager {
         writeStatusLight()
     }
 
-    /// ffe6: [level, style, colour, preview, nothing playing] to boards that said `CAPS:lights`
-    /// (1.19-1.21 boards read only what they know and ignore the rest); just [level] to older ones (they
-    /// drop any other length, which would lose the level).
+    /// ffe6: [level, style, colour, preview, nothing playing, song light, song R, G, B, custom R, G, B]
+    /// to boards that said `CAPS:lights` (1.19-1.22 boards read only what they know and ignore the rest;
+    /// they show the custom loading colour 12 as blue); just [level] to older ones (they drop any other
+    /// length, which would lose the level).
     private func writeStatusLight() {
         guard let p = peripheral, let c = statusLedChar else { return }
+        let song = songLight == .album ? albumLightHex : songLightHex
+        func rgb(_ hex: UInt32) -> [UInt8] { [UInt8((hex >> 16) & 0xFF), UInt8((hex >> 8) & 0xFF), UInt8(hex & 0xFF)] }
         let bytes: [UInt8] = boardSupportsLights
             ? [statusLedLevel, UInt8(lightStyle.rawValue), UInt8(loadingColour.rawValue), lightPreviewHold ? 1 : 0,
-               nothingPlaying ? 1 : 0]
+               nothingPlaying ? 1 : 0, UInt8(songLight.rawValue)] + rgb(song) + rgb(customLoadingHex)
             : [statusLedLevel]
         p.writeValue(Data(bytes), for: c, type: .withResponse)
     }
