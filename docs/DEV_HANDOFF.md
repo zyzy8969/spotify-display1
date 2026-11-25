@@ -4,6 +4,11 @@ Last updated: 2026-11-24
 
 ## What was committed
 
+- **2026-11-24 (later), `feat/gif` (BLE 1.26):** GIF replay from the board's memory (cover <-> GIF flip
+  like photos), Bayer dither for GIF frames, "GIFs take a little longer" note on the cover, GIPHY taps fixed
+  (UIKit image view swallowed them), light style moved to Settings > Advanced, the app's GIPHY key built in by
+  CI from the `GIPHY_API_KEY` secret (customers never paste a key), and the firmware clear-cache fix (it
+  never deleted anything). Script: `docs/VALIDATION_CHECKLIST.md` "GIFs round 2".
 - **2026-11-24, `feat/gif` (BLE 1.25, awaiting CI and device test):** GIFs. Photos page gains a GIFs tab:
   GIPHY search (owner's own key, Settings or the tab; nothing stored, GIPHY's terms) or 4 s of one video
   from a chosen start. 120x120 frames, stretched, no dither, max 48, one deflated "ANIM" transfer; firmware

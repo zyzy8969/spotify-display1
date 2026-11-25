@@ -177,7 +177,8 @@ enum ImageProcessor {
     /// Rasterizes the graded CGImage to RGBA, then Atkinson-dithers to LE RGB565.
     /// Uses an interleaved RGB float buffer + unsafe pointers — eliminates ~1 M function calls vs the old per-channel approach.
     /// 8x8 Bayer threshold matrix (0...63).
-    private static let bayer8: [Float] = [
+    /// 8x8 ordered-dither thresholds 0...63 (also used for GIF frames, `AnimationPrep`).
+    static let bayer8: [Float] = [
          0, 32,  8, 40,  2, 34, 10, 42,
         48, 16, 56, 24, 50, 18, 58, 26,
         12, 44,  4, 36, 14, 46,  6, 38,

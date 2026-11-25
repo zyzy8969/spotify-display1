@@ -10,10 +10,9 @@ struct GifPageContent: View {
     let close: () -> Void
 
     @ObservedObject private var search = GifSearchModel.shared
+    /// Only read, so the tab updates when a development key is set in Settings > Advanced.
     @AppStorage(GiphyClient.keyDefaultsKey) private var giphyKey = ""
     @Environment(\.theme) private var theme
-    /// A key being pasted, saved only on "Use this key" (the field would vanish after one character).
-    @State private var draftKey = ""
 
     // Video -> GIF.
     @State private var pickedVideo: PhotosPickerItem?
@@ -128,25 +127,10 @@ struct GifPageContent: View {
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.ringOff, lineWidth: 1))
     }
 
-    /// No key yet: paste it right here (the same setting as Settings > Advanced).
+    /// No key in this build. Customers never handle keys: the cloud build puts the app's own key in
+    /// (GitHub secret `GIPHY_API_KEY`); the Settings override is only for development.
     private var keyEntry: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            heading("GIPHY key", note: "To search GIPHY, paste your free API key from developers.giphy.com (Create an App, then API). It stays on this phone.")
-            TextField("", text: $draftKey, prompt: Text("Paste your GIPHY key").foregroundColor(theme.inkFaint))
-                .themeText(.rowValue)
-                .foregroundStyle(theme.ink)
-                .keyboardType(.asciiCapable)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .submitLabel(.done)
-                .onSubmit(useKey)
-                .padding(.horizontal, 12)
-                .frame(minHeight: 48)
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.ringOff, lineWidth: 1))
-                .accessibilityLabel("GIPHY API key")
-            textButton("Use this key", action: useKey)
-                .disabled(draftKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
+        heading("GIF search", note: "GIF search isn\u{2019}t set up in this version of the app. You can still make a GIF from one of your videos.")
     }
 
     // MARK: Video
@@ -262,15 +246,6 @@ struct GifPageContent: View {
                 .foregroundStyle(theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    /// Saves the pasted key (the same setting as Settings > Advanced) and loads trending with it.
-    private func useKey() {
-        let key = draftKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
-        giphyKey = key
-        draftKey = ""
-        Task { await search.load(reset: true) }
     }
 
     private func send(_ choice: GifChoice) {

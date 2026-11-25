@@ -17,7 +17,9 @@ listening as album art. Three cooperating parts:
 
 GIFs (BLE 1.25, 2026-11-24): GIPHY search or 4 s of one video on the Photos page's GIFs tab (nothing saved;
 frames stretched to square), 120x120 frames held in PSRAM and looped by `animTick()` in `loop()`; never on SD.
-The app's cover plays the same frames (`BLEManager.playingAnimation`). Planned next: peer-to-peer connection (see
+The app's cover plays the same frames (`BLEManager.playingAnimation`). The board keeps its last GIF in PSRAM
+for a cover tap to replay it (BLE 1.26). The GIPHY key is the app's own, built in by CI from the
+`GIPHY_API_KEY` repository secret; never commit it. Planned next: peer-to-peer connection (see
 `docs/FUTURE_*.md`).
 
 ## Developer environment constraints (important)

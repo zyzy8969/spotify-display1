@@ -15,6 +15,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The app's own GIPHY key, so customers never handle one. Stored as the repository secret
+      # GIPHY_API_KEY, written into Info.plist on the runner only (never committed). Without the secret
+      # (forks, pull requests from forks) the key stays empty and GIF search says it isn't set up.
+      - name: Embed GIPHY key
+        env:
+          GIPHY_API_KEY: ${{ secrets.GIPHY_API_KEY }}
+        run: |
+          if [ -n "$GIPHY_API_KEY" ]; then
+            plutil -replace GiphyAPIKey -string "$GIPHY_API_KEY" SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/Resources/Info.plist
+            echo "GIPHY key embedded"
+          else
+            echo "No GIPHY_API_KEY secret: GIF search will be off in this build"
+          fi
+
       - name: Build app (no code signing)
         run: |
           xcodebuild \

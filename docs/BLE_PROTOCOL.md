@@ -2,7 +2,22 @@
 
 **Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
-Version: **1.25** (GIFs: one 16-byte "ANIM" header + a deflated stream of every frame; the board loops it.)
+Version: **1.26** (GIF replay: the board shows the GIF it still holds again, for the cover <-> GIF flip.)
+
+Changes in 1.26 (2026-11-24; owner-approved). Additive: **GIF replay**, announced by `CAPS:replay` (after
+`CAPS:anim`). Cache characteristic write, 20 bytes LE: magic `0xCAC4E1EE` + frame count `u16` + raw size
+`u32` + packed size `u32` + 6 padding bytes, i.e. the identity of the last GIF the app sent. The board keeps
+its last good GIF in PSRAM after a cover or photo replaces it on screen (until a new GIF arrives or the board
+powers off; never on SD). If that identity matches, it draws frame 0 with a random enabled transition (or the
+1.16 one-shot), loops it as in 1.25 and sends `TRANSITION_START` → `DRAWN` → `TRANSITION:<name>` → Cache
+`0x01`. Otherwise it replies Cache `0x00` at once and the app sends the GIF again (1.25 transfer). Like a
+cache check it waits for a finished transfer to be drawn and drops a partial one; it counts as an owed cache
+reply. Firmware fix with no wire change: the clear-cache command (`0xCAC4E1EA`) now really deletes
+`/cache/*.bin` (and leftover `.tmp`). It deleted by bare file name, which failed for every file, then
+emptied the in-memory index anyway, so the app showed 0 while the card kept everything.
+App: GIF frames are now ordered-dithered (8x8 Bayer, same thresholds as `DitherMode.bayer`), not rounded.
+
+Version 1.25: GIFs: one 16-byte "ANIM" header + a deflated stream of every frame; the board loops it.
 
 Changes in 1.25 (2026-11-24; owner-approved). Additive: a new **animation transfer** on the Image
 characteristic (ffe3), announced by `CAPS:anim` in the stats reply (sent only when the board could set
@@ -24,7 +39,7 @@ aside its two 2 MB PSRAM buffers).
   16-byte header with `ERROR: Invalid image header`; the app only sends it after `CAPS:anim`.
 - App: GIFs come from GIPHY search (the owner's own API key, Settings or the GIFs tab) or from 4 s of a
   video from a chosen start (12 fps). Nothing is saved on the phone. Frames are 120x120, stretched to the
-  square (nothing cropped, like photos), rounded to 565 without dither, at most 48. The app's cover plays
+  square (nothing cropped, like photos), rounded to 565 without dither (Bayer dither since 1.26), at most 48. The app's cover plays
   the same frames while the GIF is up.
   Python tools: not implemented (they never send animations).
 
@@ -385,6 +400,7 @@ message they do not recognise.
 | `DRAWN` | A cover is fully on screen, with the green LED (1.18) | iOS: pop the "new" / "cache" word now |
 | `CAPS:lights` | Stats request, after `CAPS:newsong` (1.19) | iOS: may send the 3-byte status-light write (style + loading colour) |
 | `CAPS:anim` | Stats request, after `CAPS:lights`, only if the animation buffers exist (1.25) | iOS: may send 16-byte "ANIM" transfers (GIFs) |
+| `CAPS:replay` | Stats request, right after `CAPS:anim` (1.26) | iOS: may send the GIF replay write (cover <-> GIF flip) |
 | `TRANSITION:<name>` | Cache hit, right after `CACHE_HIT_MS`; since 1.12 also after every fresh draw, before the ACK | iOS: replayed on the cover, shown in the Live tab and the transfer log |
 | `CAPS:transitions` | Stats request, next to `CAPS:deflate` (1.12) | iOS: may send the transitions mask and `0xFD` frames this connection |
 | `CACHE_RENDERED` | Cache hit, after `TRANSITION` | Authoritative hit confirmation |

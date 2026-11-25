@@ -100,8 +100,8 @@ struct KeychainAnimation {
 
 /// Turns GIF bytes or a video clip into a `KeychainAnimation`. Call off the main thread.
 /// Frames are stretched to the square, nothing cropped off (owner's choice 2026-11-24, same as photos),
-/// and packed by rounding, not dithered: dither noise changes every frame (the picture shimmers) and stops
-/// the frames compressing, which is most of what makes a GIF quick to send.
+/// and packed with a fixed ordered (Bayer) dither: error diffusion would change every frame (the picture
+/// shimmers) and stop the frames compressing, which is most of what makes a GIF quick to send.
 enum AnimationPrep {
     /// One source frame and how long it stays up.
     struct SourceFrame {
@@ -254,7 +254,29 @@ enum AnimationPrep {
             return true
         }
         guard drawn else { return nil }
-        return packRGB565(rgba, pixels: side * side)
+        return packRGB565Bayer(rgba, side: side)
+    }
+
+    /// RGBA bytes -> RGB565 LE with the 8x8 ordered (Bayer) pattern (owner's choice 2026-11-24): smooths
+    /// banding like the covers' dither, but the pattern is fixed to the pixel, so it does not crawl from
+    /// frame to frame, and it compresses far better than error diffusion. Same thresholds as
+    /// `DitherMode.bayer`. Pure black and white stay pure.
+    static func packRGB565Bayer(_ rgba: [UInt8], side: Int) -> Data {
+        var out = [UInt8](repeating: 0, count: side * side * 2)
+        let bayer = ImageProcessor.bayer8
+        for y in 0..<side {
+            for x in 0..<side {
+                let i = y * side + x
+                let t = (bayer[((y & 7) << 3) | (x & 7)] + 0.5) / 64
+                let r = Int(min(255, Float(rgba[i * 4]) + t * 8)) >> 3
+                let g = Int(min(255, Float(rgba[i * 4 + 1]) + t * 4)) >> 2
+                let b = Int(min(255, Float(rgba[i * 4 + 2]) + t * 8)) >> 3
+                let v = UInt16((r << 11) | (g << 5) | b)
+                out[i * 2] = UInt8(v & 0xFF)
+                out[i * 2 + 1] = UInt8(v >> 8)
+            }
+        }
+        return Data(out)
     }
 
     /// RGBA bytes -> RGB565 LE (low byte first), rounding each channel.

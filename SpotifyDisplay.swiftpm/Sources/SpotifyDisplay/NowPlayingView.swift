@@ -214,7 +214,7 @@ struct NowPlayingScreen: View {
             shownImage = Self.decode(bleManager.currentAlbumArt)
             shownIsPhoto = bleManager.photoHold
             if !shownIsPhoto { songImage = shownImage }
-            photoImage = Self.decode(bleManager.lastPhotoJPEG)
+            photoImage = Self.decode(backPictureJPEG)
             if layoutNerd != nerdOn {
                 layoutNerd = nerdOn
             }
@@ -237,8 +237,14 @@ struct NowPlayingScreen: View {
             shownIsPhoto = false
             songImage = shownImage
         }
-        .onChange(of: bleManager.lastPhotoJPEG) { data in
-            photoImage = Self.decode(data)
+        .onChange(of: bleManager.lastPhotoJPEG) { _ in
+            photoImage = Self.decode(backPictureJPEG)
+        }
+        .onChange(of: bleManager.lastGIFPoster) { _ in
+            photoImage = Self.decode(backPictureJPEG)
+        }
+        .onChange(of: bleManager.lastPictureIsGIF) { _ in
+            photoImage = Self.decode(backPictureJPEG)
         }
         .onChange(of: shownImage) { _ in
             // The front now shows what the board drew: the swap's stand-ins are no longer needed.
@@ -331,7 +337,7 @@ struct NowPlayingScreen: View {
             let last = bleManager.transferLog.last
             // A song's cache-hit entry is not this fresh send; a photo's is (photos always go
             // through this pending path, from the card or sent).
-            let succeeded = last.map { $0.id != pendingSinceLogID && (!$0.cacheHit || $0.outcome == "photo") } ?? false
+            let succeeded = last.map { $0.id != pendingSinceLogID && (!$0.cacheHit || $0.outcome == "photo" || $0.outcome == "gif") } ?? false
             // Nothing to mirror without a display: show the song's cover rather than a stale one.
             if succeeded || !bleManager.isConnected {
                 shownImage = pending
@@ -471,6 +477,25 @@ struct NowPlayingScreen: View {
         }
     }
 
+    /// Cover tap after a GIF: the keychain shows it again from its memory (or it is re-sent).
+    private func showGIFAgain() {
+        gifTask?.cancel()
+        gifTask = Task {
+            do {
+                try await bleManager.showLastAnimationAgain()
+            } catch is CancellationError {
+            } catch {
+                showGIFError(error.localizedDescription)
+            }
+        }
+    }
+
+    /// The picture for the card behind the song: the last GIF's first frame or the last photo, whichever
+    /// a cover tap would bring back.
+    private var backPictureJPEG: Data? {
+        bleManager.lastPictureIsGIF ? bleManager.lastGIFPoster : bleManager.lastPhotoJPEG
+    }
+
     private func showGIFError(_ message: String) {
         photoErrorIsGIF = true
         photoError = message
@@ -492,6 +517,8 @@ struct NowPlayingScreen: View {
         let coming = backImage
         if bleManager.photoHold {
             backToSpotify()
+        } else if bleManager.lastPictureIsGIF, bleManager.canShowGIFAgain {
+            showGIFAgain()
         } else if let jpeg = bleManager.lastPhotoJPEG {
             sendPhoto(jpeg)
         } else {
@@ -650,7 +677,7 @@ struct NowPlayingScreen: View {
     /// keychain's own transition for the swap (mirrored); the back card takes the old picture.
     private func art(side: CGFloat) -> some View {
         let photoUp = bleManager.photoHold
-        let canReshow = !photoUp && bleManager.lastPhotoJPEG != nil
+        let canReshow = !photoUp && (bleManager.lastPhotoJPEG != nil || bleManager.canShowGIFAgain)
         let back = backImage
         // Keyring: the cover sits in the drawn keychain, the other picture tucked behind the case.
         // Nerd mode's small cover is bare (a keychain that size reads as noise), but it is the same
@@ -698,7 +725,7 @@ struct NowPlayingScreen: View {
         .accessibilityAddTraits(photoUp || canReshow ? .isButton : [])
         .accessibilityHint(
             photoUp ? "Double-tap to go back to Spotify"
-                : (canReshow ? "Double-tap to show your last photo on the display" : "")
+                : (canReshow ? (bleManager.lastPictureIsGIF ? "Double-tap to show your last GIF on the display" : "Double-tap to show your last photo on the display") : "")
         )
         .accessibilityAction { coverTapped() }
     }
@@ -714,6 +741,20 @@ struct NowPlayingScreen: View {
             // A GIF on the keychain plays here too, frame for frame (only while it is the front card).
             animation: shownIsPhoto ? bleManager.playingAnimation : nil
         )
+        .overlay(alignment: .bottom) {
+            if bleManager.sendingAnimation {
+                Text("GIFs take a little longer to send")
+                    .themeText(.footnote)
+                    .foregroundStyle(theme.ink)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(theme.background.opacity(0.9), in: Capsule())
+                    .padding(.bottom, 8)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: bleManager.sendingAnimation)
     }
 
     /// The progress line: under the big cover in normal mode; full width and thinner under the cover

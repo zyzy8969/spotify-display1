@@ -226,6 +226,7 @@ struct ArtStage: View {
         if let animation, !reduceMotion, let image, image === self.image {
             AnimatedImageView(image: animation, pixelated: true)
                 .frame(width: side, height: side)
+                .allowsHitTesting(false)  // the cover tap (back to Spotify) must still reach the card
         } else if let image {
             Image(uiImage: image)
                 .resizable()

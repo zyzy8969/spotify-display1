@@ -130,11 +130,12 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .accessibilityAddTraits(.isHeader)
             .accessibilityValue(showAdvanced ? "Open" : "Closed")
-            .accessibilityHint(showAdvanced ? "Hides the advanced settings" : "Shows nerd mode, stats, clearing the keychain and the Spotify Client ID")
+            .accessibilityHint(showAdvanced ? "Hides the advanced settings" : "Shows nerd mode, the light style, stats, clearing the keychain, the Spotify Client ID and the GIPHY key")
 
             if showAdvanced {
                 VStack(alignment: .leading, spacing: 22) {
                     nerdModeRow
+                    lightStyleRow
                     lifetimeStatsRow
                     cacheRows
                     ThemedDivider()
@@ -189,7 +190,6 @@ struct SettingsView: View {
                     .foregroundStyle(theme.inkSoft)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            lightStylePicker
             if bleManager.lightStyle == .consumer {
                 loadingColourPicker
                 songLightPicker
@@ -204,6 +204,17 @@ struct SettingsView: View {
                     .foregroundStyle(theme.inkSoft)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// Advanced: Consumer or Developer lights (moved out of the everyday settings, owner 2026-11-24).
+    private var lightStyleRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Light style")
+                .themeText(.row)
+                .foregroundStyle(theme.ink)
+                .accessibilityAddTraits(.isHeader)
+            lightStylePicker
         }
     }
 
@@ -751,8 +762,8 @@ struct SettingsView: View {
                 .foregroundStyle(theme.ink)
                 .accessibilityAddTraits(.isHeader)
             Text(GiphyClient.apiKey == nil
-                 ? "Needed to search GIFs on the Photos page. Get a free key at developers.giphy.com (Create an App, API)."
-                 : "Set. GIF search on the Photos page uses it.")
+                 ? "For development. The cloud build puts the app's own key in (GitHub secret GIPHY_API_KEY); a key pasted here overrides it."
+                 : "GIF search is set up. A key pasted here overrides the one built into the app.")
                 .themeText(.footnote)
                 .foregroundStyle(theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)

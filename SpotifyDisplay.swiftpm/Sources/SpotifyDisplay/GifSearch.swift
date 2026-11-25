@@ -225,12 +225,16 @@ struct GifThumb: View {
             .aspectRatio(1, contentMode: .fit)
             .overlay {
                 if let image {
+                    // A UIKit view inside a Button's label takes the touch and the Button never fires
+                    // (owner, 2026-11-24: "it doesn't do anything when I click them").
                     AnimatedImageView(image: image)
+                        .allowsHitTesting(false)
                 } else {
                     theme.artSurface
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
             .task(id: url) {
                 let key = (url.absoluteString + (reduceMotion ? "|still" : "")) as NSString
                 if let cached = Self.cache.object(forKey: key) {
@@ -290,6 +294,7 @@ struct AnimatedImageView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIImageView {
         let view = UIImageView()
+        view.isUserInteractionEnabled = false  // taps belong to the SwiftUI around it
         view.contentMode = .scaleToFill
         view.clipsToBounds = true
         for axis in [NSLayoutConstraint.Axis.horizontal, .vertical] {

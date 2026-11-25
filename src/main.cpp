@@ -8,6 +8,7 @@
 #include <SPI.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <vector>
 
 // Bluetooth LE includes
 #include <BLEDevice.h>
@@ -109,6 +110,16 @@ static bool animActive = false;
 static AnimHeader anim = {0, 0, 0, 0};
 static uint16_t animIndex = 0;
 static unsigned long animNextAt = 0;
+// animFrames holds a whole, valid GIF (`anim`): it stays after a cover replaces it on screen, so the app can
+// ask for it again (1.26 replay) until a new GIF is received or the board powers off.
+static bool animValid = false;
+// BLE_PROTOCOL 1.26 replay: Cache characteristic, 20 bytes: magic + frame count u16 + raw size u32 + packed
+// size u32 + 6 padding. Shows the held GIF again if it is that one; replies 0x01 shown / 0x00 send it.
+#define ANIM_REPLAY_MAGIC 0xCAC4E1EEu
+volatile bool animReplayPending = false;
+volatile uint16_t animReplayCount = 0;
+volatile uint32_t animReplayRaw = 0;
+volatile uint32_t animReplayPacked = 0;
 // False whenever a non-cover screen (startup / ready / Bluetooth) is up: the old frame is then
 // treated as black instead of a stale cover.
 static bool panelShowsImage = false;
@@ -470,6 +481,19 @@ class CacheCheckCallbacks: public BLECharacteristicCallbacks {
         if (magic == TRANSITION_NEXT_MAGIC) {
             nextDrawTransitionAt = millis();
             nextDrawTransition = (uint8_t)value[4];
+            return;
+        }
+
+        // GIF replay (iOS app, 1.26). Only copies the identity; loop() checks and draws.
+        if (magic == ANIM_REPLAY_MAGIC) {
+            animReplayCount = (uint16_t)((uint8_t)value[4] | ((uint8_t)value[5] << 8));
+            auto le32 = [&](size_t off) {
+                return (uint32_t)(uint8_t)value[off] | ((uint32_t)(uint8_t)value[off + 1] << 8) |
+                       ((uint32_t)(uint8_t)value[off + 2] << 16) | ((uint32_t)(uint8_t)value[off + 3] << 24);
+            };
+            animReplayRaw = le32(6);
+            animReplayPacked = le32(10);
+            animReplayPending = true;
             return;
         }
 
@@ -1883,33 +1907,35 @@ void clearCacheDirectory() {
     clearCacheIndex();
     return;
   }
-  uint32_t removed = 0;
+  // Collect first, delete after: removing entries while the directory is being walked can skip some.
+  // getNextFileName() gives the full path ("/cache/v1_....bin"). The old loop used File::name(), which on
+  // this core is the bare name, so SD.remove() failed for every file and the card was never emptied
+  // (owner, 2026-11-24: "I have to delete it on the computer").
+  std::vector<String> paths;
   for (;;) {
-    File f = root.openNextFile();
-    if (!f) break;
-    if (!f.isDirectory()) {
-      String name = String(f.name());
-      name.toLowerCase();
-      if (name.endsWith(".bin")) {
-        String path = String(f.name());
-        uint8_t key[16];
-        uint8_t version = 0;
-        if (parseCacheFilenameToKey(path, key, &version)) {
-          if (SD.remove(path)) {
-            cacheIndexRemove(key);
-            removed++;
-          }
-        } else if (SD.remove(path)) {
-          removed++;
-        }
-      }
-    }
-    f.close();
+    bool isDir = false;
+    String path = root.getNextFileName(&isDir);
+    if (path.length() == 0) break;
+    if (isDir) continue;
+    if (!path.startsWith("/")) path = "/cache/" + path;
+    String lower = path;
+    lower.toLowerCase();
+    if (lower.endsWith(".bin") || lower.endsWith(".tmp")) paths.push_back(path);
   }
   root.close();
+  uint32_t removed = 0, failed = 0;
+  for (const String& path : paths) {
+    if (SD.remove(path)) {
+      removed++;
+    } else {
+      failed++;
+      Serial.printf("Cache clear: could not remove %s\n", path.c_str());
+    }
+  }
   clearCacheIndex();
   unsigned long elapsed = millis() - start;
-  Serial.printf("Cache clear complete: removed=%lu elapsed=%lums\n", (unsigned long)removed, elapsed);
+  Serial.printf("Cache clear complete: removed=%lu failed=%lu elapsed=%lums\n", (unsigned long)removed,
+                (unsigned long)failed, elapsed);
 }
 
 // ============================================================================
@@ -2402,6 +2428,9 @@ void loop() {
     if (animFrames && animPacked) {
       pMsgChar->setValue("CAPS:anim");
       pMsgChar->notify();
+      // BLE_PROTOCOL 1.26: the last GIF can be shown again from memory (replay write).
+      pMsgChar->setValue("CAPS:replay");
+      pMsgChar->notify();
     }
     publishCacheCount();
     publishCacheStats();
@@ -2552,6 +2581,47 @@ void loop() {
     }  // not a probe
   }
 
+  // 1.26: show the GIF still held in memory again (cover <-> GIF flip). Like a cache check it waits for a
+  // finished transfer to be drawn first, and drops a partial one.
+  if (animReplayPending && !imageTransferComplete && !cacheCheckPending) {
+    animReplayPending = false;
+    if (imageState == RECEIVING_DATA) {
+      Serial.println("BLE: GIF replay — clearing partial image receive state");
+      imageState = WAITING_FOR_SIZE;
+      receivedBytes = 0;
+      expectedSize = 0;
+      completedImageBytes = 0;
+      rxCompressed = false;
+      rxAnim = false;
+      pendingTransition = 0xFF;
+    }
+    ledPreviewHold = false;
+    const bool held = animValid && anim.count == animReplayCount && anim.rawBytes == animReplayRaw &&
+                      anim.packedBytes == animReplayPacked;
+    Serial.printf("BLE: GIF replay — %s\n", held ? "held, showing it" : "not held, app will send it");
+    if (held) {
+      animStop();
+      ledSetMode(LED_OFF);
+      ledAtDrawStart = LED_CACHE;
+      animIndex = 0;
+      animRenderFrame(0);
+      showingStartupScreen = false;
+      String transitionName = drawImageWithTransitionChoice(imageBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                                            TRANSITION_DISPLAY_ONLY, /*quick=*/false);
+      ledSetMode(LED_DONE);
+      notifyDrawn();
+      animActive = true;
+      animNextAt = millis() + animDelayMs(0);
+      String msg = "TRANSITION:" + transitionName;
+      pMsgChar->setValue(msg.c_str());
+      pMsgChar->notify();
+      delay(5);
+    }
+    uint8_t response = held ? 0x01 : 0x00;
+    pCacheChar->setValue(&response, 1);
+    pCacheChar->notify();
+  }
+
   // Handle image transfer complete (triggered by lightweight callback)
   // This runs in main task with large stack - safe for SD card/display ops
   // While a frame is arriving nothing is drawn: the old picture stays up, and a transfer cut off by
@@ -2567,6 +2637,7 @@ void loop() {
       completedCompressed = false;
       animStop();
       const AnimHeader a = completedAnimHeader;
+      animValid = false;  // animFrames is overwritten now; only a clean inflate makes it replayable again
       unsigned long inflateStart = millis();
       size_t outBytes = 0;
       const bool ok = inflateInto(animPacked, completedImageBytes, animFrames, a.rawBytes, &outBytes);
@@ -2579,6 +2650,7 @@ void loop() {
         notifyImageTransferRejected("ERROR: Animation decompress failed");
       } else {
         anim = a;
+        animValid = true;
         animIndex = 0;
         animRenderFrame(0);
         showingStartupScreen = false;

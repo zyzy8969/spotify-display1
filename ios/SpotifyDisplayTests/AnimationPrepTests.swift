@@ -101,6 +101,21 @@ final class AnimationPrepTests: XCTestCase {
         XCTAssertEqual(image.duration, 0.4, accuracy: 0.001)
     }
 
+    /// GIF frames use the fixed Bayer pattern: black and white stay pure, a mid grey mixes neighbouring
+    /// 565 levels, and the same picture always gives the same bytes (no frame-to-frame crawl).
+    func testBayerKeepsExtremesAndIsStable() {
+        let side = 8
+        func solid(_ v: UInt8) -> [UInt8] { (0..<(side * side)).flatMap { _ in [v, v, v, 255] } }
+        func px(_ d: Data, _ i: Int) -> UInt16 { UInt16(d[i * 2]) | UInt16(d[i * 2 + 1]) << 8 }
+        let white = AnimationPrep.packRGB565Bayer(solid(255), side: side)
+        let black = AnimationPrep.packRGB565Bayer(solid(0), side: side)
+        XCTAssertTrue((0..<(side * side)).allSatisfy { px(white, $0) == 0xFFFF })
+        XCTAssertTrue((0..<(side * side)).allSatisfy { px(black, $0) == 0x0000 })
+        let grey = AnimationPrep.packRGB565Bayer(solid(130), side: side)
+        XCTAssertGreaterThan(Set((0..<(side * side)).map { px(grey, $0) }).count, 1)
+        XCTAssertEqual(grey, AnimationPrep.packRGB565Bayer(solid(130), side: side))
+    }
+
     /// The raw payload must fit the board's 2 MiB buffer at the app's frame cap.
     func testWorstCasePayloadFitsBoardBuffer() {
         let worst = KeychainAnimation.maxFrames * 2 + KeychainAnimation.maxFrames * side * side * 2

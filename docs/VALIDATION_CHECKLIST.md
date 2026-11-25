@@ -181,3 +181,19 @@ Paste your GIPHY key on the Photos page's GIFs tab (or Settings > Advanced) firs
       song's cover is back (the GIF is gone, as designed).
 - [ ] Covers and photos still send and cache-hit as before (the chunk/ACK code is now shared with GIFs).
 - [ ] Reduce Motion on: grid thumbnails and the cover show stills.
+
+### GIFs round 2 — feat/gif (BLE 1.26)
+
+- [ ] Clear the card cache from Settings: serial shows `Cache clear complete: removed=<n> failed=0`, the
+      count drops to 0, and the files are really gone (card in the computer: `/cache` is empty).
+- [ ] GIPHY: tapping a thumbnail now closes the page and sends it.
+- [ ] While a GIF sends, the cover shows "GIFs take a little longer to send"; it goes when the GIF is up.
+- [ ] Flip: GIF up -> tap cover -> song; tap again -> the GIF comes back in about a second (serial
+      `GIF replay — held, showing it`) and plays on the cover too. The card behind shows the GIF's first frame.
+- [ ] Power-cycle the keychain, reconnect, tap the cover: the GIF is sent again (replay says not held).
+- [ ] Show a photo, then tap twice: the photo comes back (not the GIF). Show a GIF again: the GIF comes back.
+- [ ] GIF colours: smooth gradients with a fine still pattern, no crawling noise between frames.
+- [ ] Settings: Consumer / Developer lights are under Advanced now; the colour pickers still show in the
+      everyday section for Consumer.
+- [ ] Cloud build with the `GIPHY_API_KEY` secret: GIF search works with nothing pasted. Without it the tab
+      says GIF search isn't set up (video still works).
