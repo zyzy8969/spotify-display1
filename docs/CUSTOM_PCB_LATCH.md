@@ -15,21 +15,47 @@ Status: planning. Pin assignments are TBD until the MCU module is chosen and the
 
 ## 2. Signals and pin plan
 
-The firmware pin map is in `src/main.cpp` (lines 19–30). The custom board will use an ESP32-S3 module, so these are the signals it needs, not final GPIO numbers.
+Source: the Waveshare ESP32-S3-R8 1.3" LCD pin sheet (project file). The firmware's pins in `src/main.cpp` match this sheet.
 
-| Signal | Purpose | GPIO |
+### Board pin map (from the Waveshare sheet)
+
+| GPIO | Used for | Notes |
 |---|---|---|
-| BTN_IN | Power button input (INPUT_PULLUP, debounced) | TBD |
-| LATCH_HOLD | Holds the power latch on; release to power off | TBD |
-| TFT_BL | Backlight PWM | TBD (current firmware: 20) |
-| TFT_RST / TFT_DC / TFT_CS / TFT_SCLK / TFT_MOSI | Display SPI | TBD (current firmware: 42 / 38 / 39 / 40 / 41) |
-| SD_CS / SD_MISO / SD_MOSI / SD_CLK | SD card SPI | TBD (current firmware: 17 / 16 / 18 / 21) |
-| VBAT_SENSE | Battery voltage ADC (optional v1) | TBD |
-| USB D+ / D- | Programming (if the module exposes them) | TBD |
+| 6 | VBAT_ADC | Battery voltage sense |
+| 15 | RGB | Onboard RGB LED |
+| 16 | SD_MISO | SD card |
+| 17 | SD_CS | SD card |
+| 18 | SD_MOSI | SD card |
+| 19 | RST_Control | Board reset control, don't reuse |
+| 20 | BL_PWM | Backlight PWM |
+| 21 | SD_CLK | SD card |
+| 38 | LCD DC | Display |
+| 39 | LCD CS | Display |
+| 40 | LCD CLK | Display |
+| 41 | LCD MOSI | Display |
+| 42 | LCD RES | Display reset |
+| 43 | U0TXD | USB-serial chip (CH343P), don't reuse |
+| 44 | U0RXD | USB-serial chip (CH343P), don't reuse |
+| 45 | IMU_INT2 | QMI8658 IMU, strapping pin |
+| 46 | IMU_INT1 | QMI8658 IMU, strapping pin |
+| 47 | IMU_SDA | QMI8658 IMU (I2C) |
+| 48 | IMU_SCL | QMI8658 IMU (I2C) |
 
-Avoid strapping pins GPIO0, GPIO3, GPIO45, GPIO46 for signals that must be stable at boot.
+**Broken out and unassigned ("OUT" column):** GPIO 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14.
 
-Pins can't be assigned until the module's datasheet is checked. The Waveshare pin table couldn't be fetched from this session.
+**Unlisted on the sheet:** GPIO 0, 26, 33–37. Avoid these: GPIO0 is a boot strapping pin, and GPIO33–37 are typically used internally by the octal PSRAM on R8 parts (verify against the module datasheet).
+
+### Proposed assignments for the latch (not yet validated)
+
+| Signal | Proposed GPIO | Why |
+|---|---|---|
+| BTN_IN | 1 | Unassigned, not a strapping pin, RTC-capable (usable for deep-sleep wake) |
+| LATCH_HOLD | 2 | Unassigned, not a strapping pin, RTC-capable |
+| VBAT_SENSE | 6 | Already wired to the battery ADC on this board |
+
+GPIO 3 is in the OUT column but is a strapping pin, so keep it off the button and latch.
+
+Keeping the display, SD, IMU, and backlight on their current pins means the firmware needs no changes for the custom board.
 
 ## 3. Parts to buy (v1 prototype)
 
