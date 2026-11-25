@@ -248,6 +248,9 @@ final class BLEManager: NSObject, ObservableObject {
     static let swapFlipTransition: UInt8 = 23
     /// A photo the person uploaded is on the display: Spotify sends are paused until `endPhotoHold()`.
     @Published private(set) var photoHold = false
+    /// The photo up is the automatic start-up picture, not one the person chose: the first song that
+    /// plays ends the hold (`SpotifyManager.sendIfNeeded`) instead of waiting for "Back to Spotify".
+    @Published private(set) var photoHoldIsStartup = false
     /// The last photo the person uploaded (square JPEG), so tapping the cover can show it again.
     /// In memory only: gone when the app quits.
     @Published private(set) var lastPhotoJPEG: Data?
@@ -603,6 +606,7 @@ final class BLEManager: NSObject, ObservableObject {
     func endPhotoHold() {
         guard photoHold else { return }
         photoHold = false
+        photoHoldIsStartup = false
         log("photo   released, Spotify resumes", kind: .info)
     }
 
@@ -617,7 +621,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// (`photoHold`) until `endPhotoHold()`. Since 2026-11-22 a photo is saved on the keychain's card
     /// under its own key (its bytes' hash) like a cover: the first show is a normal transfer, every
     /// later show (album -> photo swap) is a cache hit drawn from the card, about a second.
-    func sendPhoto(jpeg: Data) async throws {
+    /// `startupPicture`: the automatic picture shown on connect (see `photoHoldIsStartup`).
+    func sendPhoto(jpeg: Data, startupPicture: Bool = false) async throws {
         guard boardSupportsTransitionMask else {
             throw SpotifyDisplayError.bleTransferRejected("This display's firmware is too old for photo upload. Flash the latest firmware.")
         }
@@ -629,6 +634,7 @@ final class BLEManager: NSObject, ObservableObject {
             artBehindPhoto = (id, art)
         }
         photoHold = true
+        photoHoldIsStartup = startupPicture
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         prepareDrawTransition()
@@ -729,7 +735,10 @@ final class BLEManager: NSObject, ObservableObject {
             ))
             setLivePhase("last: photo \(secondsLabel(fromMs: totalMs))")
         } catch {
-            if !hadHold { photoHold = false }
+            if !hadHold {
+                photoHold = false
+                photoHoldIsStartup = false
+            }
             throw error
         }
     }
@@ -1237,6 +1246,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardLight = .off  // the board turns its LED off on disconnect
         flipNextDraw = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
+        photoHoldIsStartup = false
         // Waiting screen: nothing of ours is on the panel any more.
         boardFrame = nil
         lastDrawRequest = nil

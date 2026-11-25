@@ -351,6 +351,7 @@ final class SpotifyManager: ObservableObject {
                 // transfer and re-sent the same song after it finished).
                 if let bleManager { self.lastObservedBleReadyEpoch = bleManager.readyEpoch }
                 await self.requestResync(reason: "ble-ready-callback", immediatePoll: true)
+                if let bleManager { await self.showStartupPictureIfIdle(bleManager: bleManager) }
             }
         }
 
@@ -649,6 +650,32 @@ final class SpotifyManager: ObservableObject {
         }
     }
 
+    /// Start-up picture (Settings): the keychain just connected and the resync put no cover on it
+    /// (nothing playing, or signed out), so show a random starred photo. It is on the card under its
+    /// hash (BLE_PROTOCOL 1.18), so normally a cache hit. A song that plays later ends the hold in
+    /// `sendIfNeeded`.
+    private func showStartupPictureIfIdle(bleManager: BLEManager) async {
+        guard UserDefaults.standard.bool(forKey: PhotoLibrary.startupPictureKey),
+              !PhotoLibrary.shared.favorites.isEmpty else { return }
+        // Photos need CAPS:transitions, which the board sends with its first stats reply, just after READY.
+        let epoch = bleManager.readyEpoch
+        var waits = 0
+        while !bleManager.boardSupportsTransitionMask, waits < 30 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            waits += 1
+        }
+        // Checked after the wait: a song may have been sent meanwhile.
+        guard bleManager.isConnected, bleManager.readyEpoch == epoch, bleManager.boardSupportsTransitionMask,
+              !bleManager.photoHold, currentTrack == nil || !isPlaying,
+              lastSentToDisplayTrackId == nil, !transferPipelineBusy,
+              let jpeg = PhotoLibrary.shared.nextStartupJPEG() else { return }
+        do {
+            try await bleManager.sendPhoto(jpeg: jpeg, startupPicture: true)
+        } catch {
+            // Not worth an error banner: the keychain just keeps its waiting screen.
+        }
+    }
+
     /// Photo -> song (cover tap): the song playing now is already known and its cover is on the
     /// keychain's card, so it is sent straight away instead of asking Spotify first (`requestResync`
     /// polls, a network round trip before the board was even asked). Its frame comes off disk
@@ -675,8 +702,12 @@ final class SpotifyManager: ObservableObject {
     /// after a failure). Called by every poll answer for the playing song and by `showCurrentSongAgain`.
     private func sendIfNeeded(_ item: Track, bleManager: BLEManager) {
         // A photo the person uploaded is on the display: keep following Spotify for the app's own
-        // screen, but send nothing until they tap "Back to Spotify".
-        if bleManager.photoHold { return }
+        // screen, but send nothing until they tap "Back to Spotify". The automatic start-up picture
+        // is different: a song is here, so its cover takes over.
+        if bleManager.photoHold {
+            guard bleManager.photoHoldIsStartup else { return }
+            bleManager.endPhotoHold()
+        }
 
         if let inflight = artInFlightTrackId, inflight != item.id {
             cancelPrefetch()

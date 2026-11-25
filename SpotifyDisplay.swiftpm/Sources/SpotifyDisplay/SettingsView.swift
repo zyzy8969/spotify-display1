@@ -22,6 +22,8 @@ struct SettingsView: View {
     @AppStorage(NerdMode.enabledKey) private var nerdEnabled = false
     /// Nerd layout currently on (the terminal icon's state); switched off with the feature.
     @AppStorage(NerdMode.layoutKey) private var nerdLayout = false
+    /// Show a random starred photo when the keychain connects with nothing playing.
+    @AppStorage(PhotoLibrary.startupPictureKey) private var startupPicture = false
     @State private var showTransitions = false
     @State private var showLifetimeStats = false
     @ScaledMetric(relativeTo: .body) private var chevronSize: CGFloat = 14
@@ -50,6 +52,7 @@ struct SettingsView: View {
                     brightnessRow
                     statusLightRow
                     transitionsRow
+                    startupPictureRow
                 }
                 section(theme.id.text(.themeTitle)) {
                     ThemePicker(selection: $themeRaw, crayonDark: $crayonDark, quietDark: $quietDark,
@@ -500,6 +503,23 @@ struct SettingsView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// Start-up picture: a random starred photo (Photos page) when the keychain connects and nothing
+    /// is playing. Album art takes over as soon as a song plays.
+    private var startupPictureRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $startupPicture) {
+                Text("Start-up picture")
+                    .themeText(.row)
+                    .foregroundStyle(theme.ink)
+            }
+            .toggleStyle(ThemedToggleStyle())
+            Text("When the keychain connects and nothing is playing, show one of your starred photos. Star photos on the Photos page.")
+                .themeText(.footnote)
+                .foregroundStyle(theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// Turns nerd mode on as a feature: the terminal icon appears at the top of the main screen.

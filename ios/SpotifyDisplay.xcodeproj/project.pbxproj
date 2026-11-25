@@ -36,6 +36,7 @@
 		539A241DDCFDB2830C51FF0A /* Transitions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C60C06A49C4DF9F9BE988F9 /* Transitions.swift */; };
 		D775238592418DE30667E4B7 /* AlbumLightColourTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7F2B80A0F190AC3D410FE5 /* AlbumLightColourTests.swift */; };
 		CC623460218DCF8C3AC6DD61 /* CacheKeyAndPackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B3316FD7E49253B4407E5F5 /* CacheKeyAndPackingTests.swift */; };
+		4EE700CE31B4D87BF1217A1A /* StartupPictureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 591DC452D18C4DCCEBE0E0B2 /* StartupPictureTests.swift */; };
 		CEC0F43161C7848FC24BB4F3 /* transitions_core.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 94AF0178EF084CD0A5C14115 /* transitions_core.cpp */; settings = {COMPILER_FLAGS = "-O2"; }; };
 /* End PBXBuildFile section */
 
@@ -75,6 +76,7 @@
 		E56DB69B76FF847EDC763944 /* SpotifyDisplayTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpotifyDisplayTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA7F2B80A0F190AC3D410FE5 /* AlbumLightColourTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlbumLightColourTests.swift; sourceTree = "<group>"; };
 		1B3316FD7E49253B4407E5F5 /* CacheKeyAndPackingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CacheKeyAndPackingTests.swift; sourceTree = "<group>"; };
+		591DC452D18C4DCCEBE0E0B2 /* StartupPictureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupPictureTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXContainerItemProxy section */
@@ -127,7 +129,7 @@
 		};
 		9A84E1F5D23A430E6831A338 /* SpotifyDisplayTests */ = {
 			isa = PBXGroup;
-			children = (AA7F2B80A0F190AC3D410FE5 /* AlbumLightColourTests.swift */, 1B3316FD7E49253B4407E5F5 /* CacheKeyAndPackingTests.swift */);
+			children = (AA7F2B80A0F190AC3D410FE5 /* AlbumLightColourTests.swift */, 1B3316FD7E49253B4407E5F5 /* CacheKeyAndPackingTests.swift */, 591DC452D18C4DCCEBE0E0B2 /* StartupPictureTests.swift */);
 			path = SpotifyDisplayTests;
 			sourceTree = "<group>";
 		};
@@ -270,6 +272,7 @@
 			files = (
 				D775238592418DE30667E4B7 /* AlbumLightColourTests.swift in Sources */,
 				CC623460218DCF8C3AC6DD61 /* CacheKeyAndPackingTests.swift in Sources */,
+				4EE700CE31B4D87BF1217A1A /* StartupPictureTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
