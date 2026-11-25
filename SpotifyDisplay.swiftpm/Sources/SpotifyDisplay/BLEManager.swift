@@ -258,6 +258,8 @@ final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var playingAnimation: UIImage?
     /// A whole GIF is going over BLE right now (5-10 s): the main screen says so.
     @Published private(set) var sendingAnimation = false
+    /// Rough send time of that GIF, in seconds.
+    @Published private(set) var sendingAnimationSeconds = 0
     /// The last picture shown by hand was a GIF (not a photo): a cover tap brings the GIF back.
     @Published private(set) var lastPictureIsGIF = false
     /// The last GIF's first frame (JPEG), for the card behind the song cover.
@@ -287,6 +289,9 @@ final class BLEManager: NSObject, ObservableObject {
     private var lastPreparedAnimation: PreparedAnimation?
     /// There is a GIF to bring back with a cover tap.
     var canShowGIFAgain: Bool { lastPreparedAnimation != nil }
+    /// The photo up is the automatic start-up picture, not one the person chose: the first song that
+    /// plays ends the hold (`SpotifyManager.sendIfNeeded`) instead of waiting for "Back to Spotify".
+    @Published private(set) var photoHoldIsStartup = false
     /// The last photo the person uploaded (square JPEG), so tapping the cover can show it again.
     /// In memory only: gone when the app quits.
     @Published private(set) var lastPhotoJPEG: Data?
@@ -646,6 +651,7 @@ final class BLEManager: NSObject, ObservableObject {
     func endPhotoHold() {
         guard photoHold else { return }
         photoHold = false
+        photoHoldIsStartup = false
         log("photo   released, Spotify resumes", kind: .info)
     }
 
@@ -660,7 +666,8 @@ final class BLEManager: NSObject, ObservableObject {
     /// (`photoHold`) until `endPhotoHold()`. Since 2026-11-22 a photo is saved on the keychain's card
     /// under its own key (its bytes' hash) like a cover: the first show is a normal transfer, every
     /// later show (album -> photo swap) is a cache hit drawn from the card, about a second.
-    func sendPhoto(jpeg: Data) async throws {
+    /// `startupPicture`: the automatic picture shown on connect (see `photoHoldIsStartup`).
+    func sendPhoto(jpeg: Data, startupPicture: Bool = false) async throws {
         guard boardSupportsTransitionMask else {
             throw SpotifyDisplayError.bleTransferRejected("This display's firmware is too old for photo upload. Flash the latest firmware.")
         }
@@ -674,6 +681,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         photoHold = true
         playingAnimation = nil  // a GIF on the cover gives way to the picture coming
+        photoHoldIsStartup = startupPicture
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         prepareDrawTransition()
@@ -774,7 +782,10 @@ final class BLEManager: NSObject, ObservableObject {
             ))
             setLivePhase("last: photo \(secondsLabel(fromMs: totalMs))")
         } catch {
-            if !hadHold { photoHold = false }
+            if !hadHold {
+                photoHold = false
+                photoHoldIsStartup = false
+            }
             throw error
         }
     }
@@ -1193,19 +1204,20 @@ final class BLEManager: NSObject, ObservableObject {
     /// Shows a GIF on the display (BLE_PROTOCOL 1.25, needs `CAPS:anim`): every frame in one deflated
     /// transfer, which the board keeps in memory (never on its card) and loops until something else is
     /// drawn. Like a photo, Spotify sends stay paused (`photoHold`) until `endPhotoHold()`.
-    func sendAnimation(_ animation: KeychainAnimation) async throws {
-        try await showAnimation(animation, prepared: nil, replay: false)
+    /// `startupPicture`: a starred GIF shown automatically on connect (see `photoHoldIsStartup`).
+    func sendAnimation(_ animation: KeychainAnimation, startupPicture: Bool = false) async throws {
+        try await showAnimation(animation, prepared: nil, replay: false, startupPicture: startupPicture)
     }
 
     /// Cover tap: the last GIF again. The board replays it from memory when it still has it (1.26, about a
     /// second); otherwise (power cycle, older firmware) it is sent again.
     func showLastAnimationAgain() async throws {
         guard let last = lastPreparedAnimation else { return }
-        try await showAnimation(last.animation, prepared: last, replay: true)
+        try await showAnimation(last.animation, prepared: last, replay: true, startupPicture: false)
     }
 
     private func showAnimation(_ animation: KeychainAnimation, prepared cached: PreparedAnimation?,
-                               replay: Bool) async throws {
+                               replay: Bool, startupPicture: Bool) async throws {
         guard boardSupportsAnimation else {
             throw SpotifyDisplayError.bleTransferRejected("This display's firmware is too old for GIFs. Flash the latest firmware.")
         }
@@ -1217,6 +1229,7 @@ final class BLEManager: NSObject, ObservableObject {
         }
         photoHold = true
         playingAnimation = nil  // a GIF on the cover gives way to the picture coming
+        photoHoldIsStartup = startupPicture
         cancelOngoingTransfer()
         if cacheReplyOwed || imageAckOwed { await waitForBoardIdle() }
         prepareDrawTransition()
@@ -1251,6 +1264,9 @@ final class BLEManager: NSObject, ObservableObject {
                 }).value
                 guard let made else { throw SpotifyDisplayError.conversionFailed }
                 prep = made
+            }
+            guard prep.packed.count <= KeychainAnimation.maxPackedBytes else {
+                throw SpotifyDisplayError.bleTransferRejected("This GIF is too big for the keychain. Try a shorter clip.")
             }
             lastPreparedAnimation = prep
             lastGIFPoster = animation.posterJPEG
@@ -1310,7 +1326,10 @@ final class BLEManager: NSObject, ObservableObject {
 
             boardLight = .new  // the board shows its loading light while the GIF arrives
             loadingSince = Date()
-            sendingAnimation = true  // the main screen says GIFs take longer
+            // The main screen says GIFs take longer, with a rough time (~40 KB/s over BLE, as measured
+            // for covers).
+            sendingAnimationSeconds = max(2, Int((Double(packed.count) / 40_000).rounded()))
+            sendingAnimation = true
             defer { sendingAnimation = false }
             setLivePhase("gif: sending BLE…")
             let uploadStart = CFAbsoluteTimeGetCurrent()
@@ -1337,7 +1356,10 @@ final class BLEManager: NSObject, ObservableObject {
             ))
             setLivePhase("last: GIF \(secondsLabel(fromMs: totalMs))")
         } catch {
-            if !hadHold { photoHold = false }
+            if !hadHold {
+                photoHold = false
+                photoHoldIsStartup = false
+            }
             throw error
         }
     }
@@ -1447,6 +1469,7 @@ final class BLEManager: NSObject, ObservableObject {
         boardLight = .off  // the board turns its LED off on disconnect
         flipNextDraw = false
         photoHold = false  // the board resets to its waiting screen on disconnect; the photo is gone
+        photoHoldIsStartup = false
         // Waiting screen: nothing of ours is on the panel any more.
         boardFrame = nil
         lastDrawRequest = nil
@@ -1696,7 +1719,9 @@ final class BLEManager: NSObject, ObservableObject {
                 }
             }
         case nil:
-            break  // not something this app asked for: nothing to mirror
+            // Not something this app asked for: nothing to mirror. Logged so a missing mirror (the app's
+            // cover not playing the board's transition) shows up in the Live log.
+            log("mirror  no draw request for this transition: the app's cover won't play it", kind: .info)
         }
         // Self-check: the board just started a transition the person switched off, so its mask is not
         // ours (a lost write, or a board that reset). Say so in the log and send it again now, so the

@@ -6,9 +6,9 @@ import UniformTypeIdentifiers
 
 // MARK: - GIPHY
 
-/// One GIPHY result. Nothing from GIPHY is stored on the phone: GIPHY's terms say apps must not keep
-/// copies of their media, and the GIFs tab is search-and-show only (owner, 2026-11-24).
-struct GiphyGIF: Identifiable, Equatable {
+/// One GIPHY result. GIPHY's media is never stored on the phone (their terms): a saved or starred GIPHY
+/// GIF (`GifLibrary`) keeps only these links and is downloaded again when shown.
+struct GiphyGIF: Codable, Identifiable, Equatable {
     let id: String
     let title: String
     /// `fixed_width` (200 px wide GIF): what is sent to the keychain (120 px frames).
@@ -17,10 +17,12 @@ struct GiphyGIF: Identifiable, Equatable {
     let previewURL: URL
 }
 
-/// What the GIFs tab hands back: a GIPHY GIF to download and show, or a video clip already converted.
+/// What the GIFs tab hands back: a GIPHY GIF to download and show, a video clip already converted, or a
+/// recent / starred GIF from `GifLibrary`.
 enum GifChoice {
     case giphy(GiphyGIF)
     case video(KeychainAnimation)
+    case saved(GifLibrary.Item)
 }
 
 /// GIPHY search (https://developers.giphy.com/docs/api/). The API key is the owner's own: Settings /

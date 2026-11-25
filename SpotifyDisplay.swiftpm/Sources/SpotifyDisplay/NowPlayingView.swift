@@ -456,6 +456,8 @@ struct NowPlayingScreen: View {
                 switch choice {
                 case .video(let made):
                     animation = made
+                case .saved(let item):
+                    animation = try await GifLibrary.shared.animation(for: item)
                 case .giphy(let gif):
                     let data = try await GiphyClient.download(gif)
                     try Task.checkCancellation()
@@ -469,6 +471,12 @@ struct NowPlayingScreen: View {
                 }
                 try Task.checkCancellation()
                 try await bleManager.sendAnimation(animation)
+                // Shown: it goes to the front of Recent on the GIFs tab (where it can be starred).
+                switch choice {
+                case .giphy(let gif): GifLibrary.shared.addGiphy(gif)
+                case .video(let made): GifLibrary.shared.addVideo(made)
+                case .saved(let item): GifLibrary.shared.moveToFront(item)
+                }
             } catch is CancellationError {
             } catch let error as URLError where error.code == .cancelled {
             } catch {
@@ -743,7 +751,7 @@ struct NowPlayingScreen: View {
         )
         .overlay(alignment: .bottom) {
             if bleManager.sendingAnimation {
-                Text("GIFs take a little longer to send")
+                Text("GIFs take longer: about \(bleManager.sendingAnimationSeconds) s")
                     .themeText(.footnote)
                     .foregroundStyle(theme.ink)
                     .padding(.horizontal, 10)

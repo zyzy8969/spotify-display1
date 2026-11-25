@@ -1,26 +1,27 @@
 import SwiftUI
 import PhotosUI
+import UIKit
 
-/// The GIFs tab of the Photos page: pick a GIF from GIPHY, or turn 4 seconds of one of your videos into
-/// one. Either is shown on the keychain (BLE_PROTOCOL 1.25) and on the app's cover. Nothing is saved
-/// (owner, 2026-11-24: favourites live on the Photos tab).
+/// The GIFs tab of the Photos page: GIFs you showed lately (star the ones you like: a starred GIF can be
+/// the start-up picture), a GIPHY search, and "Make a GIF from a video" with iOS's own trimmer (up to
+/// 15 s). Whatever you tap is shown on the keychain (BLE_PROTOCOL 1.25) and on the app's cover.
 @MainActor
 struct GifPageContent: View {
     let onSend: (GifChoice) -> Void
     let close: () -> Void
 
     @ObservedObject private var search = GifSearchModel.shared
+    @ObservedObject private var library = GifLibrary.shared
     /// Only read, so the tab updates when a development key is set in Settings > Advanced.
     @AppStorage(GiphyClient.keyDefaultsKey) private var giphyKey = ""
     @Environment(\.theme) private var theme
 
     // Video -> GIF.
     @State private var pickedVideo: PhotosPickerItem?
-    /// The picked video (a temporary copy), waiting for "Make GIF".
-    @State private var movieURL: URL?
-    @State private var movieDuration: Double = 0
-    @State private var clipStart: Double = 0
-    @State private var startStill: UIImage?
+    /// The picked video (a temporary copy) waiting in the trimmer.
+    @State private var trimming: TrimRequest?
+    /// Its file, until the trimmer hands back a result (a swiped-away trimmer leaves it to delete).
+    @State private var untrimmedURL: URL?
     @State private var loadingVideo = false
     /// 0...1 while frames are read; nil when not converting.
     @State private var videoProgress: Double?
@@ -31,6 +32,8 @@ struct GifPageContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            if !library.items.isEmpty { recentRow }
+
             if GiphyClient.apiKey == nil {
                 keyEntry
             } else {
@@ -39,7 +42,7 @@ struct GifPageContent: View {
             videoSection
 
             heading(search.shownQuery?.isEmpty == false ? "Results" : "Trending",
-                    note: "Tap one to show it. It plays on the keychain until you tap the cover or the keychain turns off. Sending takes about 5\u{2013}10 seconds.")
+                    note: "Tap one to show it. Touch and hold to add it to your favourites. It plays on the keychain until you tap the cover or the keychain turns off.")
             if let error = search.error, GiphyClient.apiKey != nil {
                 Text(error)
                     .themeText(.footnote)
@@ -54,8 +57,15 @@ struct GifPageContent: View {
                         GifThumb(url: gif.previewURL)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            library.addGiphy(gif, favorite: true)
+                        } label: {
+                            Label("Add to favourites", systemImage: "star")
+                        }
+                    }
                     .accessibilityLabel(gif.title.isEmpty ? "GIF" : gif.title)
-                    .accessibilityHint("Shows it on the display")
+                    .accessibilityHint("Shows it on the display. Touch and hold to add it to your favourites.")
                 }
             }
             if search.searching {
@@ -85,10 +95,68 @@ struct GifPageContent: View {
             pickedVideo = nil
             openVideo(item)
         }
+        .sheet(item: $trimming, onDismiss: {
+            // Dismissed without a choice (swiped away): the copy is not needed any more.
+            if let url = untrimmedURL { try? FileManager.default.removeItem(at: url) }
+            untrimmedURL = nil
+        }) { request in
+            VideoTrimmer(path: request.url.path, maxSeconds: AnimationPrep.videoMaxSeconds) { result in
+                untrimmedURL = nil
+                trimming = nil
+                switch result {
+                case .trimmed(let path):
+                    if path != request.url.path { try? FileManager.default.removeItem(at: request.url) }
+                    makeGIF(URL(fileURLWithPath: path))
+                case .cancelled:
+                    try? FileManager.default.removeItem(at: request.url)
+                case .failed:
+                    // The trimmer could not open it: use the start of the video as it is.
+                    makeGIF(request.url)
+                }
+            }
+            .ignoresSafeArea()
+        }
         .onDisappear {
-            // Closing the page abandons a video: nothing is sent later on its own.
+            // Closing the page abandons a conversion: nothing is sent later on its own.
             videoTask?.cancel()
-            discardVideo()
+        }
+    }
+
+    // MARK: Recent and favourites
+
+    /// GIFs shown lately, starred ones marked. One row that scrolls sideways, so search results stay high.
+    private var recentRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            heading("Recent", note: "Touch and hold to star one. Starred GIFs can be the start-up picture (Settings).")
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 10) {
+                    ForEach(library.items) { item in
+                        Button {
+                            send(.saved(item))
+                        } label: {
+                            SavedGifThumb(item: item)
+                                .frame(width: 84, height: 84)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                library.toggleFavorite(item)
+                            } label: {
+                                Label(item.isFavorite ? "Remove from favourites" : "Add to favourites",
+                                      systemImage: item.isFavorite ? "star.slash" : "star")
+                            }
+                            Button(role: .destructive) {
+                                library.remove(item)
+                            } label: {
+                                Label("Remove", systemImage: "trash")
+                            }
+                        }
+                        .accessibilityLabel((item.giphy.map { $0.title.isEmpty ? "GIF" : $0.title } ?? "Your GIF")
+                                            + (item.isFavorite ? ", favourite" : ""))
+                        .accessibilityHint("Shows it on the display. Touch and hold to star or remove it.")
+                    }
+                }
+            }
         }
     }
 
@@ -135,11 +203,8 @@ struct GifPageContent: View {
 
     // MARK: Video
 
-    @ViewBuilder
     private var videoSection: some View {
-        if let movieURL {
-            videoPanel(movieURL)
-        } else {
+        VStack(alignment: .leading, spacing: 8) {
             PhotosPicker(selection: $pickedVideo, matching: .videos, preferredItemEncoding: .current) {
                 HStack(spacing: 8) {
                     if loadingVideo {
@@ -150,55 +215,17 @@ struct GifPageContent: View {
                     }
                     Text("Make a GIF from a video")
                         .themeText(.row)
+                    Text("up to \(Int(AnimationPrep.videoMaxSeconds)) s")
+                        .themeText(.statCaption)
+                        .foregroundStyle(theme.inkFaint)
                 }
                 .foregroundStyle(theme.ink)
                 .frame(maxWidth: .infinity, minHeight: 48)
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.ringOff, lineWidth: 1))
                 .contentShape(Rectangle())
             }
-            .disabled(loadingVideo)
-            .accessibilityHint("Pick a video, choose where its 4 seconds start, and show it on the display")
-            if let videoError {
-                Text(videoError)
-                    .themeText(.footnote)
-                    .foregroundStyle(theme.inkSoft)
-            }
-        }
-    }
-
-    /// Choose where the clip starts, then make it. Progress is the share of frames read.
-    private func videoPanel(_ url: URL) -> some View {
-        let clip = AnimationPrep.videoClipSeconds
-        let latest = max(0, movieDuration - clip)
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 12) {
-                Group {
-                    if let startStill {
-                        Image(uiImage: startStill).resizable()
-                    } else {
-                        theme.artSurface
-                    }
-                }
-                .frame(width: 72, height: 72)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Your video")
-                        .themeText(.row)
-                        .foregroundStyle(theme.ink)
-                    Text(String(format: "%.1f\u{2013}%.1f s of %.1f s", clipStart, min(movieDuration, clipStart + clip), movieDuration))
-                        .themeText(.footnote)
-                        .foregroundStyle(theme.inkSoft)
-                }
-            }
-            if latest > 0.05 {
-                Slider(value: $clipStart, in: 0...latest, onEditingChanged: { editing in
-                    if !editing { refreshStill(url) }
-                })
-                .disabled(videoProgress != nil)
-                .accessibilityLabel("GIF start")
-                .accessibilityValue(String(format: "%.1f seconds", clipStart))
-            }
+            .disabled(loadingVideo || videoProgress != nil)
+            .accessibilityHint("Pick a video, trim it to the part you want, and show it on the display")
             if let videoProgress {
                 ProgressView(value: videoProgress) {
                     Text("Making the GIF\u{2026}")
@@ -211,28 +238,7 @@ struct GifPageContent: View {
                     .themeText(.footnote)
                     .foregroundStyle(theme.inkSoft)
             }
-            HStack(spacing: 24) {
-                textButton(videoProgress == nil ? "Make GIF" : "Making\u{2026}") { makeGIF(url) }
-                    .disabled(videoProgress != nil)
-                textButton("Cancel") {
-                    videoTask?.cancel()
-                    discardVideo()
-                }
-            }
         }
-        .padding(12)
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(theme.ringOff, lineWidth: 1))
-    }
-
-    private func textButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .themeText(.row)
-                .foregroundStyle(theme.ink)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     private func heading(_ title: String, note: String) -> some View {
@@ -253,9 +259,10 @@ struct GifPageContent: View {
         close()
     }
 
+    /// Copies the picked video, then opens iOS's trimmer on it.
     private func openVideo(_ item: PhotosPickerItem) {
         videoTask?.cancel()
-        discardVideo()
+        videoError = nil
         loadingVideo = true
         videoTask = Task {
             // A cancelled pick must not stop the spinner of the pick that replaced it.
@@ -264,33 +271,26 @@ struct GifPageContent: View {
                 if !Task.isCancelled { videoError = "Could not read that video." }
                 return
             }
-            // Checked after the await: the page may have closed meanwhile (then the copy is deleted here).
-            guard let duration = await AnimationPrep.videoDuration(url: movie.url), !Task.isCancelled else {
+            if Task.isCancelled {
                 try? FileManager.default.removeItem(at: movie.url)
-                if !Task.isCancelled { videoError = "Could not read that video." }
                 return
             }
-            movieURL = movie.url
-            movieDuration = duration
-            clipStart = 0
-            refreshStill(movie.url)
+            if UIVideoEditorController.canEditVideo(atPath: movie.url.path) {
+                untrimmedURL = movie.url
+                trimming = TrimRequest(url: movie.url)
+            } else {
+                makeGIF(movie.url)  // can't trim this one: its first 15 s
+            }
         }
     }
 
-    private func refreshStill(_ url: URL) {
-        let at = clipStart
-        Task {
-            let still = await AnimationPrep.videoStill(url: url, at: at)
-            if movieURL == url, clipStart == at { startStill = still }
-        }
-    }
-
+    /// Converts the (trimmed) clip and shows it. The temporary file is deleted afterwards.
     private func makeGIF(_ url: URL) {
         videoError = nil
         videoProgress = 0
-        let start = clipStart
         videoTask = Task {
-            let made = await AnimationPrep.fromVideo(url: url, start: start) { p in
+            defer { try? FileManager.default.removeItem(at: url) }
+            let made = await AnimationPrep.fromVideo(url: url) { p in
                 Task { @MainActor in
                     if videoProgress != nil { videoProgress = p }
                 }
@@ -301,18 +301,61 @@ struct GifPageContent: View {
                 videoError = "Could not make a GIF from that video."
                 return
             }
-            discardVideo()
             send(.video(made))
         }
     }
+}
 
-    /// Deletes the temporary copy of the picked video and resets the panel.
-    private func discardVideo() {
-        if let movieURL { try? FileManager.default.removeItem(at: movieURL) }
-        movieURL = nil
-        movieDuration = 0
-        clipStart = 0
-        startStill = nil
-        videoProgress = nil
+/// A video waiting in the trimmer.
+struct TrimRequest: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// iOS's own video trimmer (the yellow handles), capped at `maxSeconds`. Reports the trimmed file's path.
+struct VideoTrimmer: UIViewControllerRepresentable {
+    enum Result { case trimmed(String), cancelled, failed }
+
+    let path: String
+    let maxSeconds: Double
+    let done: (Result) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(done: done) }
+
+    func makeUIViewController(context: Context) -> UIVideoEditorController {
+        let editor = UIVideoEditorController()
+        editor.videoPath = path
+        editor.videoMaximumDuration = maxSeconds
+        editor.videoQuality = .typeMedium  // frames end up 120 px; no need for full quality
+        editor.delegate = context.coordinator
+        return editor
+    }
+
+    func updateUIViewController(_ editor: UIVideoEditorController, context: Context) {}
+
+    final class Coordinator: NSObject, UIVideoEditorControllerDelegate, UINavigationControllerDelegate {
+        let done: (Result) -> Void
+        /// The editor can report a save twice; only the first counts.
+        private var finished = false
+
+        init(done: @escaping (Result) -> Void) { self.done = done }
+
+        private func finish(_ result: Result) {
+            guard !finished else { return }
+            finished = true
+            done(result)
+        }
+
+        func videoEditorController(_ editor: UIVideoEditorController, didSaveEditedVideoToPath editedVideoPath: String) {
+            finish(.trimmed(editedVideoPath))
+        }
+
+        func videoEditorControllerDidCancel(_ editor: UIVideoEditorController) {
+            finish(.cancelled)
+        }
+
+        func videoEditorController(_ editor: UIVideoEditorController, didFailWithError error: Error) {
+            finish(.failed)
+        }
     }
 }

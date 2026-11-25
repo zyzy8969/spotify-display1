@@ -17,9 +17,22 @@ final class PhotoLibrary: ObservableObject {
         /// MD5 of the JPEG bytes (hex), also the file name.
         let id: String
         var added: Date
+        /// Starred: one of these is shown when the keychain connects with nothing playing (the
+        /// "Start-up picture" setting). Optional so an index.json saved before stars still decodes.
+        var favorite: Bool? = nil
+
+        /// True for a photo added in bulk and never shown, so not on the keychain's card yet. Nil
+        /// (also every photo saved before this field) = shown at least once, on the card.
+        var notOnBoard: Bool? = nil
+
+        var isFavorite: Bool { favorite ?? false }
+        var isOnBoard: Bool { notOnBoard != true }
     }
 
     @Published private(set) var items: [Item] = []
+
+    /// The starred photos, newest first. Only ones on the card count (a star needs a show first).
+    var favorites: [Item] { items.filter { $0.isFavorite && $0.isOnBoard } }
 
     private let directory: URL? = {
         guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
@@ -43,23 +56,85 @@ final class PhotoLibrary: ObservableObject {
         directory?.appendingPathComponent(id + ".jpg")
     }
 
-    /// Saves `jpeg` (or moves it to the front if it is already saved).
-    func add(_ jpeg: Data) {
+    /// Saves `jpeg` (or moves it to the front if it is already saved). `onBoard`: it is being shown
+    /// on the keychain now (so it lands on the card); false for a bulk add that sends nothing.
+    func add(_ jpeg: Data, onBoard: Bool = true) {
         let id = jpeg.md5Hex
-        if let i = items.firstIndex(where: { $0.id == id }) {
-            var item = items.remove(at: i)
-            item.added = Date()
-            items.insert(item, at: 0)
-        } else {
+        if !items.contains(where: { $0.id == id }) {
             guard let url = fileURL(for: id) else { return }
             try? jpeg.write(to: url, options: .atomic)
-            items.insert(Item(id: id, added: Date()), at: 0)
         }
-        while items.count > Self.cap {
-            let dropped = items.removeLast()
-            if let url = fileURL(for: dropped.id) { try? FileManager.default.removeItem(at: url) }
+        items = Self.inserting(id: id, onBoard: onBoard, into: items, now: Date())
+        let (kept, dropped) = Self.trimmed(items, cap: Self.cap)
+        items = kept
+        for gone in dropped {
+            if let url = fileURL(for: gone.id) { try? FileManager.default.removeItem(at: url) }
         }
         saveIndex()
+    }
+
+    /// Over `cap`: drops the oldest unstarred photos first; starred ones only once nothing else is left.
+    nonisolated static func trimmed(_ items: [Item], cap: Int) -> (kept: [Item], dropped: [Item]) {
+        var kept = items
+        var dropped: [Item] = []
+        while kept.count > cap {
+            let i = kept.lastIndex(where: { !$0.isFavorite }) ?? kept.count - 1
+            dropped.append(kept.remove(at: i))
+        }
+        return (kept, dropped)
+    }
+
+    /// `items` with `id` at the front. A photo once shown stays on the board; a bulk re-add never
+    /// marks a shown photo as not on the board.
+    nonisolated static func inserting(id: String, onBoard: Bool, into items: [Item], now: Date) -> [Item] {
+        var items = items
+        var item: Item
+        if let i = items.firstIndex(where: { $0.id == id }) {
+            item = items.remove(at: i)
+            item.added = now
+            if onBoard { item.notOnBoard = nil }
+        } else {
+            item = Item(id: id, added: now, notOnBoard: onBoard ? nil : true)
+        }
+        items.insert(item, at: 0)
+        return items
+    }
+
+    /// Only a photo already on the keychain's card can be starred.
+    func toggleFavorite(_ item: Item) {
+        guard let i = items.firstIndex(where: { $0.id == item.id }), items[i].isOnBoard else { return }
+        items[i].favorite = items[i].isFavorite ? nil : true
+        saveIndex()
+    }
+
+    // MARK: Start-up picture
+
+    /// UserDefaults key of the "Start-up picture" setting (Settings, Keychain section).
+    nonisolated static let startupPictureKey = "startupPicture"
+    /// The starred photo shown at the last connect, so the next connect picks a different one.
+    private static let lastStartupKey = "startupPicture.lastId"
+
+    /// A random starred photo's JPEG for the start-up picture, never the one shown last time when
+    /// there are two or more. Nil with no stars.
+    func nextStartupJPEG() -> Data? {
+        var candidates = favorites.map(\.id)
+        let defaults = UserDefaults.standard
+        var rng = SystemRandomNumberGenerator()
+        while let id = Self.pickStartup(from: candidates, last: defaults.string(forKey: Self.lastStartupKey), using: &rng) {
+            if let url = fileURL(for: id), let jpeg = try? Data(contentsOf: url) {
+                defaults.set(id, forKey: Self.lastStartupKey)
+                return jpeg
+            }
+            candidates.removeAll { $0 == id }  // file missing: try another
+        }
+        return nil
+    }
+
+    /// Random pick from `ids`, skipping `last` unless it is the only one.
+    nonisolated static func pickStartup<R: RandomNumberGenerator>(from ids: [String], last: String?,
+                                                                   using rng: inout R) -> String? {
+        let others = ids.filter { $0 != last }
+        return (others.isEmpty ? ids : others).randomElement(using: &rng)
     }
 
     /// The saved JPEG, unchanged.
@@ -167,7 +242,7 @@ struct PhotoLibraryView: View {
                         .foregroundStyle(theme.inkFaint)
                     Text(library.items.isEmpty
                          ? "Photos you show on the keychain are saved here, so you can show them again."
-                         : "Tap one to show it again. They are on the keychain's card too, so they appear in about a second. Touch and hold to remove one from this list.")
+                         : "Tap one to show it again. Once shown, they are on the keychain's card, so they appear in about a second; greyed ones were added together and haven't been shown yet. Touch and hold to star one or remove it from this list. With Start-up picture on in Settings, a starred photo shows when the keychain connects and nothing is playing.")
                         .themeText(.footnote)
                         .foregroundStyle(theme.inkSoft)
                         .fixedSize(horizontal: false, vertical: true)
@@ -184,13 +259,26 @@ struct PhotoLibraryView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
+                            if item.isOnBoard {
+                                Button {
+                                    library.toggleFavorite(item)
+                                } label: {
+                                    Label(item.isFavorite ? "Unstar" : "Star for start-up",
+                                          systemImage: item.isFavorite ? "star.slash" : "star")
+                                }
+                            } else {
+                                Button {} label: {
+                                    Label("Show it once to star it", systemImage: "star")
+                                }
+                                .disabled(true)
+                            }
                             Button(role: .destructive) {
                                 library.remove(item)
                             } label: {
                                 Label("Remove from saved", systemImage: "trash")
                             }
                         }
-                        .accessibilityLabel("Saved photo from \(item.added.formatted(date: .abbreviated, time: .shortened))")
+                        .accessibilityLabel("\(item.isFavorite ? "Starred photo" : item.isOnBoard ? "Saved photo" : "Saved photo, not on the keychain yet") from \(item.added.formatted(date: .abbreviated, time: .shortened))")
                         .accessibilityHint("Shows it on the display")
                     }
                 }
@@ -230,7 +318,7 @@ struct PhotoLibraryView: View {
             adding = max(0, adding - items.count)
             // `add` puts each at the front, so add the last-picked first.
             for jpeg in jpegs.reversed() {
-                if let jpeg { library.add(jpeg) } else { addFailed += 1 }
+                if let jpeg { library.add(jpeg, onBoard: false) } else { addFailed += 1 }
             }
         }
     }
@@ -252,7 +340,22 @@ private struct PhotoThumb: View {
                     theme.artSurface
                 }
             }
+            .overlay {
+                // Added in bulk and never shown: not on the keychain's card yet.
+                if !item.isOnBoard { Color.gray.opacity(0.55) }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(alignment: .topTrailing) {
+                if item.isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.yellow)
+                        .padding(5)
+                        .background(Circle().fill(Color.black.opacity(0.45)))
+                        .padding(5)
+                        .accessibilityHidden(true)
+                }
+            }
             .task(id: item.id) {
                 guard image == nil else { return }
                 let key = item.id as NSString

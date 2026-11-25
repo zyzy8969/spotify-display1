@@ -4,6 +4,11 @@ Last updated: 2026-11-24
 
 ## What was committed
 
+- **2026-11-24 (latest), `feat/gif`:** merged `feat/startup-picture` (photo stars + start-up picture), added
+  GIF Recent + stars (`GifLibrary`), starred GIFs in the start-up pick, iOS video trimmer (max 15 s, up to 72
+  frames), send-time estimate on the cover, mirror diagnostics. Open question: the owner saw no app-side
+  transition for a new GIF; the code path looks right, so a Live-log line was added to catch it.
+  Script: `docs/VALIDATION_CHECKLIST.md` "GIFs round 3".
 - **2026-11-24 (later), `feat/gif` (BLE 1.26):** GIF replay from the board's memory (cover <-> GIF flip
   like photos), Bayer dither for GIF frames, "GIFs take a little longer" note on the cover, GIPHY taps fixed
   (UIKit image view swallowed them), light style moved to Settings > Advanced, the app's GIPHY key built in by

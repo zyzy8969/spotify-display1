@@ -107,6 +107,9 @@ struct AnimHeader {
 };
 // The animation on the panel. loop() only.
 static bool animActive = false;
+// The LED colour of each frame (0xRRGGBB, same method as the app's AlbumLightColour), worked out once
+// when a GIF arrives. With the song light on "album colour", the LED follows the frames while it plays.
+static uint32_t animFrameRGB[ANIM_MAX_FRAMES];
 static AnimHeader anim = {0, 0, 0, 0};
 static uint16_t animIndex = 0;
 static unsigned long animNextAt = 0;
@@ -2075,6 +2078,19 @@ static uint32_t ledGradientColour(unsigned long t) {
 static bool ledBatteryLow() { return false; }
 static bool ledCharging() { return false; }
 
+// Moves the shown colour toward `target` (~150 ms to settle), so a GIF's frame colours glide.
+static uint32_t ledGlide(uint32_t target, unsigned long now) {
+  static float gr = 0, gg = 0, gb = 0;
+  static unsigned long last = 0;
+  const float dt = last ? (float)(now - last) : 1000.0f;
+  last = now;
+  const float k = dt >= 150.0f ? 1.0f : dt / 150.0f;
+  gr += (((target >> 16) & 0xFF) - gr) * k;
+  gg += (((target >> 8) & 0xFF) - gg) * k;
+  gb += ((target & 0xFF) - gb) * k;
+  return ((uint32_t)(gr + 0.5f) << 16) | ((uint32_t)(gg + 0.5f) << 8) | (uint32_t)(gb + 0.5f);
+}
+
 // Consumer style. Returns true when it drew the LED (false = the shared modes below, i.e. LED_ERROR).
 static bool ledUpdateConsumer(unsigned long t) {
   switch (ledMode) {
@@ -2083,6 +2099,13 @@ static bool ledUpdateConsumer(unsigned long t) {
       if (!deviceConnected) {
         if (ledEverConnected) ledShow(LED_RGB_AMBER, (now % 2000) < 700 ? 200 : 0);  // slow amber blink
         else ledShow(LED_RGB_WHITE, 15 + ledWave(now, 2500) * 200 / 255);            // white breathing
+      } else if (animActive && ledSongMode == LED_SONG_ALBUM) {
+        // A GIF is playing and the song light is "album colour": the LED follows each frame's colour
+        // (worked out when the GIF arrived), gliding so fast GIFs don't flicker. Wins over the idle rainbow
+        // (a GIF is often up with nothing playing).
+        const uint16_t level = t < LED_SONG_FADE_MS ? (uint16_t)(t * LED_SONG_LEVEL / LED_SONG_FADE_MS)
+                                                    : LED_SONG_LEVEL;
+        ledShow(ledGlide(animFrameRGB[animIndex < ANIM_MAX_FRAMES ? animIndex : 0], now), level);
       } else if (ledIdleRainbow) {
         // 1.22: nothing playing on Spotify: a slow rainbow, one colour wheel every 6 s.
         ledShow(ledHue((now % LED_IDLE_RAINBOW_MS) * 1536 / LED_IDLE_RAINBOW_MS), 200);
@@ -2297,6 +2320,80 @@ static void ledPoll() {
 }
 
 // ---- 1.25 animation playback (loop() only) ----
+
+// Hue 0..1 (0 = red) of an RGB colour whose max is mx and spread d (> 0).
+static float glowHue(float r, float g, float b, float mx, float d) {
+  float h;
+  if (mx == r) h = (g - b) / d;
+  else if (mx == g) h = 2.0f + (b - r) / d;
+  else h = 4.0f + (r - g) / d;
+  h /= 6.0f;
+  if (h < 0) h += 1.0f;
+  return h >= 1.0f ? 0.0f : h;
+}
+
+// The LED colour for one frame: a port of the app's AlbumLightColour (owner, 2026-11-24: "the most of each
+// colour per frame"). Clearly coloured pixels vote for one of 24 hue buckets; the strongest bucket with its
+// neighbours gives the hue, at full brightness and the frame's own saturation, gamma-decoded (2.2) for the
+// LED's linear PWM. Little colour: the most vivid one. Almost none (black and white): white.
+static uint32_t frameGlowColour(const uint16_t* px, size_t pixels) {
+  const int B = 24;
+  float aw[B] = {0}, ar[B] = {0}, ag[B] = {0}, ab[B] = {0};  // one vote per coloured pixel
+  float vw[B] = {0}, vr[B] = {0}, vg[B] = {0}, vb[B] = {0};  // fallback, weighted to vivid pixels
+  int samples = 0, voters = 0;
+  float vividTotal = 0;
+  for (size_t i = 0; i < pixels; i += 7) {
+    samples++;
+    const uint16_t v = px[i];
+    const float r = ((v >> 11) & 0x1F) / 31.0f, g = ((v >> 5) & 0x3F) / 63.0f, b = (v & 0x1F) / 31.0f;
+    const float mx = fmaxf(r, fmaxf(g, b)), d = mx - fminf(r, fminf(g, b));
+    if (mx <= 0.12f || d <= 0) continue;
+    const float s = d / mx;
+    if (s <= 0.18f) continue;
+    int k = (int)(glowHue(r, g, b, mx, d) * B);
+    if (k >= B) k = B - 1;
+    const float w = s * s * mx;
+    vw[k] += w; vr[k] += r * w; vg[k] += g * w; vb[k] += b * w; vividTotal += w;
+    if (s > 0.25f && mx > 0.2f) { aw[k] += 1; ar[k] += r; ag[k] += g; ab[k] += b; voters++; }
+  }
+  if (samples == 0) return 0xFFFFFF;
+  const float *W, *R, *G, *Bl;
+  if (voters >= samples * 0.03f) { W = aw; R = ar; G = ag; Bl = ab; }
+  else if (vividTotal > samples * 0.01f) { W = vw; R = vr; G = vg; Bl = vb; }
+  else return 0xFFFFFF;
+  int best = 0;
+  float bestScore = -1;
+  for (int k = 0; k < B; k++) {
+    const float score = W[(k + B - 1) % B] + W[k] + W[(k + 1) % B];
+    if (score > bestScore) { bestScore = score; best = k; }
+  }
+  float w = 0, r = 0, g = 0, b = 0;
+  for (int j = -1; j <= 1; j++) {
+    const int k = (best + B + j) % B;
+    w += W[k]; r += R[k]; g += G[k]; b += Bl[k];
+  }
+  if (w <= 0) return 0xFFFFFF;
+  r /= w; g /= w; b /= w;
+  const float mx = fmaxf(r, fmaxf(g, b)), d = mx - fminf(r, fminf(g, b));
+  if (mx <= 0 || d <= 0) return 0xFFFFFF;
+  const float h = glowHue(r, g, b, mx, d);
+  const float s = fminf(1.0f, d / mx * 1.15f);
+  // HSV (v = 1) -> RGB, then gamma 2.2 per channel.
+  const int hi = (int)(h * 6) % 6;
+  const float f = h * 6 - (int)(h * 6);
+  const float p = 1 - s, q = 1 - f * s, t = 1 - (1 - f) * s;
+  float rr, gg, bb;
+  switch (hi) {
+    case 0: rr = 1; gg = t; bb = p; break;
+    case 1: rr = q; gg = 1; bb = p; break;
+    case 2: rr = p; gg = 1; bb = t; break;
+    case 3: rr = p; gg = q; bb = 1; break;
+    case 4: rr = t; gg = p; bb = 1; break;
+    default: rr = 1; gg = p; bb = q; break;
+  }
+  auto lin = [](float c) { return (uint32_t)(powf(c, 2.2f) * 255.0f + 0.5f); };
+  return (lin(rr) << 16) | (lin(gg) << 8) | lin(bb);
+}
 
 static inline uint16_t animDelayMs(uint16_t i) {
   const uint16_t* delays = (const uint16_t*)animFrames;
@@ -2651,6 +2748,12 @@ void loop() {
       } else {
         anim = a;
         animValid = true;
+        // Each frame's LED colour, once (~2,000 samples a frame).
+        unsigned long glowStart = millis();
+        const size_t px = (size_t)a.side * a.side;
+        const uint16_t* frames0 = (const uint16_t*)(animFrames + (size_t)a.count * 2);
+        for (uint16_t i = 0; i < a.count; i++) animFrameRGB[i] = frameGlowColour(frames0 + (size_t)i * px, px);
+        Serial.printf("Animation glow colours: %lums\n", millis() - glowStart);
         animIndex = 0;
         animRenderFrame(0);
         showingStartupScreen = false;

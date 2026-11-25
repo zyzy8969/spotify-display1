@@ -197,3 +197,24 @@ Paste your GIPHY key on the Photos page's GIFs tab (or Settings > Advanced) firs
       everyday section for Consumer.
 - [ ] Cloud build with the `GIPHY_API_KEY` secret: GIF search works with nothing pasted. Without it the tab
       says GIF search isn't set up (video still works).
+
+### GIFs round 3 — feat/gif (favourites merged in)
+
+- [ ] Photos tab: touch and hold a shown photo -> star it; a small star appears. Settings > Keychain has
+      "Start-up picture".
+- [ ] GIFs tab: GIFs you show appear in Recent (newest first); touch and hold -> star / remove. Touch and
+      hold a GIPHY result -> "Add to favourites" (appears in Recent with a star).
+- [ ] Start-up picture on, a starred GIF and a starred photo, nothing playing: power-cycle and reconnect a
+      few times -> sometimes the photo, sometimes the GIF, never the same twice in a row. Play a song ->
+      its cover takes over.
+- [ ] Video: pick one -> iOS's trimmer opens (yellow handles, max 15 s) -> Save -> progress -> it plays.
+      A 3 s clip is smooth (12 fps); a 15 s clip is choppier (~5 fps). Cancel / swipe the trimmer away ->
+      nothing is sent.
+- [ ] While a GIF sends, the cover shows "GIFs take longer: about N s" and N is roughly right.
+- [ ] Send a new GIF and watch the app's cover: does it play the keychain's transition? If not, open the
+      Live log: a line "mirror  no draw request for this transition" means the app lost track of the draw
+      (tell Claude); no such line means the mirror ran.
+- [ ] GIF glow: Consumer lights, song light "Album". Play a colourful GIF (e.g. a rainbow one): the LED
+      follows the frames' colours smoothly, no flicker; with nothing playing it still follows (not the idle
+      rainbow). Serial shows `Animation glow colours: <n>ms` (expect well under 200 ms). Other song light
+      modes are unchanged during a GIF.

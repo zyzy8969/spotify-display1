@@ -7,7 +7,10 @@ import AVFoundation
 /// costs a quarter of full-size frames over BLE (owner's choice 2026-11-24: half-res, doubled).
 struct KeychainAnimation {
     static let side = 120
-    static let maxFrames = 48
+    /// What fits the board's 2 MiB frame buffer at 120 px (72 x 28,802 bytes). 6 s of video at 12 fps.
+    static let maxFrames = 72
+    /// The board's limit for the deflated transfer (ANIM_MAX_RAW).
+    static let maxPackedBytes = 2 * 1024 * 1024
     /// The board's own floor (ANIM_MIN_DELAY_MS).
     static let minDelayMs = 30
 
@@ -98,6 +101,21 @@ struct KeychainAnimation {
     }
 }
 
+extension KeychainAnimation {
+    /// Rebuilds a saved animation from its `rawPayload` (delays, then frames) and poster.
+    init?(raw: Data, count: Int, posterJPEG: Data) {
+        let frameBytes = Self.side * Self.side * 2
+        let bytes = [UInt8](raw)
+        guard count > 0, bytes.count == count * 2 + count * frameBytes else { return nil }
+        let delays = (0..<count).map { UInt16(bytes[$0 * 2]) | UInt16(bytes[$0 * 2 + 1]) << 8 }
+        let frames = (0..<count).map { k -> Data in
+            let start = count * 2 + k * frameBytes
+            return Data(bytes[start..<(start + frameBytes)])
+        }
+        self.init(frames: frames, delaysMs: delays, posterJPEG: posterJPEG)
+    }
+}
+
 /// Turns GIF bytes or a video clip into a `KeychainAnimation`. Call off the main thread.
 /// Frames are stretched to the square, nothing cropped off (owner's choice 2026-11-24, same as photos),
 /// and packed with a fixed ordered (Bayer) dither: error diffusion would change every frame (the picture
@@ -110,8 +128,8 @@ enum AnimationPrep {
     }
 
     static let videoFPS = 12.0
-    /// Videos: this many seconds from the chosen start (48 frames at 12 fps).
-    static let videoClipSeconds = 4.0
+    /// Longest video clip (owner's choice 2026-11-24). The iOS trimmer caps the clip at this.
+    static let videoMaxSeconds = 15.0
 
     // MARK: GIF
 
@@ -164,24 +182,14 @@ enum AnimationPrep {
         return s.isFinite && s > 0 ? s : nil
     }
 
-    /// One still of the video at `seconds`, for picking where the GIF starts.
-    static func videoStill(url: URL, at seconds: Double) async -> UIImage? {
-        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 240, height: 240)
-        let time = CMTime(seconds: seconds, preferredTimescale: 600)
-        guard let result = try? await generator.image(at: time),
-              let square = squareImage(result.image, side: 240) else { return nil }
-        return UIImage(cgImage: square)
-    }
-
-    /// `videoClipSeconds` of the video from `start`, at `videoFPS`. `progress` gets 0...1 as frames are
-    /// read. Nil when cancelled or unreadable.
-    static func fromVideo(url: URL, start: Double = 0,
+    /// The whole (already trimmed) video, at most `videoMaxSeconds`, as evenly spaced frames: up to
+    /// `videoFPS`, fewer for a long clip so it fits `maxFrames` (a 15 s clip plays at about 5 fps).
+    /// `progress` gets 0...1 as frames are read. Nil when cancelled or unreadable.
+    static func fromVideo(url: URL,
                           progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> KeychainAnimation? {
         guard let duration = await videoDuration(url: url) else { return nil }
-        let from = max(0, min(start, duration - 0.05))
-        let seconds = min(duration - from, videoClipSeconds)
+        let from = 0.0
+        let seconds = min(duration, videoMaxSeconds)
         guard seconds > 0 else { return nil }
         let count = max(1, min(KeychainAnimation.maxFrames, Int(seconds * videoFPS)))
         let step = seconds / Double(count)

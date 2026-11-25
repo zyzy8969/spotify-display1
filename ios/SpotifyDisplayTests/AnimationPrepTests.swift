@@ -116,6 +116,26 @@ final class AnimationPrepTests: XCTestCase {
         XCTAssertEqual(grey, AnimationPrep.packRGB565Bayer(solid(130), side: side))
     }
 
+    /// A video GIF saved in Recent comes back exactly as it was sent.
+    func testSavedAnimationRoundTrip() throws {
+        let a = KeychainAnimation(frames: [solidFrame(0x1234), solidFrame(0xBEEF), solidFrame(0x0F0F)],
+                                  delaysMs: [80, 120, 2000], posterJPEG: Data([1, 2, 3]))
+        let b = try XCTUnwrap(KeychainAnimation(raw: a.rawPayload, count: 3, posterJPEG: a.posterJPEG))
+        XCTAssertEqual(b.delaysMs, a.delaysMs)
+        XCTAssertEqual(b.frames, a.frames)
+        XCTAssertEqual(b.rawPayload, a.rawPayload)
+        XCTAssertNil(KeychainAnimation(raw: a.rawPayload, count: 2, posterJPEG: Data()))  // wrong count
+    }
+
+    /// Recent GIFs over the cap drop the oldest unstarred one first; starred ones stay.
+    func testTrimKeepsStarred() {
+        struct G { let id: Int; let star: Bool }
+        let items = (0..<5).map { G(id: $0, star: $0 == 4 || $0 == 3) }  // newest first; 3 and 4 starred
+        let (kept, dropped) = PhotoLibraryTrim.trimmed(items, cap: 3, isFavorite: { $0.star })
+        XCTAssertEqual(kept.map(\.id), [0, 3, 4])
+        XCTAssertEqual(dropped.map(\.id), [2, 1])
+    }
+
     /// The raw payload must fit the board's 2 MiB buffer at the app's frame cap.
     func testWorstCasePayloadFitsBoardBuffer() {
         let worst = KeychainAnimation.maxFrames * 2 + KeychainAnimation.maxFrames * side * side * 2

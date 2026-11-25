@@ -16,6 +16,13 @@ reply. Firmware fix with no wire change: the clear-cache command (`0xCAC4E1EA`) 
 `/cache/*.bin` (and leftover `.tmp`). It deleted by bare file name, which failed for every file, then
 emptied the in-memory index anyway, so the app showed 0 while the card kept everything.
 App: GIF frames are now ordered-dithered (8x8 Bayer, same thresholds as `DitherMode.bayer`), not rounded.
+App, later the same day (no wire change): GIFs may now have up to 72 frames (72 x 28,802 bytes fits the 2 MiB
+buffer); videos are trimmed in iOS's own trimmer (up to 15 s) and sampled at up to 12 fps, fewer for a long
+clip; the app refuses a GIF whose deflated stream would pass 2 MiB. Shown GIFs go to a Recent list on the
+phone (GIPHY ones as links only); starred GIFs can be the start-up picture, sent with the 1.25 transfer.
+Firmware, no wire change: while a GIF plays and the 1.23 song light is "album colour" (mode 3), the consumer
+LED follows each frame's colour (worked out on the board when the GIF arrives, same method as the app's
+`AlbumLightColour`, gamma 2.2), gliding over ~150 ms. It wins over the 1.22 idle rainbow.
 
 Version 1.25: GIFs: one 16-byte "ANIM" header + a deflated stream of every frame; the board loops it.
 
