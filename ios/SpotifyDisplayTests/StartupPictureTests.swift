@@ -39,6 +39,35 @@ final class StartupPictureTests: XCTestCase {
         XCTAssertFalse(back[1].isFavorite)
     }
 
+    // MARK: On the keychain's card
+
+    func testIndexSavedBeforeOnBoardFlagCountsAsOnBoard() throws {
+        let old = #"[{"id":"aa","added":0,"favorite":true}]"#
+        let items = try JSONDecoder().decode([PhotoLibrary.Item].self, from: Data(old.utf8))
+        XCTAssertTrue(items[0].isOnBoard)
+    }
+
+    func testBulkAddIsNotOnBoard() {
+        let items = PhotoLibrary.inserting(id: "a", onBoard: false, into: [], now: Date())
+        XCTAssertFalse(items[0].isOnBoard)
+    }
+
+    func testShowingABulkAddedPhotoPutsItOnBoard() {
+        var items = PhotoLibrary.inserting(id: "a", onBoard: false, into: [], now: Date())
+        items = PhotoLibrary.inserting(id: "a", onBoard: true, into: items, now: Date())
+        XCTAssertEqual(items.count, 1)
+        XCTAssertTrue(items[0].isOnBoard)
+    }
+
+    func testBulkReAddKeepsShownPhotoOnBoardAndStarred() {
+        var items = [item("a", starred: true), item("b")]
+        items = PhotoLibrary.inserting(id: "b", onBoard: false, into: items, now: Date())
+        items = PhotoLibrary.inserting(id: "a", onBoard: false, into: items, now: Date())
+        XCTAssertEqual(items.map(\.id), ["a", "b"])
+        XCTAssertTrue(items.allSatisfy(\.isOnBoard))
+        XCTAssertTrue(items[0].isFavorite)
+    }
+
     // MARK: Cap
 
     func testCapDropsOldestUnstarredFirst() {
