@@ -52,6 +52,19 @@ SpotifyDisplay.swiftpm/.build/
 **/GoogleService-Info.plist
 
 # Local tooling / artifacts
-.claude/
-.cursor/
+# Skills + agents ARE committed so they travel with the repo (any account/machine).
+.claude/*
+!.claude/skills/
+!.claude/agents/
+.claude/settings.local.json
+.claude/worktrees/
+.cursor/*
+!.cursor/skills/
+!.cursor/agents/
+.codex/
+.impeccable/config.local.json
 *.zip
+
+# Downloaded CI builds (get them from GitHub Actions instead)
+build-ipa/
+*.ipa

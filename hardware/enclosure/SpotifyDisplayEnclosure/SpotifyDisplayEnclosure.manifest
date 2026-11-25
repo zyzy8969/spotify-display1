@@ -1,0 +1,10 @@
+{
+	"autodeskProduct": "Fusion",
+	"type": "script",
+	"author": "",
+	"description": {
+		"": "Spotify Display enclosure V1 for the Waveshare ESP32-S3-LCD-1.3 (shell + lid, exports STLs)"
+	},
+	"supportedOS": "windows|mac",
+	"editEnabled": true
+}
