@@ -43,7 +43,6 @@ For day-to-day tracking, see [`PROJECT_STATUS.md`](PROJECT_STATUS.md) and [`TODO
 | [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | Session status snapshot |
 | [`TODO_SWIFT.md`](TODO_SWIFT.md) | Roadmap and next priorities |
 | [`resources/`](resources/) | ST7789 tuning notes/references |
-| [`python/`](python/) | Archived prototype sender tools |
 
 ---
 

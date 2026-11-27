@@ -2,7 +2,7 @@ import SwiftUI
 import CoreBluetooth
 import UIKit
 
-/// ESP32 GATT contract — repo `spotify-display1`: `docs/BLE_PROTOCOL.md`, `src/main.cpp`, `python/spotify_album_sender.py`.
+/// ESP32 GATT contract — repo `spotify-display1`: `docs/BLE_PROTOCOL.md`, `src/main.cpp`.
 @MainActor
 final class BLEManager: NSObject, ObservableObject {
     @Published private(set) var isConnected = false

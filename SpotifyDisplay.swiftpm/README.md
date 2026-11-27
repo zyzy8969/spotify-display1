@@ -2,9 +2,9 @@
 
 **Monorepo:** `spotify-display1` — **full layout and limitations:** [../README.md](../README.md)
 
-**BLE contract (shared with firmware + Python):** [../docs/BLE_PROTOCOL.md](../docs/BLE_PROTOCOL.md)
+**BLE contract (shared with firmware):** [../docs/BLE_PROTOCOL.md](../docs/BLE_PROTOCOL.md)
 
-Native iOS sender for the ESP32 **Spotify Display** firmware: BLE GATT matches [`main.cpp`](../src/main.cpp) (same protocol as [`python/spotify_album_sender.py`](../python/spotify_album_sender.py)).
+Native iOS sender for the ESP32 **Spotify Display** firmware: BLE GATT matches [`main.cpp`](../src/main.cpp).
 
 ## Requirements
 

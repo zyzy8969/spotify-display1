@@ -5,15 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 Spotify Display (`zyzy8969/spotify-display1`) — a digital keychain that shows live Spotify
-listening as album art. Three cooperating parts:
+listening as album art. Two cooperating parts:
 
 - **ESP32-S3 firmware** (`src/main.cpp`, C++/Arduino via PlatformIO) — BLE GATT peripheral,
   SD-card album-art cache, 240x240 ST7789 LCD, 107 animated transitions (indices 0-116, shared core; BLE 1.15) (frame-composed ones use
   two extra PSRAM buffers, `prevBuffer`/`composeBuffer`).
 - **iOS app** (`SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/`, Swift/SwiftUI) — the active
   client: Spotify PKCE auth, ~1 Hz now-playing poll, art download, RGB565 conversion, BLE send.
-- **Python tools** (`python/`) — archived prototype sender/color-tuning scripts. Not the active
-  client; kept for reference.
+The archived Python prototype tools (`python/`) were removed 2026-11-26; they are in git history if ever needed.
 
 GIFs (BLE 1.25, 2026-11-24): GIPHY search or 4 s of one video on the Photos page's GIFs tab (nothing saved;
 frames stretched to square), 120x120 frames held in PSRAM and looped by `animTick()` in `loop()`; never on SD.
@@ -38,8 +37,8 @@ The owner develops on **Windows and has no Mac — Xcode is unavailable locally.
 
 - **Work only on a new git branch. Never commit to `main`.**
 - **Ask before**: deleting files, changing the BLE protocol, or changing pin/hardware config.
-- The BLE protocol is a **shared contract** between firmware, the iOS app, and the Python
-  scripts. If any of them changes, keep the others in sync, update `docs/BLE_PROTOCOL.md`
+- The BLE protocol is a **shared contract** between firmware and the iOS app. If either
+  changes, keep the other in sync, update `docs/BLE_PROTOCOL.md`
   (it carries its own version number), and say explicitly what changed.
 - Small steps. After each, say what to verify on the device.
 
@@ -86,14 +85,6 @@ authoritative check.
 Unit tests live in `ios/SpotifyDisplayTests/` (a test target only in the generated xcodeproj, not in
 `SpotifyDisplay.swiftpm`). CI runs them on a simulator after the IPA upload. The generator picks up every `.swift`
 file in that folder; re-run it after adding one.
-
-### Python tools
-
-```powershell
-cd python; python -m venv venv; venv\Scripts\activate; pip install -r requirements.txt
-```
-
-Copy `env.example` to `.env` for `SPOTIFY_CLIENT_ID`/`SECRET`. `.env` is gitignored.
 
 ## Architecture
 

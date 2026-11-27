@@ -1,6 +1,6 @@
 # BLE protocol (Spotify Display)
 
-**Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp`, `python/spotify_album_sender.py`, and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
+**Repository:** `spotify-display1` (root). Keep this file aligned with `src/main.cpp` and `SpotifyDisplay.swiftpm/Sources/SpotifyDisplay/BLEManager.swift`.
 
 Version: **1.26** (GIF replay: the board shows the GIF it still holds again, for the cover <-> GIF flip.)
 
